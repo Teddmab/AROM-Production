@@ -6,7 +6,24 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", ".output", ".vinxi"] },
+  {
+    // These are regenerated on every build by @lovable.dev/mcp-js's Vite
+    // plugin (or the TanStack router plugin) — linting them is pointless
+    // since any fix is overwritten on the next `vite build`. Listed as
+    // literal paths, not globs: minimatch treats `[...]` as a character
+    // class, so a glob like "src/routes/[.mcp]/**" silently fails to match
+    // the literal `[.mcp]` directory Lovable's plugin actually emits.
+    ignores: [
+      "dist",
+      ".output",
+      ".vinxi",
+      "src/routeTree.gen.ts",
+      "src/routes/mcp.ts",
+      "src/routes/\\[.mcp\\]/list-tools.ts",
+      "src/routes/\\[.mcp\\]/invoke-tool/$tool.ts",
+      "src/routes/\\[.well-known\\]/oauth-protected-resource.ts",
+    ],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],
