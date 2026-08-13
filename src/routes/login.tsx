@@ -1,7 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
-import logoAsset from "@/assets/arom-logo.asset.json";
 import { useAuth } from "@/lib/firebase/auth";
 
 export const Route = createFileRoute("/login")({
@@ -43,60 +42,59 @@ function LoginRoute() {
   };
 
   return (
-    <div className="grid min-h-screen place-items-center bg-background px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-8 shadow-lg">
-        <div className="flex flex-col items-center gap-3 text-center">
+    <div className="grid min-h-screen place-items-center bg-background px-5 py-12">
+      <div className="w-full max-w-95">
+        <div className="flex flex-col items-center gap-4 text-center">
           <img
-            src={logoAsset.url}
+            src="/logo-nav.png"
             alt="AROM"
-            className="h-14 w-14 rounded-full object-cover ring-2 ring-gold/40"
+            className="h-20 w-20 rounded-[22px] object-cover shadow-lg shadow-primary/15 ring-1 ring-black/5"
           />
           <div>
-            <p className="font-display text-lg font-bold text-primary">AROM</p>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gold">
-              Espace connecté
-            </p>
+            <h1 className="font-display text-[28px] font-bold leading-tight text-primary">
+              Se connecter
+            </h1>
+            <p className="mt-1 text-[15px] text-muted-foreground">Espace connecté AROM</p>
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-          <label className="block text-xs font-medium text-muted-foreground">
-            E-mail
+        <form onSubmit={handleSubmit} className="mt-8 space-y-3">
+          <div className="overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
             <input
               type="email"
               required
               autoComplete="username"
+              placeholder="E-mail"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+              className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
             />
-          </label>
-          <label className="block text-xs font-medium text-muted-foreground">
-            Mot de passe
+            <div className="h-px bg-border/70" />
             <input
               type="password"
               required
               autoComplete="current-password"
+              placeholder="Mot de passe"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+              className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
             />
-          </label>
+          </div>
 
-          {error && <p className="text-xs font-medium text-destructive">{error}</p>}
+          {error && <p className="px-1 text-[13px] font-medium text-destructive">{error}</p>}
 
           <button
             type="submit"
             disabled={busy}
-            className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:opacity-60"
+            className="w-full rounded-2xl bg-primary py-3.5 text-[15px] font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition active:scale-[0.98] disabled:opacity-60"
           >
             {busy ? "Connexion…" : "Se connecter"}
           </button>
         </form>
 
-        <p className="mt-6 text-center text-xs text-muted-foreground">
+        <p className="mt-8 text-center text-[13px] text-muted-foreground">
           Partenaire acheteur ?{" "}
-          <Link to="/storefront/signup" className="font-semibold text-primary hover:underline">
+          <Link to="/storefront/signup" className="font-semibold text-primary">
             Créer un compte boutique
           </Link>
         </p>
