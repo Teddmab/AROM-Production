@@ -10,9 +10,9 @@ import {
 import { useEffect, type ReactNode } from "react";
 import { Toaster } from "sonner";
 
-
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { AuthProvider } from "../lib/firebase/auth";
 
 function NotFoundComponent() {
   return (
@@ -80,20 +80,43 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "AROM — Saveurs Naturelles · Tableau de bord" },
-      { name: "description", content: "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas." },
+      {
+        name: "description",
+        content:
+          "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas.",
+      },
       { property: "og:title", content: "AROM — Saveurs Naturelles · Tableau de bord" },
-      { property: "og:description", content: "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas." },
+      {
+        property: "og:description",
+        content:
+          "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: "AROM — Saveurs Naturelles · Tableau de bord" },
-      { name: "twitter:description", content: "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas." },
-      { property: "og:image", content: "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp" },
-      { name: "twitter:image", content: "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp" },
+      {
+        name: "twitter:description",
+        content:
+          "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas.",
+      },
+      {
+        property: "og:image",
+        content:
+          "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp",
+      },
+      {
+        name: "twitter:image",
+        content:
+          "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp",
+      },
     ],
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "" },
-      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700;9..144,800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700;9..144,800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap",
+      },
       {
         rel: "stylesheet",
         href: appCss,
@@ -125,10 +148,11 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
-      <Toaster position="top-right" richColors />
+      <AuthProvider>
+        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+        <Outlet />
+        <Toaster position="top-right" richColors />
+      </AuthProvider>
     </QueryClientProvider>
   );
-
 }

@@ -12,7 +12,11 @@ export default defineTool({
   handler: () => {
     const c = computeErp(SEED);
     const summary = {
-      approvisionnement: { kgAchetes: c.kgAchetes, coutAchats: c.coutAchats, coutTransport: c.coutTransport },
+      approvisionnement: {
+        kgAchetes: c.kgAchetes,
+        coutAchats: c.coutAchats,
+        coutTransport: c.coutTransport,
+      },
       production: {
         bouteillesProduites: c.bouteillesProduites,
         volumeJusL: c.volumeJus,
@@ -21,7 +25,11 @@ export default defineTool({
         rendementMoyen: c.rendementMoyen,
         valeurProduction: c.valeurProduction,
       },
-      stocks: { matierePremierePieces: c.stockMPPieces, matierePremiereValeur: c.stockMPValeur, produitsFinis: c.stockPF },
+      stocks: {
+        matierePremierePieces: c.stockMPPieces,
+        matierePremiereValeur: c.stockMPValeur,
+        produitsFinis: c.stockPF,
+      },
       ventes: {
         bouteillesVendues: c.bouteillesVendues,
         chiffreAffaires: c.ca,
@@ -42,7 +50,12 @@ export default defineTool({
         commissionCommerciale: c.commissionCommerciale,
         totalPrimes: c.totalPrimes,
       },
-      marketing: { coutMarketing: c.coutMarketing, contacts: c.contactsTouches, prospects: c.prospects, roi: c.roiMarketing },
+      marketing: {
+        coutMarketing: c.coutMarketing,
+        contacts: c.contactsTouches,
+        prospects: c.prospects,
+        roi: c.roiMarketing,
+      },
       devise: "FC",
     };
     return {

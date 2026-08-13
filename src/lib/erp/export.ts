@@ -42,7 +42,10 @@ export const SECTION_LABELS: Record<ExportSection, { titre: string; responsable:
   appro: { titre: "Approvisionnement", responsable: "Directeur de production" },
   production: { titre: "Production", responsable: "Directeur de production" },
   stock: { titre: "Stocks", responsable: "Directeur de production" },
-  commercialisation: { titre: "Ventes & commercialisation", responsable: "Chargée de commercialisation" },
+  commercialisation: {
+    titre: "Ventes & commercialisation",
+    responsable: "Chargée de commercialisation",
+  },
   marketing: { titre: "Marketing & communication", responsable: "Chargée de commercialisation" },
   finances: { titre: "Finances", responsable: "Direction générale" },
 };
@@ -52,7 +55,8 @@ export const SECTION_LABELS: Record<ExportSection, { titre: string; responsable:
 const inPeriode = (date: string, f: ExportFilter) =>
   (!f.from || date >= f.from) && (!f.to || date <= f.to);
 
-const matchCampagne = (tag: string | undefined, f: ExportFilter) => !f.campagne || tag === f.campagne;
+const matchCampagne = (tag: string | undefined, f: ExportFilter) =>
+  !f.campagne || tag === f.campagne;
 
 export function campagnesDisponibles(state: ErpState): string[] {
   const tags = [
@@ -66,7 +70,9 @@ export function campagnesDisponibles(state: ErpState): string[] {
 export function filterErpState(state: ErpState, f: ExportFilter): ErpState {
   return {
     ...state,
-    approvisionnements: state.approvisionnements.filter((r) => inPeriode(r.date, f) && matchCampagne(r.numero, f)),
+    approvisionnements: state.approvisionnements.filter(
+      (r) => inPeriode(r.date, f) && matchCampagne(r.numero, f),
+    ),
     productions: state.productions.filter((r) => inPeriode(r.date, f) && matchCampagne(r.lot, f)),
     stockMP: state.stockMP.filter((r) => inPeriode(r.date, f)),
     ventes: state.ventes.filter((r) => inPeriode(r.date, f)),
@@ -87,12 +93,64 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
       title: "Indicateurs clés de la campagne",
       headers: ["Indicateur", "Objectif", "Réalisé", "Taux"],
       rows: [
-        ["Ananas achetés (kg)", state.parametres.objectifAnanasKg, n(c.kgAchetes), pctFormat(state.parametres.objectifAnanasKg ? c.kgAchetes / state.parametres.objectifAnanasKg : 0)],
-        ["Ananas transformés (kg)", state.parametres.objectifAnanasKg, n(c.kgTransformes), pctFormat(state.parametres.objectifAnanasKg ? c.kgTransformes / state.parametres.objectifAnanasKg : 0)],
-        ["Bouteilles produites", state.parametres.objectifBouteilles, c.bouteillesProduites, pctFormat(state.parametres.objectifBouteilles ? c.bouteillesProduites / state.parametres.objectifBouteilles : 0)],
-        ["Bouteilles vendues", state.parametres.objectifBouteilles, c.bouteillesVendues, pctFormat(state.parametres.objectifBouteilles ? c.bouteillesVendues / state.parametres.objectifBouteilles : 0)],
-        ["Clients actifs", state.parametres.objectifClients, c.clientsActifs, pctFormat(state.parametres.objectifClients ? c.clientsActifs / state.parametres.objectifClients : 0)],
-        ["Marge brute", pctFormat(state.parametres.objectifMargeBrute), pctFormat(c.margeBrute), pctFormat(state.parametres.objectifMargeBrute ? c.margeBrute / state.parametres.objectifMargeBrute : 0)],
+        [
+          "Ananas achetés (kg)",
+          state.parametres.objectifAnanasKg,
+          n(c.kgAchetes),
+          pctFormat(
+            state.parametres.objectifAnanasKg ? c.kgAchetes / state.parametres.objectifAnanasKg : 0,
+          ),
+        ],
+        [
+          "Ananas transformés (kg)",
+          state.parametres.objectifAnanasKg,
+          n(c.kgTransformes),
+          pctFormat(
+            state.parametres.objectifAnanasKg
+              ? c.kgTransformes / state.parametres.objectifAnanasKg
+              : 0,
+          ),
+        ],
+        [
+          "Bouteilles produites",
+          state.parametres.objectifBouteilles,
+          c.bouteillesProduites,
+          pctFormat(
+            state.parametres.objectifBouteilles
+              ? c.bouteillesProduites / state.parametres.objectifBouteilles
+              : 0,
+          ),
+        ],
+        [
+          "Bouteilles vendues",
+          state.parametres.objectifBouteilles,
+          c.bouteillesVendues,
+          pctFormat(
+            state.parametres.objectifBouteilles
+              ? c.bouteillesVendues / state.parametres.objectifBouteilles
+              : 0,
+          ),
+        ],
+        [
+          "Clients actifs",
+          state.parametres.objectifClients,
+          c.clientsActifs,
+          pctFormat(
+            state.parametres.objectifClients
+              ? c.clientsActifs / state.parametres.objectifClients
+              : 0,
+          ),
+        ],
+        [
+          "Marge brute",
+          pctFormat(state.parametres.objectifMargeBrute),
+          pctFormat(c.margeBrute),
+          pctFormat(
+            state.parametres.objectifMargeBrute
+              ? c.margeBrute / state.parametres.objectifMargeBrute
+              : 0,
+          ),
+        ],
       ],
     });
     blocks.push({
@@ -115,8 +173,16 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
       title: "Indicateurs stratégiques",
       headers: ["Indicateur", "Objectif", "Réalisé"],
       rows: [
-        ["Taux de transformation", "100 %", pctFormat(c.kgAchetes ? c.kgTransformes / c.kgAchetes : 0)],
-        ["Taux de vente", "100 %", pctFormat(c.bouteillesProduites ? c.bouteillesVendues / c.bouteillesProduites : 0)],
+        [
+          "Taux de transformation",
+          "100 %",
+          pctFormat(c.kgAchetes ? c.kgTransformes / c.kgAchetes : 0),
+        ],
+        [
+          "Taux de vente",
+          "100 %",
+          pctFormat(c.bouteillesProduites ? c.bouteillesVendues / c.bouteillesProduites : 0),
+        ],
         ["Taux d'encaissement", "100 %", pctFormat(c.tauxEncaissement)],
         ["Rendement matière", "> 95 %", pctFormat(c.rendementMoyen)],
         ["Pertes", `< ${pctFormat(state.parametres.tauxPertesMax)}`, pctFormat(c.tauxPertes)],
@@ -134,8 +200,34 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   if (section === "appro") {
     blocks.push({
       title: "Achats fournisseurs",
-      headers: ["N°", "Date", "Fournisseur", "Village", "Commandé (kg)", "Reçu (kg)", "Prix/kg", "Transport", "Autres frais", "Qualité", "Valeur achat", "Coût total"],
-      rows: c.appro.map((r) => [r.numero, r.date, r.fournisseur, r.village, r.qteCommandeeKg, r.qteRecueKg, r.prixKg, r.transport, r.autresFrais, r.qualite, n(r.valeurAchat), n(r.coutTotal)]),
+      headers: [
+        "N°",
+        "Date",
+        "Fournisseur",
+        "Village",
+        "Commandé (kg)",
+        "Reçu (kg)",
+        "Prix/kg",
+        "Transport",
+        "Autres frais",
+        "Qualité",
+        "Valeur achat",
+        "Coût total",
+      ],
+      rows: c.appro.map((r) => [
+        r.numero,
+        r.date,
+        r.fournisseur,
+        r.village,
+        r.qteCommandeeKg,
+        r.qteRecueKg,
+        r.prixKg,
+        r.transport,
+        r.autresFrais,
+        r.qualite,
+        n(r.valeurAchat),
+        n(r.coutTotal),
+      ]),
     });
     blocks.push({
       title: "Synthèse approvisionnement",
@@ -145,7 +237,10 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         ["Objectif kg", state.parametres.objectifAnanasKg],
         ["Coût des achats", fcFormat(c.coutAchats)],
         ["Transport & frais", fcFormat(c.coutTransport)],
-        ["Coût moyen / kg", fcFormat(c.kgAchetes ? (c.coutAchats + c.coutTransport) / c.kgAchetes : 0)],
+        [
+          "Coût moyen / kg",
+          fcFormat(c.kgAchetes ? (c.coutAchats + c.coutTransport) / c.kgAchetes : 0),
+        ],
       ],
     });
   }
@@ -153,8 +248,36 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   if (section === "production") {
     blocks.push({
       title: "Lots de production",
-      headers: ["Lot", "Date", "Kg utilisés", "Volume jus (L)", "500 ml", "330 ml", "300 ml", "Total bouteilles", "Rejets", "Pertes (L)", "Rendement", "Valeur production", "Responsable"],
-      rows: c.production.map((r) => [r.lot, r.date, n(r.kgUtilises), n(r.volumeJusL), r.q500, r.q330, r.q300, r.totalBouteilles, r.rejets, n(r.pertesL), pctFormat(r.rendement), n(r.valeurProduction), r.responsable]),
+      headers: [
+        "Lot",
+        "Date",
+        "Kg utilisés",
+        "Volume jus (L)",
+        "500 ml",
+        "330 ml",
+        "300 ml",
+        "Total bouteilles",
+        "Rejets",
+        "Pertes (L)",
+        "Rendement",
+        "Valeur production",
+        "Responsable",
+      ],
+      rows: c.production.map((r) => [
+        r.lot,
+        r.date,
+        n(r.kgUtilises),
+        n(r.volumeJusL),
+        r.q500,
+        r.q330,
+        r.q300,
+        r.totalBouteilles,
+        r.rejets,
+        n(r.pertesL),
+        pctFormat(r.rendement),
+        n(r.valeurProduction),
+        r.responsable,
+      ]),
     });
     blocks.push({
       title: "Synthèse production",
@@ -174,8 +297,26 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   if (section === "stock") {
     blocks.push({
       title: "Mouvements matières premières",
-      headers: ["Date", "Produit", "Unité", "Type", "Entrée", "Sortie", "Coût unitaire", "Observation"],
-      rows: state.stockMP.map((m) => [m.date, m.produit, m.unite, m.type, m.entree, m.sortie, m.coutUnitaire, m.observation]),
+      headers: [
+        "Date",
+        "Produit",
+        "Unité",
+        "Type",
+        "Entrée",
+        "Sortie",
+        "Coût unitaire",
+        "Observation",
+      ],
+      rows: state.stockMP.map((m) => [
+        m.date,
+        m.produit,
+        m.unite,
+        m.type,
+        m.entree,
+        m.sortie,
+        m.coutUnitaire,
+        m.observation,
+      ]),
     });
     blocks.push({
       title: "Stock produits finis",
@@ -196,8 +337,36 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   if (section === "commercialisation") {
     blocks.push({
       title: "Ventes",
-      headers: ["N°", "Date", "Client", "Canal", "Format", "Quantité", "Prix unitaire", "Remise", "Montant brut", "Encaissé", "Solde dû", "Statut", "Commerciale"],
-      rows: c.ventes.map((v) => [v.numero, v.date, v.client, v.canal, v.format, v.quantite, v.prixUnitaire, v.remise, n(v.montantBrut), n(v.encaisse), n(v.soldeDu), v.statutPaiement, v.commerciale]),
+      headers: [
+        "N°",
+        "Date",
+        "Client",
+        "Canal",
+        "Format",
+        "Quantité",
+        "Prix unitaire",
+        "Remise",
+        "Montant brut",
+        "Encaissé",
+        "Solde dû",
+        "Statut",
+        "Commerciale",
+      ],
+      rows: c.ventes.map((v) => [
+        v.numero,
+        v.date,
+        v.client,
+        v.canal,
+        v.format,
+        v.quantite,
+        v.prixUnitaire,
+        v.remise,
+        n(v.montantBrut),
+        n(v.encaisse),
+        n(v.soldeDu),
+        v.statutPaiement,
+        v.commerciale,
+      ]),
     });
     blocks.push({
       title: "Synthèse commerciale",
@@ -217,8 +386,32 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   if (section === "marketing") {
     blocks.push({
       title: "Actions marketing",
-      headers: ["N°", "Date", "Campagne", "Canal", "Cible", "Description", "Budget", "Coût réel", "Contacts", "Prospects", "Ventes générées"],
-      rows: state.marketing.map((m) => [m.numero, m.date, m.campagne, m.canal, m.cible, m.description, m.budget, m.coutReel, m.contacts, m.prospects, m.ventesGenerees]),
+      headers: [
+        "N°",
+        "Date",
+        "Campagne",
+        "Canal",
+        "Cible",
+        "Description",
+        "Budget",
+        "Coût réel",
+        "Contacts",
+        "Prospects",
+        "Ventes générées",
+      ],
+      rows: state.marketing.map((m) => [
+        m.numero,
+        m.date,
+        m.campagne,
+        m.canal,
+        m.cible,
+        m.description,
+        m.budget,
+        m.coutReel,
+        m.contacts,
+        m.prospects,
+        m.ventesGenerees,
+      ]),
     });
     blocks.push({
       title: "Synthèse marketing",
@@ -259,8 +452,18 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
       title: "Primes & commissions",
       headers: ["Bénéficiaire", "Base", "Taux", "Montant"],
       rows: [
-        ["Directeur de production", fcFormat(c.valeurProduction), pctFormat(state.parametres.tauxPrimeProduction), fcFormat(c.primeProduction)],
-        ["Chargée de commercialisation", fcFormat(c.encaissements), pctFormat(state.parametres.tauxCommission), fcFormat(c.commissionCommerciale)],
+        [
+          "Directeur de production",
+          fcFormat(c.valeurProduction),
+          pctFormat(state.parametres.tauxPrimeProduction),
+          fcFormat(c.primeProduction),
+        ],
+        [
+          "Chargée de commercialisation",
+          fcFormat(c.encaissements),
+          pctFormat(state.parametres.tauxCommission),
+          fcFormat(c.commissionCommerciale),
+        ],
       ],
     });
   }
@@ -281,7 +484,11 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
   return { section, titre: meta.titre, responsable: meta.responsable, blocks };
 }
 
-export function buildFilteredReport(section: ExportSection, state: ErpState, f: ExportFilter): Report {
+export function buildFilteredReport(
+  section: ExportSection,
+  state: ErpState,
+  f: ExportFilter,
+): Report {
   const filtered = filterErpState(state, f);
   return buildReport(section, filtered, computeErp(filtered));
 }
@@ -289,7 +496,9 @@ export function buildFilteredReport(section: ExportSection, state: ErpState, f: 
 /* ---------- Rendu ---------- */
 
 const periodeLabel = (f: ExportFilter) =>
-  f.from || f.to ? `${f.from ? `du ${f.from}` : "jusqu'au"} ${f.to ? `au ${f.to}` : ""}`.trim() : "Toute la période";
+  f.from || f.to
+    ? `${f.from ? `du ${f.from}` : "jusqu'au"} ${f.to ? `au ${f.to}` : ""}`.trim()
+    : "Toute la période";
 
 const campagneLabel = (f: ExportFilter) => f.campagne || "Toutes les campagnes";
 
@@ -331,7 +540,10 @@ export function exportExcel(report: Report, f: ExportFilter) {
 }
 
 const esc = (v: string | number) =>
-  String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 
 export function exportPdf(report: Report, f: ExportFilter, logoUrl?: string) {
   const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -368,7 +580,8 @@ export function exportPdf(report: Report, f: ExportFilter, logoUrl?: string) {
 </div>
 ${report.blocks
   .map(
-    (b) => `<h2>${esc(b.title)}</h2>` +
+    (b) =>
+      `<h2>${esc(b.title)}</h2>` +
       (b.rows.length === 0
         ? `<p class="empty">Aucune donnée sur la période sélectionnée.</p>`
         : `<table><thead><tr>${b.headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${b.rows
@@ -377,7 +590,7 @@ ${report.blocks
   )
   .join("")}
 <footer>Document généré automatiquement par l'ERP AROM — usage interne.</footer>
-<script>window.onload = function () { setTimeout(function(){ window.print(); }, 250); };<\/script>
+<script>window.onload = function () { setTimeout(function(){ window.print(); }, 250); };</script>
 </body></html>`;
 
   const w = window.open("", "_blank", "width=1100,height=800");

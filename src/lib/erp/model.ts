@@ -8,7 +8,13 @@
 export type Format = "500 ml" | "330 ml" | "300 ml";
 export type Qualite = "Conforme" | "Rejeté" | "À vérifier";
 export type StatutPaiement = "Payé" | "Partiel" | "À crédit";
-export type Canal = "Hôtel" | "Restaurant" | "Boutique" | "Supermarché" | "Particulier" | "Grossiste";
+export type Canal =
+  | "Hôtel"
+  | "Restaurant"
+  | "Boutique"
+  | "Supermarché"
+  | "Particulier"
+  | "Grossiste";
 export type TypeMouvement = "Entrée" | "Sortie" | "Ajustement";
 
 export interface Parametres {
@@ -195,16 +201,102 @@ export const SEED: ErpState = {
     },
   ],
   productions: [
-    { id: "PRO-1", lot: "001_AROM", date: "2026-07-10", kgUtilises: 133.9, volumeJusL: 60, q500: 120, q330: 0, q300: 0, rejets: 0, responsable: "Directeur de production", statut: "Terminé" },
-    { id: "PRO-2", lot: "001_AROM", date: "2026-07-11", kgUtilises: 171.2, volumeJusL: 73.5, q500: 147, q330: 0, q300: 0, rejets: 0, responsable: "Directeur de production", statut: "Terminé" },
-    { id: "PRO-3", lot: "001_AROM", date: "2026-07-12", kgUtilises: 165.3, volumeJusL: 82.65, q500: 103, q330: 0, q300: 0, rejets: 0, responsable: "Directeur de production", statut: "Terminé" },
+    {
+      id: "PRO-1",
+      lot: "001_AROM",
+      date: "2026-07-10",
+      kgUtilises: 133.9,
+      volumeJusL: 60,
+      q500: 120,
+      q330: 0,
+      q300: 0,
+      rejets: 0,
+      responsable: "Directeur de production",
+      statut: "Terminé",
+    },
+    {
+      id: "PRO-2",
+      lot: "001_AROM",
+      date: "2026-07-11",
+      kgUtilises: 171.2,
+      volumeJusL: 73.5,
+      q500: 147,
+      q330: 0,
+      q300: 0,
+      rejets: 0,
+      responsable: "Directeur de production",
+      statut: "Terminé",
+    },
+    {
+      id: "PRO-3",
+      lot: "001_AROM",
+      date: "2026-07-12",
+      kgUtilises: 165.3,
+      volumeJusL: 82.65,
+      q500: 103,
+      q330: 0,
+      q300: 0,
+      rejets: 0,
+      responsable: "Directeur de production",
+      statut: "Terminé",
+    },
   ],
   stockMP: [
-    { id: "MP-1", date: "2026-07-07", produit: "Ananas", unite: "Pièce", type: "Entrée", entree: 334, sortie: 0, coutUnitaire: 1044, observation: "Stock 1 chez Musube" },
-    { id: "MP-2", date: "2026-07-10", produit: "Ananas", unite: "Pièce", type: "Sortie", entree: 0, sortie: 103, coutUnitaire: 1044, observation: "Transformation chez AROM" },
-    { id: "MP-3", date: "2026-07-11", produit: "Ananas", unite: "Pièce", type: "Sortie", entree: 0, sortie: 107, coutUnitaire: 1044, observation: "Transformation chez AROM" },
-    { id: "MP-4", date: "2026-07-12", produit: "Ananas", unite: "Pièce", type: "Sortie", entree: 0, sortie: 114, coutUnitaire: 1044, observation: "Transformation chez AROM" },
-    { id: "MP-5", date: "2026-07-18", produit: "Ananas", unite: "Pièce", type: "Sortie", entree: 0, sortie: 6, coutUnitaire: 1044, observation: "Consommation Hôtel Chez Musube" },
+    {
+      id: "MP-1",
+      date: "2026-07-07",
+      produit: "Ananas",
+      unite: "Pièce",
+      type: "Entrée",
+      entree: 334,
+      sortie: 0,
+      coutUnitaire: 1044,
+      observation: "Stock 1 chez Musube",
+    },
+    {
+      id: "MP-2",
+      date: "2026-07-10",
+      produit: "Ananas",
+      unite: "Pièce",
+      type: "Sortie",
+      entree: 0,
+      sortie: 103,
+      coutUnitaire: 1044,
+      observation: "Transformation chez AROM",
+    },
+    {
+      id: "MP-3",
+      date: "2026-07-11",
+      produit: "Ananas",
+      unite: "Pièce",
+      type: "Sortie",
+      entree: 0,
+      sortie: 107,
+      coutUnitaire: 1044,
+      observation: "Transformation chez AROM",
+    },
+    {
+      id: "MP-4",
+      date: "2026-07-12",
+      produit: "Ananas",
+      unite: "Pièce",
+      type: "Sortie",
+      entree: 0,
+      sortie: 114,
+      coutUnitaire: 1044,
+      observation: "Transformation chez AROM",
+    },
+    {
+      id: "MP-5",
+      date: "2026-07-18",
+      produit: "Ananas",
+      unite: "Pièce",
+      type: "Sortie",
+      entree: 0,
+      sortie: 6,
+      coutUnitaire: 1044,
+      observation: "Consommation Hôtel Chez Musube",
+    },
   ],
   clients: [],
   ventes: [],
@@ -218,7 +310,14 @@ export const SEED: ErpState = {
 };
 
 export const FORMATS: Format[] = ["500 ml", "330 ml", "300 ml"];
-export const CANAUX: Canal[] = ["Hôtel", "Restaurant", "Boutique", "Supermarché", "Grossiste", "Particulier"];
+export const CANAUX: Canal[] = [
+  "Hôtel",
+  "Restaurant",
+  "Boutique",
+  "Supermarché",
+  "Grossiste",
+  "Particulier",
+];
 export const QUALITES: Qualite[] = ["Conforme", "Rejeté", "À vérifier"];
 export const STATUTS_PAIEMENT: StatutPaiement[] = ["Payé", "Partiel", "À crédit"];
 
@@ -227,6 +326,8 @@ export function prixFormat(p: Parametres, f: Format): number {
 }
 
 export const fcFormat = (n: number) =>
-  `${Math.round(n).toLocaleString("fr-FR").replace(/\u202f|\u00a0/g, " ")} FC`;
+  `${Math.round(n)
+    .toLocaleString("fr-FR")
+    .replace(/\u202f|\u00a0/g, " ")} FC`;
 
 export const pctFormat = (n: number) => `${(n * 100).toFixed(1)} %`;

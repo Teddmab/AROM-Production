@@ -38,7 +38,10 @@ export function ExportBar({ section }: { section: ExportSection }) {
     <section className="mb-6 rounded-2xl border border-border bg-card p-4 shadow-sm">
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <label className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground" htmlFor={`camp-${section}`}>
+          <label
+            className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+            htmlFor={`camp-${section}`}
+          >
             Campagne
           </label>
           <select
@@ -57,17 +60,35 @@ export function ExportBar({ section }: { section: ExportSection }) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground" htmlFor={`from-${section}`}>
+          <label
+            className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+            htmlFor={`from-${section}`}
+          >
             Du
           </label>
-          <input id={`from-${section}`} type="date" value={filter.from} onChange={(e) => set({ from: e.target.value })} className={inputCls} />
+          <input
+            id={`from-${section}`}
+            type="date"
+            value={filter.from}
+            onChange={(e) => set({ from: e.target.value })}
+            className={inputCls}
+          />
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground" htmlFor={`to-${section}`}>
+          <label
+            className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+            htmlFor={`to-${section}`}
+          >
             Au
           </label>
-          <input id={`to-${section}`} type="date" value={filter.to} onChange={(e) => set({ to: e.target.value })} className={inputCls} />
+          <input
+            id={`to-${section}`}
+            type="date"
+            value={filter.to}
+            onChange={(e) => set({ to: e.target.value })}
+            className={inputCls}
+          />
         </div>
 
         <div className="ml-auto flex flex-wrap gap-2">

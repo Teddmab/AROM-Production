@@ -12,11 +12,23 @@ export default defineTool({
     prix500: z.number().optional().describe("Prix de vente du format 500 ml en FC."),
     prix330: z.number().optional().describe("Prix de vente du format 330 ml en FC."),
     prix300: z.number().optional().describe("Prix de vente du format 300 ml en FC."),
-    tauxCommission: z.number().optional().describe("Taux de commission commerciale, en décimal (0.1 = 10 %)."),
-    tauxPrimeProduction: z.number().optional().describe("Taux de prime production, en décimal (0.18 = 18 %)."),
+    tauxCommission: z
+      .number()
+      .optional()
+      .describe("Taux de commission commerciale, en décimal (0.1 = 10 %)."),
+    tauxPrimeProduction: z
+      .number()
+      .optional()
+      .describe("Taux de prime production, en décimal (0.18 = 18 %)."),
     objectifBouteilles: z.number().optional().describe("Objectif de bouteilles pour la campagne."),
-    objectifAnanasKg: z.number().optional().describe("Objectif d'approvisionnement en kg d'ananas."),
-    bouteillesVendues500: z.number().optional().describe("Bouteilles 500 ml vendues et encaissées à simuler."),
+    objectifAnanasKg: z
+      .number()
+      .optional()
+      .describe("Objectif d'approvisionnement en kg d'ananas."),
+    bouteillesVendues500: z
+      .number()
+      .optional()
+      .describe("Bouteilles 500 ml vendues et encaissées à simuler."),
   },
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   handler: (input) => {

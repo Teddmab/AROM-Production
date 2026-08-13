@@ -146,14 +146,18 @@ export function computeErp(state: ErpState): ErpComputed {
   const resultatBrut = ca - totalCouts;
 
   const stockPF = (["500 ml", "330 ml", "300 ml"] as Format[]).map((f) => {
-    const produites = sum(production.map((r) => (f === "500 ml" ? r.q500 : f === "330 ml" ? r.q330 : r.q300)));
+    const produites = sum(
+      production.map((r) => (f === "500 ml" ? r.q500 : f === "330 ml" ? r.q330 : r.q300)),
+    );
     const vendues = sum(ventes.filter((v) => v.format === f).map((v) => v.quantite));
     const stock = produites - vendues;
     return { format: f, produites, vendues, stock, valeur: stock * prixFormat(p, f) };
   });
 
   const stockMPPieces = sum(state.stockMP.map((m) => m.entree - m.sortie));
-  const dernierCout = state.stockMP.length ? state.stockMP[state.stockMP.length - 1].coutUnitaire : 0;
+  const dernierCout = state.stockMP.length
+    ? state.stockMP[state.stockMP.length - 1].coutUnitaire
+    : 0;
 
   const clientsActifs = new Set(ventes.map((v) => v.idClient || v.client).filter(Boolean)).size;
   const tauxEncaissement = safeDiv(encaissements, ca);
@@ -164,13 +168,53 @@ export function computeErp(state: ErpState): ErpComputed {
   const commissionCommerciale = encaissements * p.tauxCommission;
 
   const objectifs: ErpComputed["objectifs"] = [
-    { label: "Approvisionnement ananas", objectif: p.objectifAnanasKg, realise: kgAchetes, unite: "kg", responsable: "Directeur production" },
-    { label: "Production bouteilles", objectif: p.objectifBouteilles, realise: bouteillesProduites, unite: "bt", responsable: "Directeur production" },
-    { label: "Ventes bouteilles", objectif: p.objectifBouteilles, realise: bouteillesVendues, unite: "bt", responsable: "Chargée commerciale" },
-    { label: "Taux d'encaissement", objectif: 1, realise: tauxEncaissement, unite: "%", responsable: "Chargée commerciale" },
-    { label: "Clients actifs", objectif: p.objectifClients, realise: clientsActifs, unite: "bt", responsable: "Chargée commerciale" },
-    { label: "Marge brute", objectif: p.objectifMargeBrute, realise: margeBrute, unite: "%", responsable: "Direction générale" },
-  ].map((o) => ({ ...o, taux: safeDiv(o.realise, o.objectif), statut: statutFrom(safeDiv(o.realise, o.objectif)) })) as ErpComputed["objectifs"];
+    {
+      label: "Approvisionnement ananas",
+      objectif: p.objectifAnanasKg,
+      realise: kgAchetes,
+      unite: "kg",
+      responsable: "Directeur production",
+    },
+    {
+      label: "Production bouteilles",
+      objectif: p.objectifBouteilles,
+      realise: bouteillesProduites,
+      unite: "bt",
+      responsable: "Directeur production",
+    },
+    {
+      label: "Ventes bouteilles",
+      objectif: p.objectifBouteilles,
+      realise: bouteillesVendues,
+      unite: "bt",
+      responsable: "Chargée commerciale",
+    },
+    {
+      label: "Taux d'encaissement",
+      objectif: 1,
+      realise: tauxEncaissement,
+      unite: "%",
+      responsable: "Chargée commerciale",
+    },
+    {
+      label: "Clients actifs",
+      objectif: p.objectifClients,
+      realise: clientsActifs,
+      unite: "bt",
+      responsable: "Chargée commerciale",
+    },
+    {
+      label: "Marge brute",
+      objectif: p.objectifMargeBrute,
+      realise: margeBrute,
+      unite: "%",
+      responsable: "Direction générale",
+    },
+  ].map((o) => ({
+    ...o,
+    taux: safeDiv(o.realise, o.objectif),
+    statut: statutFrom(safeDiv(o.realise, o.objectif)),
+  })) as ErpComputed["objectifs"];
 
   return {
     appro,
@@ -209,7 +253,10 @@ export function computeErp(state: ErpState): ErpComputed {
     totalPrimes: primeProduction + commissionCommerciale,
     contactsTouches: sum(state.marketing.map((m) => m.contacts)),
     prospects: sum(state.marketing.map((m) => m.prospects)),
-    roiMarketing: safeDiv(sum(state.marketing.map((m) => m.ventesGenerees)) - coutMarketing, coutMarketing),
+    roiMarketing: safeDiv(
+      sum(state.marketing.map((m) => m.ventesGenerees)) - coutMarketing,
+      coutMarketing,
+    ),
     objectifs,
   };
 }
