@@ -28,7 +28,7 @@ interface Order {
   status: "pending" | "confirmed" | "fulfilled" | "cancelled";
   total: number;
   createdAt: string;
-  items: { productId: string; name: string; quantity: number; unitPrice: number }[];
+  items: { productId: string; name: string; quantity: number; unitPrice: number; format: string }[];
 }
 
 function StorefrontRoute() {
@@ -71,7 +71,13 @@ function Storefront() {
         .map(([productId, quantity]) => {
           const product = products.find((p) => p.id === productId);
           return product
-            ? { productId, name: product.name, quantity, unitPrice: product.price }
+            ? {
+                productId,
+                name: product.name,
+                quantity,
+                unitPrice: product.price,
+                format: product.format,
+              }
             : null;
         })
         .filter((x): x is NonNullable<typeof x> => x !== null),
