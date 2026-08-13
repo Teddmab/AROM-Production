@@ -1,11 +1,12 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
+  connectFirestoreEmulator,
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
 } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
-import { getStorage } from "firebase/storage";
+import { connectAuthEmulator, getAuth } from "firebase/auth";
+import { connectStorageEmulator, getStorage } from "firebase/storage";
 
 /**
  * Firebase web config is not a secret (it identifies the project; access
@@ -36,3 +37,29 @@ export const db =
 
 export const auth = getAuth(firebaseApp);
 export const storage = getStorage(firebaseApp);
+
+/**
+ * Local dev against the Firebase Local Emulator Suite instead of live
+ * `arom-production` data — set VITE_USE_FIREBASE_EMULATOR=true (see
+ * AROM-Backend's runbook). Guarded by a global flag because Vite HMR
+ * re-runs this module and each emulator connector throws if called twice
+ * on the same instance.
+ */
+declare global {
+  var __aromEmulatorsConnected: boolean | undefined;
+}
+
+if (
+  typeof window !== "undefined" &&
+  import.meta.env.VITE_USE_FIREBASE_EMULATOR === "true" &&
+  !globalThis.__aromEmulatorsConnected
+) {
+  connectFirestoreEmulator(
+    db,
+    "127.0.0.1",
+    Number(import.meta.env.VITE_FIREBASE_EMULATOR_FIRESTORE_PORT ?? 8080),
+  );
+  connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  connectStorageEmulator(storage, "127.0.0.1", 9199);
+  globalThis.__aromEmulatorsConnected = true;
+}

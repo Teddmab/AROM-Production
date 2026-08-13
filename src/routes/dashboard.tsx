@@ -1,7 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore";
+import { toast } from "sonner";
 import logoAsset from "@/assets/arom-logo.asset.json";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
+import { db } from "@/lib/firebase/config";
 import {
   CANAUX,
   FORMATS,
@@ -937,6 +948,139 @@ function StockSection() {
   );
 }
 
+interface StorefrontOrderItem {
+  productId: string;
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  format: string;
+}
+
+const ORDER_STATUS_LABELS: Record<StorefrontOrder["status"], string> = {
+  pending: "En attente",
+  confirmed: "Confirmée",
+  fulfilled: "Livrée",
+  cancelled: "Annulée",
+};
+
+interface StorefrontOrder {
+  id: string;
+  partnerId: string;
+  partnerName: string;
+  items: StorefrontOrderItem[];
+  total: number;
+  status: "pending" | "confirmed" | "fulfilled" | "cancelled";
+  createdAt: string;
+}
+
+/**
+ * Confirming/fulfilling a storefront order didn't create a `ventes` row, so
+ * storefront sales never reached the dashboard's commercial KPIs. Marking an
+ * order "livrée" now atomically closes it out and writes one `ventes` row
+ * per line item — deterministic doc IDs (`VTE-ORD-<orderId>-<idx>`) make the
+ * write idempotent if it's ever retried.
+ */
+function OrdersCard() {
+  const [orders, setOrders] = useState<StorefrontOrder[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
+    return onSnapshot(
+      q,
+      (snap) =>
+        setOrders(
+          snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<StorefrontOrder, "id">) })),
+        ),
+      (err) => toast.error(`Synchronisation "commandes" impossible : ${err.message}`),
+    );
+  }, []);
+
+  const setStatus = (id: string, status: StorefrontOrder["status"]) =>
+    updateDoc(doc(db, "orders", id), { status }).catch((err) =>
+      toast.error(`Mise à jour de la commande impossible : ${err.message}`),
+    );
+
+  const fulfillAndConvert = async (order: StorefrontOrder) => {
+    const batch = writeBatch(db);
+    batch.update(doc(db, "orders", order.id), { status: "fulfilled" });
+    const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
+    order.items.forEach((item, idx) => {
+      const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
+      batch.set(doc(db, "ventes", `VTE-ORD-${order.id}-${idx}`), {
+        id: `VTE-ORD-${order.id}-${idx}`,
+        numero,
+        date: order.createdAt.slice(0, 10),
+        idClient: order.partnerId,
+        client: order.partnerName,
+        canal: "Grossiste" as Canal,
+        format: (FORMATS.includes(item.format as Format) ? item.format : "500 ml") as Format,
+        quantite: item.quantity,
+        prixUnitaire: item.unitPrice,
+        remise: 0,
+        encaisse: 0,
+        commerciale: "Boutique partenaire",
+      });
+    });
+    try {
+      await batch.commit();
+      toast.success("Commande livrée — ventes enregistrées.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? `Conversion impossible : ${err.message}` : "Conversion impossible.",
+      );
+    }
+  };
+
+  return (
+    <Card title="Commandes boutique partenaires">
+      <Table
+        headers={["Date", "Partenaire", "Articles", "Total", "Statut", "Actions"]}
+        rows={orders.map((o) => [
+          new Date(o.createdAt).toLocaleDateString("fr-FR"),
+          o.partnerName,
+          o.items.map((i) => `${i.quantity}× ${i.name}`).join(", "),
+          fcFormat(o.total),
+          <span>{ORDER_STATUS_LABELS[o.status]}</span>,
+          <div className="flex gap-3">
+            {o.status === "pending" && (
+              <>
+                <button
+                  onClick={() => setStatus(o.id, "confirmed")}
+                  className="text-xs font-semibold text-primary hover:underline"
+                >
+                  Confirmer
+                </button>
+                <button
+                  onClick={() => setStatus(o.id, "cancelled")}
+                  className="text-xs font-semibold text-destructive hover:underline"
+                >
+                  Annuler
+                </button>
+              </>
+            )}
+            {o.status === "confirmed" && (
+              <>
+                <button
+                  onClick={() => fulfillAndConvert(o)}
+                  className="text-xs font-semibold text-success hover:underline"
+                >
+                  Marquer livrée
+                </button>
+                <button
+                  onClick={() => setStatus(o.id, "cancelled")}
+                  className="text-xs font-semibold text-destructive hover:underline"
+                >
+                  Annuler
+                </button>
+              </>
+            )}
+          </div>,
+        ])}
+      />
+    </Card>
+  );
+}
+
 function CommercialisationSection() {
   const { state, computed, addRow, removeRow } = useErp();
   const p = state.parametres;
@@ -948,6 +1092,8 @@ function CommercialisationSection() {
         responsable="Chargée de Commercialisation"
       />
       <ExportBar section="commercialisation" />
+
+      <OrdersCard />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
