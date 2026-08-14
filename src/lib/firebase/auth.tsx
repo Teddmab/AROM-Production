@@ -7,7 +7,7 @@ import {
   updateProfile,
   type User,
 } from "firebase/auth";
-import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, setDoc, writeBatch } from "firebase/firestore";
 import { auth, db } from "./config";
 
 export type Role = "admin" | "staff" | "partner";
@@ -21,6 +21,13 @@ export interface UserProfile {
   active: boolean;
 }
 
+export interface Invite {
+  email: string;
+  role: "admin" | "staff";
+  menus: "all" | string[];
+  used: boolean;
+}
+
 interface AuthContextValue {
   user: User | null;
   profile: UserProfile | null;
@@ -29,6 +36,19 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signOutUser: () => Promise<void>;
   signUpPartner: (email: string, password: string, displayName: string) => Promise<void>;
+  /**
+   * Reads an invite by ID (public get, see firestore.rules) — used by
+   * /join to preview who's being invited to what before asking for a
+   * password.
+   */
+  getInvite: (inviteId: string) => Promise<Invite | null>;
+  /**
+   * Creates the Auth account + own users/{uid} doc + marks the invite
+   * used, atomically. The invite's email/role/menus are read fresh here
+   * (not trusted from an earlier preview) and re-validated by
+   * firestore.rules regardless.
+   */
+  redeemInvite: (inviteId: string, password: string, displayName: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -94,6 +114,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         active: true,
         createdAt: new Date().toISOString(),
       });
+    },
+    getInvite: async (inviteId) => {
+      const snap = await getDoc(doc(db, "invites", inviteId));
+      return snap.exists() ? (snap.data() as Invite) : null;
+    },
+    redeemInvite: async (inviteId, password, displayName) => {
+      const inviteSnap = await getDoc(doc(db, "invites", inviteId));
+      if (!inviteSnap.exists() || inviteSnap.data().used) {
+        throw new Error("Cette invitation n'est plus valide.");
+      }
+      const invite = inviteSnap.data() as Invite;
+      const cred = await createUserWithEmailAndPassword(auth, invite.email, password);
+      await updateProfile(cred.user, { displayName });
+      const batch = writeBatch(db);
+      batch.set(doc(db, "users", cred.user.uid), {
+        email: invite.email,
+        displayName,
+        role: invite.role,
+        menus: invite.menus,
+        active: true,
+        inviteId,
+        createdAt: new Date().toISOString(),
+      });
+      batch.update(doc(db, "invites", inviteId), { used: true, usedBy: cred.user.uid });
+      await batch.commit();
     },
   };
 

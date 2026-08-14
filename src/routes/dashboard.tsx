@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   collection,
+  deleteDoc,
   doc,
   onSnapshot,
   orderBy,
@@ -1606,6 +1607,188 @@ function FinancesSection() {
   );
 }
 
+interface Invite {
+  id: string;
+  email: string;
+  role: "admin" | "staff";
+  menus: "all" | string[];
+  used: boolean;
+  usedBy?: string;
+  createdAt: string;
+}
+
+/**
+ * Admin-only: create an invite so someone can self-register as admin/staff
+ * at /join, instead of needing AROM-Backend/scripts/create-user.mjs run by
+ * hand. Enforced by firestore.rules (email/role/menus must match the
+ * invite exactly) — this UI is convenience, not the security boundary.
+ */
+function InviteCard() {
+  const { profile } = useAuth();
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"admin" | "staff">("staff");
+  const [menus, setMenus] = useState<string[]>([]);
+  const [allMenus, setAllMenus] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (profile?.role !== "admin") return;
+    return onSnapshot(
+      query(collection(db, "invites"), orderBy("createdAt", "desc")),
+      (snap) =>
+        setInvites(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Invite, "id">) }))),
+      (err) => toast.error(`Synchronisation "invitations" impossible : ${err.message}`),
+    );
+  }, [profile?.role]);
+
+  if (profile?.role !== "admin") return null;
+
+  const toggleMenu = (id: string) =>
+    setMenus((m) => (m.includes(id) ? m.filter((x) => x !== id) : [...m, id]));
+
+  const createInvite = async () => {
+    if (!email.trim()) {
+      toast.error("Adresse e-mail requise.");
+      return;
+    }
+    const inviteRef = doc(collection(db, "invites"));
+    try {
+      await setDoc(inviteRef, {
+        email: email.trim(),
+        role,
+        menus: role === "admin" || allMenus ? "all" : menus,
+        used: false,
+        createdBy: profile.uid,
+        createdAt: new Date().toISOString(),
+      });
+      setEmail("");
+      setMenus([]);
+      setAllMenus(false);
+      toast.success("Invitation créée — copiez le lien pour la partager.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? `Création impossible : ${err.message}` : "Création impossible.",
+      );
+    }
+  };
+
+  const copyLink = (invite: Invite) => {
+    const link = `${window.location.origin}/join?invite=${invite.id}`;
+    navigator.clipboard.writeText(link).then(
+      () => {
+        setCopiedId(invite.id);
+        setTimeout(() => setCopiedId(null), 2000);
+      },
+      () => toast.error("Copie impossible — copiez le lien manuellement."),
+    );
+  };
+
+  const revoke = (invite: Invite) =>
+    deleteDoc(doc(db, "invites", invite.id)).catch((err) =>
+      toast.error(`Révocation impossible : ${err.message}`),
+    );
+
+  return (
+    <Card title="Inviter un membre de l'équipe">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="text-xs font-medium text-muted-foreground sm:col-span-2">
+          E-mail
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="personne@exemple.cd"
+            className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+          />
+        </label>
+        <label className="text-xs font-medium text-muted-foreground">
+          Rôle
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value as "admin" | "staff")}
+            className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+          >
+            <option value="staff">Staff</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+        <div className="flex items-end">
+          <button
+            onClick={createInvite}
+            className="w-full rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground"
+          >
+            Créer l'invitation
+          </button>
+        </div>
+      </div>
+
+      {role === "staff" && (
+        <div className="mt-3">
+          <p className="text-xs font-medium text-muted-foreground">Sections accessibles</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setAllMenus((v) => !v)}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                allMenus
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-secondary-foreground"
+              }`}
+            >
+              Toutes les sections
+            </button>
+            {!allMenus &&
+              SECTIONS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => toggleMenu(s.id)}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    menus.includes(s.id)
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-secondary text-secondary-foreground"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-5 overflow-hidden rounded-xl border border-border">
+        <Table
+          headers={["E-mail", "Rôle", "Sections", "Statut", "Lien"]}
+          rows={invites.map((inv) => [
+            inv.email,
+            inv.role,
+            inv.menus === "all" ? "Toutes" : inv.menus.join(", ") || "—",
+            inv.used ? (
+              <span className="badge-status bg-success/15 text-success">Utilisée</span>
+            ) : (
+              <span className="badge-status bg-warning/20 text-warning">En attente</span>
+            ),
+            inv.used ? (
+              "—"
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => copyLink(inv)}
+                  className="text-xs font-semibold text-primary hover:underline"
+                >
+                  {copiedId === inv.id ? "Copié !" : "Copier le lien"}
+                </button>
+                <DeleteButton onClick={() => revoke(inv)} />
+              </div>
+            ),
+          ])}
+        />
+      </div>
+    </Card>
+  );
+}
+
 function PersonnelSection() {
   const { state, computed } = useErp();
   const p = state.parametres;
@@ -1617,6 +1800,8 @@ function PersonnelSection() {
         subtitle="Calcul automatique sur production conforme et encaissements"
         responsable="Direction Générale"
       />
+
+      <InviteCard />
 
       <Card title="Directeur de Production">
         <Table
