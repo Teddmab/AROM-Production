@@ -86,13 +86,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "apple-mobile-web-app-capable", content: "yes" },
       { name: "apple-mobile-web-app-status-bar-style", content: "default" },
       { name: "apple-mobile-web-app-title", content: "AROM" },
-      { title: "AROM — Saveurs Naturelles · Tableau de bord" },
+      { title: "AROM - Saveurs Naturelles · Tableau de bord" },
       {
         name: "description",
         content:
           "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas.",
       },
-      { property: "og:title", content: "AROM — Saveurs Naturelles · Tableau de bord" },
+      { property: "og:title", content: "AROM - Saveurs Naturelles · Tableau de bord" },
       {
         property: "og:description",
         content:
@@ -100,7 +100,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:title", content: "AROM — Saveurs Naturelles · Tableau de bord" },
+      { name: "twitter:title", content: "AROM - Saveurs Naturelles · Tableau de bord" },
       {
         name: "twitter:description",
         content:

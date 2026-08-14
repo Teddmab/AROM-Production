@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/firebase/auth";
 export const Route = createFileRoute("/storefront/signup")({
   component: SignupRoute,
   head: () => ({
-    meta: [{ title: "Créer un compte partenaire — AROM" }],
+    meta: [{ title: "Créer un compte partenaire - AROM" }],
   }),
 });
 
@@ -29,7 +29,7 @@ function SignupRoute() {
     setError(null);
     try {
       await signUpPartner(email, password, displayName);
-      toast.success("Compte créé — bienvenue sur la boutique AROM.");
+      toast.success("Compte créé - bienvenue sur la boutique AROM.");
       navigate({ to: "/storefront" });
     } catch (err) {
       setError(
@@ -46,11 +46,13 @@ function SignupRoute() {
     <div className="grid min-h-screen place-items-center bg-background px-5 py-12">
       <div className="w-full max-w-95">
         <div className="flex flex-col items-center gap-4 text-center">
-          <img
-            src="/logo-nav.png"
-            alt="AROM"
-            className="h-20 w-20 rounded-[22px] object-cover shadow-lg shadow-primary/15 ring-1 ring-black/5"
-          />
+          <Link to="/" aria-label="Retour à l'accueil">
+            <img
+              src="/logo-nav.png"
+              alt="AROM"
+              className="h-20 w-20 rounded-[22px] object-cover shadow-lg shadow-primary/15 ring-1 ring-black/5 transition active:scale-95"
+            />
+          </Link>
           <div>
             <h1 className="font-display text-[28px] font-bold leading-tight text-primary">
               Créer un compte
@@ -106,6 +108,11 @@ function SignupRoute() {
           Déjà un compte ?{" "}
           <Link to="/login" className="font-semibold text-primary">
             Se connecter
+          </Link>
+        </p>
+        <p className="mt-3 text-center text-[13px] text-muted-foreground">
+          <Link to="/" className="font-medium text-primary">
+            ← Retour à l'accueil
           </Link>
         </p>
       </div>

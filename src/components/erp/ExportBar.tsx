@@ -20,7 +20,7 @@ export function ExportBar({ section }: { section: ExportSection }) {
   const handlePdf = () => {
     const report = buildFilteredReport(section, state, filter);
     const ok = exportPdf(report, filter, "/logo-nav.png");
-    if (ok) toast.success("Rapport PDF prêt — utilisez « Enregistrer au format PDF ».");
+    if (ok) toast.success("Rapport PDF prêt, utilisez « Enregistrer au format PDF ».");
     else toast.error("Fenêtre bloquée : autorisez les pop-ups pour générer le PDF.");
   };
 
