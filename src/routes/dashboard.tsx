@@ -1190,6 +1190,7 @@ interface StorefrontOrder {
   total: number;
   status: "pending" | "confirmed" | "fulfilled" | "cancelled";
   createdAt: string;
+  payment?: { method: "pawapay" | "cash_on_delivery"; status: "pending" | "completed" };
 }
 
 /**
@@ -1236,7 +1237,12 @@ function OrdersCard() {
         quantite: item.quantity,
         prixUnitaire: item.unitPrice,
         remise: 0,
-        encaisse: 0,
+        // Mobile money is already settled by checkout time (payment.status
+        // "completed"); cash on delivery is collected the moment the order
+        // is marked "livrée" — either way the full line amount is encaissé
+        // here. Orders without a `payment` field predate this flow, so we
+        // can't assume cash changed hands and leave encaisse at 0.
+        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
         commerciale: "Boutique partenaire",
       });
     });
@@ -1253,12 +1259,19 @@ function OrdersCard() {
   return (
     <Card title="Commandes boutique partenaires">
       <Table
-        headers={["Date", "Partenaire", "Articles", "Total", "Statut", "Actions"]}
+        headers={["Date", "Partenaire", "Articles", "Total", "Paiement", "Statut", "Actions"]}
         rows={orders.map((o) => [
           new Date(o.createdAt).toLocaleDateString("fr-FR"),
           o.partnerName,
           o.items.map((i) => `${i.quantity}× ${i.name}`).join(", "),
           fcFormat(o.total),
+          <span>
+            {!o.payment
+              ? "—"
+              : o.payment.method === "cash_on_delivery"
+                ? "Livraison"
+                : "Mobile money"}
+          </span>,
           <span>{ORDER_STATUS_LABELS[o.status]}</span>,
           <div className="flex gap-3">
             {o.status === "pending" && (
