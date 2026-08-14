@@ -6,12 +6,14 @@ import {
   onSnapshot,
   orderBy,
   query,
+  setDoc,
   updateDoc,
   writeBatch,
 } from "firebase/firestore";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
-import { db } from "@/lib/firebase/config";
+import { db, storage } from "@/lib/firebase/config";
 import {
   CANAUX,
   FORMATS,
@@ -947,6 +949,223 @@ function StockSection() {
   );
 }
 
+interface Product {
+  id: string;
+  name: string;
+  format: Format;
+  price: number;
+  active: boolean;
+  imageUrl?: string;
+}
+
+type ProductDraft = { name: string; format: Format; price: string };
+
+function ProductPhoto({
+  product,
+  uploading,
+  onUpload,
+}: {
+  product: Product;
+  uploading: boolean;
+  onUpload: (file: File) => void;
+}) {
+  return (
+    <label className="group relative block h-20 w-20 shrink-0 cursor-pointer overflow-hidden rounded-xl border border-border bg-secondary/40">
+      {product.imageUrl ? (
+        <img src={product.imageUrl} alt={product.name} className="h-full w-full object-cover" />
+      ) : (
+        <div className="grid h-full w-full place-items-center text-[10px] font-medium text-muted-foreground">
+          Photo
+        </div>
+      )}
+      <div className="absolute inset-0 grid place-items-center bg-black/50 text-[10px] font-semibold text-white opacity-0 transition group-hover:opacity-100">
+        {uploading ? "Envoi…" : "Changer"}
+      </div>
+      <input
+        type="file"
+        accept="image/*"
+        className="sr-only"
+        disabled={uploading}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onUpload(file);
+          e.target.value = "";
+        }}
+      />
+    </label>
+  );
+}
+
+/**
+ * The only dashboard section with real per-row editing (elsewhere the
+ * pattern is append + delete) — products need it, since "wrong price"
+ * shouldn't mean deleting and re-creating a product partners already
+ * have in past orders (orders snapshot product data at order time, so
+ * editing here never touches order history — see sprints/01).
+ */
+function CatalogueCard() {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, ProductDraft>>({});
+  const [uploadingId, setUploadingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    return onSnapshot(
+      collection(db, "products"),
+      (snap) => {
+        const rows = snap.docs
+          .map((d) => d.data() as Product)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setProducts(rows);
+        setDrafts((prev) => {
+          const next = { ...prev };
+          for (const p of rows) {
+            if (!next[p.id])
+              next[p.id] = { name: p.name, format: p.format, price: String(p.price) };
+          }
+          return next;
+        });
+      },
+      (err) => toast.error(`Synchronisation "catalogue" impossible : ${err.message}`),
+    );
+  }, []);
+
+  const draftFor = (p: Product): ProductDraft =>
+    drafts[p.id] ?? { name: p.name, format: p.format, price: String(p.price) };
+
+  const setDraft = (id: string, patch: Partial<ProductDraft>) =>
+    setDrafts((d) => ({ ...d, [id]: { ...d[id], ...patch } }));
+
+  const saveProduct = (p: Product) => {
+    const draft = draftFor(p);
+    updateDoc(doc(db, "products", p.id), {
+      name: draft.name.trim() || p.name,
+      format: draft.format,
+      price: n(draft.price),
+    })
+      .then(() => toast.success("Produit enregistré."))
+      .catch((err) => toast.error(`Enregistrement impossible : ${err.message}`));
+  };
+
+  const toggleActive = (p: Product) =>
+    updateDoc(doc(db, "products", p.id), { active: !p.active }).catch((err) =>
+      toast.error(`Mise à jour impossible : ${err.message}`),
+    );
+
+  const uploadPhoto = async (p: Product, file: File) => {
+    setUploadingId(p.id);
+    try {
+      const photoRef = ref(storage, `products/${p.id}/photo`);
+      await uploadBytes(photoRef, file);
+      const url = await getDownloadURL(photoRef);
+      await updateDoc(doc(db, "products", p.id), { imageUrl: url });
+      toast.success("Photo mise à jour.");
+    } catch (err) {
+      toast.error(err instanceof Error ? `Envoi impossible : ${err.message}` : "Envoi impossible.");
+    } finally {
+      setUploadingId(null);
+    }
+  };
+
+  const createProduct = (v: Record<string, string>) => {
+    const id = newId("PRD");
+    setDoc(doc(db, "products", id), {
+      id,
+      name: v.name,
+      format: v.format as Format,
+      price: n(v.price),
+      active: true,
+    }).catch((err) => toast.error(`Création impossible : ${err.message}`));
+  };
+
+  return (
+    <Card
+      title="Catalogue boutique"
+      action={
+        <EntryForm
+          submitLabel="Nouveau produit"
+          fields={[
+            { name: "name", label: "Nom", default: "AROM Ananas 500 ml" },
+            {
+              name: "format",
+              label: "Format",
+              type: "select",
+              options: FORMATS,
+              default: "500 ml",
+            },
+            { name: "price", label: "Prix FC", type: "number", default: 5000 },
+          ]}
+          onSubmit={createProduct}
+        />
+      }
+    >
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {products.map((p) => {
+          const draft = draftFor(p);
+          return (
+            <div
+              key={p.id}
+              className={`flex gap-3 rounded-xl border border-border bg-card p-4 ${!p.active ? "opacity-60" : ""}`}
+            >
+              <ProductPhoto
+                product={p}
+                uploading={uploadingId === p.id}
+                onUpload={(file) => uploadPhoto(p, file)}
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <input
+                  value={draft.name}
+                  onChange={(e) => setDraft(p.id, { name: e.target.value })}
+                  className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-sm font-semibold text-foreground"
+                />
+                <div className="flex gap-2">
+                  <select
+                    value={draft.format}
+                    onChange={(e) => setDraft(p.id, { format: e.target.value as Format })}
+                    className="w-1/2 rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground"
+                  >
+                    {FORMATS.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    value={draft.price}
+                    onChange={(e) => setDraft(p.id, { price: e.target.value })}
+                    className="w-1/2 rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <button
+                    onClick={() => toggleActive(p)}
+                    className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                      p.active ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {p.active ? "Actif" : "Inactif"}
+                  </button>
+                  <button
+                    onClick={() => saveProduct(p)}
+                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+                  >
+                    Enregistrer
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {products.length === 0 && (
+          <p className="col-span-full py-6 text-center text-sm text-muted-foreground">
+            Aucun produit. Ajoutez le premier avec « Nouveau produit ».
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 interface StorefrontOrderItem {
   productId: string;
   name: string;
@@ -1091,6 +1310,8 @@ function CommercialisationSection() {
         responsable="Chargée de Commercialisation"
       />
       <ExportBar section="commercialisation" />
+
+      <CatalogueCard />
 
       <OrdersCard />
 

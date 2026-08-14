@@ -21,6 +21,7 @@ interface Product {
   format: string;
   price: number;
   active: boolean;
+  imageUrl?: string;
 }
 
 interface Order {
@@ -152,8 +153,19 @@ function Storefront() {
             {products.map((p, i) => (
               <div key={p.id}>
                 {i > 0 && <div className="h-px bg-border/70" />}
-                <div className="flex items-center justify-between gap-4 px-4 py-3.5">
-                  <div className="min-w-0">
+                <div className="flex items-center gap-3.5 px-4 py-3.5">
+                  {p.imageUrl ? (
+                    <img
+                      src={p.imageUrl}
+                      alt={p.name}
+                      className="h-14 w-14 shrink-0 rounded-xl object-cover ring-1 ring-black/5"
+                    />
+                  ) : (
+                    <div className="grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-secondary text-[10px] font-medium text-muted-foreground">
+                      AROM
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
                     <p className="text-[15px] font-semibold text-foreground">{p.name}</p>
                     <p className="mt-0.5 text-[13px] text-muted-foreground">
                       {fcFormat(p.price)} / bouteille
