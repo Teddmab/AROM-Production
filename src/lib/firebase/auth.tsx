@@ -2,15 +2,23 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
   createUserWithEmailAndPassword,
   updateProfile,
+  FacebookAuthProvider,
+  GoogleAuthProvider,
   type User,
 } from "firebase/auth";
 import { doc, getDoc, onSnapshot, setDoc, writeBatch } from "firebase/firestore";
 import { auth, db } from "./config";
 
 export type Role = "admin" | "staff" | "partner";
+export type OAuthProviderName = "google" | "facebook";
+
+function providerFor(name: OAuthProviderName) {
+  return name === "google" ? new GoogleAuthProvider() : new FacebookAuthProvider();
+}
 
 export interface UserProfile {
   uid: string;
@@ -36,6 +44,19 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signOutUser: () => Promise<void>;
   signUpPartner: (email: string, password: string, displayName: string) => Promise<void>;
+  /**
+   * For /login: just the popup sign-in, no Firestore writes. If the
+   * signed-in Google/Facebook account has no users/{uid} doc, the
+   * existing "no profile" handling in login.tsx (sign out + explain)
+   * covers it — logging in isn't supposed to create an account.
+   */
+  signInWithProvider: (name: OAuthProviderName) => Promise<void>;
+  /**
+   * For /storefront/signup: same popup, but creates a partner profile
+   * if (and only if) this account doesn't already have one — so an
+   * existing user who ends up here by mistake doesn't get clobbered.
+   */
+  signUpPartnerWithProvider: (name: OAuthProviderName) => Promise<void>;
   /**
    * Reads an invite by ID (public get, see firestore.rules) — used by
    * /join to preview who's being invited to what before asking for a
@@ -109,6 +130,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await setDoc(doc(db, "users", cred.user.uid), {
         email,
         displayName,
+        role: "partner",
+        menus: [],
+        active: true,
+        createdAt: new Date().toISOString(),
+      });
+    },
+    signInWithProvider: async (name) => {
+      await signInWithPopup(auth, providerFor(name));
+    },
+    signUpPartnerWithProvider: async (name) => {
+      const cred = await signInWithPopup(auth, providerFor(name));
+      const existing = await getDoc(doc(db, "users", cred.user.uid));
+      if (existing.exists()) return;
+      if (!cred.user.email) {
+        throw new Error(
+          "Impossible de récupérer votre e-mail depuis ce fournisseur. Essayez un autre mode de connexion.",
+        );
+      }
+      await setDoc(doc(db, "users", cred.user.uid), {
+        email: cred.user.email,
+        displayName: cred.user.displayName || cred.user.email,
         role: "partner",
         menus: [],
         active: true,

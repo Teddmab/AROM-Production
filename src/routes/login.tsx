@@ -1,7 +1,12 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useAuth } from "@/lib/firebase/auth";
+import { OAuthButtons } from "@/components/auth/OAuthButtons";
+import { useAuth, type OAuthProviderName } from "@/lib/firebase/auth";
+
+function authErrorCode(err: unknown): string | undefined {
+  return err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
+}
 
 export const Route = createFileRoute("/login")({
   component: LoginRoute,
@@ -15,7 +20,7 @@ export const Route = createFileRoute("/login")({
 });
 
 function LoginRoute() {
-  const { signIn, user, profile, loading, signOutUser } = useAuth();
+  const { signIn, signInWithProvider, user, profile, loading, signOutUser } = useAuth();
   const navigate = useNavigate();
   const { redirect } = Route.useSearch();
   const [email, setEmail] = useState("");
@@ -52,6 +57,26 @@ function LoginRoute() {
     }
   };
 
+  const handleOAuth = async (provider: OAuthProviderName) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await signInWithProvider(provider);
+      toast.success("Connexion réussie.");
+    } catch (err) {
+      const code = authErrorCode(err);
+      if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
+        // user changed their mind — not an error worth surfacing
+      } else if (code === "auth/account-exists-with-different-credential") {
+        setError("Un compte existe déjà avec cet e-mail via un autre mode de connexion.");
+      } else {
+        setError("Connexion impossible. Réessayez.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="grid min-h-screen place-items-center bg-background px-5 py-12">
       <div className="w-full max-w-95">
@@ -71,7 +96,17 @@ function LoginRoute() {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="mt-8 space-y-3">
+        <div className="mt-8">
+          <OAuthButtons onSelect={handleOAuth} busy={busy} />
+        </div>
+
+        <div className="my-5 flex items-center gap-3">
+          <div className="h-px flex-1 bg-border" />
+          <span className="text-[12px] font-medium text-muted-foreground">ou avec e-mail</span>
+          <div className="h-px flex-1 bg-border" />
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-3">
           <div className="overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
             <input
               type="email"
