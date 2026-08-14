@@ -63,9 +63,18 @@ export function CheckoutSheet({
 
   const createOrder = async (payment: Record<string, unknown>) => {
     if (!profile) return;
+    const { address } = profile;
+    // Firestore rejects `undefined` field values, so these are only
+    // included when the partner's profile actually has them.
     await addDoc(collection(db, "orders"), {
       partnerId: profile.uid,
       partnerName: profile.displayName || profile.email,
+      ...(profile.phone ? { partnerPhone: profile.phone } : {}),
+      ...(address
+        ? {
+            partnerAddress: `${address.quartier}, ${address.commune}, ${address.ville}${address.repere ? ` (${address.repere})` : ""}`,
+          }
+        : {}),
       items: cartItems,
       total,
       status: "pending",

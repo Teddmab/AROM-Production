@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { LogOut, Minus, Plus, ShoppingBag, Truck } from "lucide-react";
@@ -63,11 +63,20 @@ function StorefrontRoute() {
 
 function Storefront() {
   const { profile, signOutUser } = useAuth();
+  const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [tab, setTab] = useState<Tab>("catalogue");
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+
+  useEffect(() => {
+    // Reached directly (bookmark, browser back) mid-onboarding — send them
+    // back to finish the wizard instead of showing an incomplete boutique.
+    if (profile?.onboardingComplete === false) {
+      navigate({ to: "/storefront/signup" });
+    }
+  }, [profile, navigate]);
 
   useEffect(() => {
     return onSnapshot(collection(db, "products"), (snap) => {
@@ -111,6 +120,14 @@ function Storefront() {
   const itemCount = cartItems.reduce((a, i) => a + i.quantity, 0);
 
   const setQty = (id: string, qty: number) => setCart((c) => ({ ...c, [id]: Math.max(0, qty) }));
+
+  if (profile?.onboardingComplete === false) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-background">
+        <p className="text-sm text-muted-foreground">Redirection…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">

@@ -1186,6 +1186,8 @@ interface StorefrontOrder {
   id: string;
   partnerId: string;
   partnerName: string;
+  partnerPhone?: string;
+  partnerAddress?: string;
   items: StorefrontOrderItem[];
   total: number;
   status: "pending" | "confirmed" | "fulfilled" | "cancelled";
@@ -1259,10 +1261,23 @@ function OrdersCard() {
   return (
     <Card title="Commandes boutique partenaires">
       <Table
-        headers={["Date", "Partenaire", "Articles", "Total", "Paiement", "Statut", "Actions"]}
+        headers={[
+          "Date",
+          "Partenaire",
+          "Livraison",
+          "Articles",
+          "Total",
+          "Paiement",
+          "Statut",
+          "Actions",
+        ]}
         rows={orders.map((o) => [
           new Date(o.createdAt).toLocaleDateString("fr-FR"),
           o.partnerName,
+          <div className="text-xs">
+            <p>{o.partnerPhone ? `+${o.partnerPhone}` : "—"}</p>
+            {o.partnerAddress && <p className="text-muted-foreground">{o.partnerAddress}</p>}
+          </div>,
           o.items.map((i) => `${i.quantity}× ${i.name}`).join(", "),
           fcFormat(o.total),
           <span>

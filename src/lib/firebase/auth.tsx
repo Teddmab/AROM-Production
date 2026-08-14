@@ -10,14 +10,22 @@ import {
   GoogleAuthProvider,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, onSnapshot, setDoc, writeBatch } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { auth, db } from "./config";
+import { AROM_DEPOT_NAME } from "@/lib/storefront/depot";
 
 export type Role = "admin" | "staff" | "partner";
 export type OAuthProviderName = "google" | "facebook";
 
 function providerFor(name: OAuthProviderName) {
   return name === "google" ? new GoogleAuthProvider() : new FacebookAuthProvider();
+}
+
+export interface PartnerAddress {
+  ville: string;
+  commune: string;
+  quartier: string;
+  repere?: string;
 }
 
 export interface UserProfile {
@@ -27,6 +35,24 @@ export interface UserProfile {
   role: Role;
   menus: "all" | string[];
   active: boolean;
+  /**
+   * Partner-only: false right after account creation, until the guided
+   * onboarding wizard (storefront/signup.tsx) collects delivery/KYC
+   * info. Undefined on admin/staff profiles — treated as "complete".
+   */
+  onboardingComplete?: boolean;
+  contactName?: string;
+  phone?: string;
+  address?: PartnerAddress;
+  idNumber?: string;
+  pointDeVente?: string;
+}
+
+export interface PartnerOnboardingData {
+  contactName: string;
+  phone: string;
+  address: PartnerAddress;
+  idNumber?: string;
 }
 
 export interface Invite {
@@ -57,6 +83,15 @@ interface AuthContextValue {
    * existing user who ends up here by mistake doesn't get clobbered.
    */
   signUpPartnerWithProvider: (name: OAuthProviderName) => Promise<void>;
+  /**
+   * Final step of the guided boutique onboarding wizard — fills in the
+   * delivery/KYC fields on the partner's own users/{uid} doc (created
+   * with placeholders by signUpPartner/signUpPartnerWithProvider) and
+   * flips onboardingComplete to true. No firestore.rules change needed:
+   * the update rule already lets a signed-in partner edit their own doc
+   * as long as `role` doesn't change.
+   */
+  completePartnerOnboarding: (data: PartnerOnboardingData) => Promise<void>;
   /**
    * Reads an invite by ID (public get, see firestore.rules) — used by
    * /join to preview who's being invited to what before asking for a
@@ -133,6 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: "partner",
         menus: [],
         active: true,
+        onboardingComplete: false,
         createdAt: new Date().toISOString(),
       });
     },
@@ -154,7 +190,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: "partner",
         menus: [],
         active: true,
+        onboardingComplete: false,
         createdAt: new Date().toISOString(),
+      });
+    },
+    completePartnerOnboarding: async (data) => {
+      if (!auth.currentUser) throw new Error("Vous devez être connecté.");
+      const { ville, commune, quartier, repere } = data.address;
+      // Firestore rejects `undefined` field values outright, so optional
+      // fields are only included when actually provided rather than set
+      // to undefined.
+      await updateDoc(doc(db, "users", auth.currentUser.uid), {
+        contactName: data.contactName,
+        phone: data.phone,
+        address: { ville, commune, quartier, ...(repere ? { repere } : {}) },
+        ...(data.idNumber ? { idNumber: data.idNumber } : {}),
+        onboardingComplete: true,
+        pointDeVente: AROM_DEPOT_NAME,
       });
     },
     getInvite: async (inviteId) => {
