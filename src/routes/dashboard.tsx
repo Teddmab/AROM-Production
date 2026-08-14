@@ -20,6 +20,7 @@ import {
   FORMATS,
   QUALITES,
   fcFormat,
+  formatDateOnly,
   pctFormat,
   prixFormat,
   type Canal,
@@ -957,9 +958,10 @@ interface Product {
   price: number;
   active: boolean;
   imageUrl?: string;
+  description?: string;
 }
 
-type ProductDraft = { name: string; format: Format; price: string };
+type ProductDraft = { name: string; format: Format; price: string; description: string };
 
 function ProductPhoto({
   product,
@@ -1021,7 +1023,12 @@ function CatalogueCard() {
           const next = { ...prev };
           for (const p of rows) {
             if (!next[p.id])
-              next[p.id] = { name: p.name, format: p.format, price: String(p.price) };
+              next[p.id] = {
+                name: p.name,
+                format: p.format,
+                price: String(p.price),
+                description: p.description ?? "",
+              };
           }
           return next;
         });
@@ -1031,7 +1038,12 @@ function CatalogueCard() {
   }, []);
 
   const draftFor = (p: Product): ProductDraft =>
-    drafts[p.id] ?? { name: p.name, format: p.format, price: String(p.price) };
+    drafts[p.id] ?? {
+      name: p.name,
+      format: p.format,
+      price: String(p.price),
+      description: p.description ?? "",
+    };
 
   const setDraft = (id: string, patch: Partial<ProductDraft>) =>
     setDrafts((d) => ({ ...d, [id]: { ...d[id], ...patch } }));
@@ -1042,6 +1054,7 @@ function CatalogueCard() {
       name: draft.name.trim() || p.name,
       format: draft.format,
       price: n(draft.price),
+      description: draft.description.trim(),
     })
       .then(() => toast.success("Produit enregistré."))
       .catch((err) => toast.error(`Enregistrement impossible : ${err.message}`));
@@ -1137,6 +1150,13 @@ function CatalogueCard() {
                     className="w-1/2 rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground"
                   />
                 </div>
+                <textarea
+                  value={draft.description}
+                  onChange={(e) => setDraft(p.id, { description: e.target.value })}
+                  placeholder="Description affichée sur la fiche produit de la boutique (optionnel)"
+                  rows={2}
+                  className="w-full resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/70"
+                />
                 <div className="flex items-center justify-between gap-2 pt-1">
                   <button
                     onClick={() => toggleActive(p)}
@@ -1186,10 +1206,15 @@ interface StorefrontOrder {
   id: string;
   partnerId: string;
   partnerName: string;
+  partnerPhone?: string;
+  partnerAddress?: string;
   items: StorefrontOrderItem[];
   total: number;
   status: "pending" | "confirmed" | "fulfilled" | "cancelled";
   createdAt: string;
+  fulfilledAt?: string;
+  deliveryDate?: string;
+  payment?: { method: "pawapay" | "cash_on_delivery"; status: "pending" | "completed" };
 }
 
 /**
@@ -1199,8 +1224,132 @@ interface StorefrontOrder {
  * per line item — deterministic doc IDs (`VTE-ORD-<orderId>-<idx>`) make the
  * write idempotent if it's ever retried.
  */
+
+interface Promo {
+  active: boolean;
+  headline: string;
+  description: string;
+  productId: string;
+  startDate: string;
+  endDate: string;
+}
+
+const EMPTY_PROMO: Promo = {
+  active: false,
+  headline: "",
+  description: "",
+  productId: "",
+  startDate: "",
+  endDate: "",
+};
+
+/**
+ * Single active-or-not promo (sprint 06) — a `config/promo` singleton,
+ * mirroring the existing `config/parametres` pattern. Deliberately no
+ * rotation/scheduling queue: v1 ships with exactly one promo, matching
+ * how a small operation actually runs a promotion.
+ */
+function PromoCard() {
+  const [promo, setPromo] = useState<Promo>(EMPTY_PROMO);
+  const [products, setProducts] = useState<{ id: string; name: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    return onSnapshot(
+      doc(db, "config", "promo"),
+      (snap) => setPromo(snap.exists() ? { ...EMPTY_PROMO, ...snap.data() } : EMPTY_PROMO),
+      (err) => toast.error(`Synchronisation "promo" impossible : ${err.message}`),
+    );
+  }, []);
+
+  useEffect(() => {
+    return onSnapshot(collection(db, "products"), (snap) => {
+      setProducts(snap.docs.map((d) => d.data() as { id: string; name: string }));
+    });
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await setDoc(doc(db, "config", "promo"), promo);
+      toast.success("Promotion enregistrée.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Enregistrement impossible : ${err.message}`
+          : "Enregistrement impossible.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card title="Promotion boutique">
+      <div className="space-y-3">
+        <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <input
+            type="checkbox"
+            checked={promo.active}
+            onChange={(e) => setPromo((p) => ({ ...p, active: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          Promotion active
+        </label>
+        <input
+          value={promo.headline}
+          onChange={(e) => setPromo((p) => ({ ...p, headline: e.target.value }))}
+          placeholder="Titre (ex. -10% sur les bouteilles 500 ml)"
+          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+        />
+        <textarea
+          value={promo.description}
+          onChange={(e) => setPromo((p) => ({ ...p, description: e.target.value }))}
+          placeholder="Description (optionnel)"
+          rows={2}
+          className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+        />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <select
+            value={promo.productId}
+            onChange={(e) => setPromo((p) => ({ ...p, productId: e.target.value }))}
+            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">Aucun produit lié</option>
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <input
+            type="date"
+            value={promo.startDate}
+            onChange={(e) => setPromo((p) => ({ ...p, startDate: e.target.value }))}
+            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+          />
+          <input
+            type="date"
+            value={promo.endDate}
+            onChange={(e) => setPromo((p) => ({ ...p, endDate: e.target.value }))}
+            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+          />
+        </div>
+        <button
+          onClick={save}
+          disabled={saving}
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60"
+        >
+          {saving ? "Enregistrement…" : "Enregistrer"}
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 function OrdersCard() {
   const [orders, setOrders] = useState<StorefrontOrder[]>([]);
+  const [confirmDates, setConfirmDates] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
@@ -1219,9 +1368,18 @@ function OrdersCard() {
       toast.error(`Mise à jour de la commande impossible : ${err.message}`),
     );
 
+  const confirmWithDeliveryDate = (id: string) =>
+    updateDoc(doc(db, "orders", id), {
+      status: "confirmed",
+      ...(confirmDates[id] ? { deliveryDate: confirmDates[id] } : {}),
+    }).catch((err) => toast.error(`Mise à jour de la commande impossible : ${err.message}`));
+
   const fulfillAndConvert = async (order: StorefrontOrder) => {
     const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), { status: "fulfilled" });
+    batch.update(doc(db, "orders", order.id), {
+      status: "fulfilled",
+      fulfilledAt: new Date().toISOString(),
+    });
     const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
     order.items.forEach((item, idx) => {
       const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
@@ -1236,7 +1394,12 @@ function OrdersCard() {
         quantite: item.quantity,
         prixUnitaire: item.unitPrice,
         remise: 0,
-        encaisse: 0,
+        // Mobile money is already settled by checkout time (payment.status
+        // "completed"); cash on delivery is collected the moment the order
+        // is marked "livrée" — either way the full line amount is encaissé
+        // here. Orders without a `payment` field predate this flow, so we
+        // can't assume cash changed hands and leave encaisse at 0.
+        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
         commerciale: "Boutique partenaire",
       });
     });
@@ -1253,32 +1416,66 @@ function OrdersCard() {
   return (
     <Card title="Commandes boutique partenaires">
       <Table
-        headers={["Date", "Partenaire", "Articles", "Total", "Statut", "Actions"]}
+        headers={[
+          "Date",
+          "Partenaire",
+          "Livraison",
+          "Articles",
+          "Total",
+          "Paiement",
+          "Statut",
+          "Actions",
+        ]}
         rows={orders.map((o) => [
           new Date(o.createdAt).toLocaleDateString("fr-FR"),
           o.partnerName,
+          <div className="text-xs">
+            <p>{o.partnerPhone ? `+${o.partnerPhone}` : "—"}</p>
+            {o.partnerAddress && <p className="text-muted-foreground">{o.partnerAddress}</p>}
+            {o.deliveryDate && (
+              <p className="mt-0.5 font-medium text-primary">
+                Livraison : {formatDateOnly(o.deliveryDate)}
+              </p>
+            )}
+          </div>,
           o.items.map((i) => `${i.quantity}× ${i.name}`).join(", "),
           fcFormat(o.total),
+          <span>
+            {!o.payment
+              ? "—"
+              : o.payment.method === "cash_on_delivery"
+                ? "Livraison"
+                : "Mobile money"}
+          </span>,
           <span>{ORDER_STATUS_LABELS[o.status]}</span>,
-          <div className="flex gap-3">
+          <div className="flex flex-col items-start gap-1.5">
             {o.status === "pending" && (
               <>
-                <button
-                  onClick={() => setStatus(o.id, "confirmed")}
-                  className="text-xs font-semibold text-primary hover:underline"
-                >
-                  Confirmer
-                </button>
-                <button
-                  onClick={() => setStatus(o.id, "cancelled")}
-                  className="text-xs font-semibold text-destructive hover:underline"
-                >
-                  Annuler
-                </button>
+                <input
+                  type="date"
+                  value={confirmDates[o.id] ?? ""}
+                  onChange={(e) => setConfirmDates((d) => ({ ...d, [o.id]: e.target.value }))}
+                  className="rounded border border-border bg-background px-1.5 py-1 text-xs text-foreground"
+                  aria-label="Date de livraison"
+                />
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => confirmWithDeliveryDate(o.id)}
+                    className="text-xs font-semibold text-primary hover:underline"
+                  >
+                    Confirmer
+                  </button>
+                  <button
+                    onClick={() => setStatus(o.id, "cancelled")}
+                    className="text-xs font-semibold text-destructive hover:underline"
+                  >
+                    Annuler
+                  </button>
+                </div>
               </>
             )}
             {o.status === "confirmed" && (
-              <>
+              <div className="flex gap-3">
                 <button
                   onClick={() => fulfillAndConvert(o)}
                   className="text-xs font-semibold text-success hover:underline"
@@ -1291,7 +1488,7 @@ function OrdersCard() {
                 >
                   Annuler
                 </button>
-              </>
+              </div>
             )}
           </div>,
         ])}
@@ -1313,6 +1510,8 @@ function CommercialisationSection() {
       <ExportBar section="commercialisation" />
 
       <CatalogueCard />
+
+      <PromoCard />
 
       <OrdersCard />
 
