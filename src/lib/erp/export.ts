@@ -188,10 +188,10 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         ["Pertes", `< ${pctFormat(state.parametres.tauxPertesMax)}`, pctFormat(c.tauxPertes)],
         ["Clients actifs", state.parametres.objectifClients, c.clientsActifs],
         ["Marge brute", pctFormat(state.parametres.objectifMargeBrute), pctFormat(c.margeBrute)],
-        ["Coût moyen / bouteille", "—", fcFormat(c.coutMoyenBouteille)],
-        ["Prix moyen vendu", "—", fcFormat(c.prixMoyenVendu)],
-        ["Marge unitaire", "—", fcFormat(c.margeUnitaire)],
-        ["ROI marketing", "—", pctFormat(c.roiMarketing)],
+        ["Coût moyen / bouteille", "-", fcFormat(c.coutMoyenBouteille)],
+        ["Prix moyen vendu", "-", fcFormat(c.prixMoyenVendu)],
+        ["Marge unitaire", "-", fcFormat(c.margeUnitaire)],
+        ["ROI marketing", "-", pctFormat(c.roiMarketing)],
         ["Créances à recouvrer", "0 FC", fcFormat(c.creances)],
       ],
     });
@@ -522,7 +522,7 @@ const csvCell = (v: string | number) => {
 
 export function exportExcel(report: Report, f: ExportFilter) {
   const lines: string[] = [
-    `AROM — ${report.titre}`,
+    `AROM - ${report.titre}`,
     `Campagne;${campagneLabel(f)}`,
     `Période;${periodeLabel(f)}`,
     `Responsable;${report.responsable}`,
@@ -569,7 +569,7 @@ export function exportPdf(report: Report, f: ExportFilter, logoUrl?: string) {
   table, tr, h2 { page-break-inside: avoid; }
 </style></head><body>
 <header>${logoUrl ? `<img src="${esc(logoUrl)}" alt="AROM">` : ""}
-  <div><h1>AROM — ${esc(report.titre)}</h1>
+  <div><h1>AROM - ${esc(report.titre)}</h1>
   <div class="sub">Saveurs naturelles · Rapport ERP</div></div>
 </header>
 <div class="meta">
@@ -589,7 +589,7 @@ ${report.blocks
             .join("")}</tbody></table>`),
   )
   .join("")}
-<footer>Document généré automatiquement par l'ERP AROM — usage interne.</footer>
+<footer>Document généré automatiquement par l'ERP AROM, usage interne.</footer>
 <script>window.onload = function () { setTimeout(function(){ window.print(); }, 250); };</script>
 </body></html>`;
 

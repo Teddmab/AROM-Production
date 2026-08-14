@@ -11,7 +11,7 @@ import { fcFormat } from "@/lib/erp/model";
 export const Route = createFileRoute("/storefront/")({
   component: StorefrontRoute,
   head: () => ({
-    meta: [{ title: "Boutique partenaire — AROM" }],
+    meta: [{ title: "Boutique partenaire - AROM" }],
   }),
 });
 
@@ -109,7 +109,7 @@ function Storefront() {
         createdAt: new Date().toISOString(),
       });
       setCart({});
-      toast.success("Commande envoyée — AROM la confirmera prochainement.");
+      toast.success("Commande envoyée, AROM la confirmera prochainement.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Commande impossible.");
     } finally {

@@ -1,5 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import heroAsset from "@/assets/arom-hero.asset.json";
+import { CountUp } from "@/components/motion/CountUp";
+import { Reveal } from "@/components/motion/Reveal";
 
 export const Route = createFileRoute("/")({
   component: Home,
@@ -13,7 +15,7 @@ export const Route = createFileRoute("/")({
 
 function Home() {
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen overflow-x-clip">
       {/* NAV */}
       <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
@@ -49,8 +51,14 @@ function Home() {
           </nav>
           <div className="flex items-center gap-3">
             <Link
+              to="/login"
+              className="hidden text-sm font-semibold text-foreground/80 transition hover:text-primary lg:inline-flex"
+            >
+              Se connecter
+            </Link>
+            <Link
               to="/storefront/signup"
-              className="hidden items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95 sm:inline-flex"
+              className="hidden items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95 lg:inline-flex"
             >
               Espace partenaire
             </Link>
@@ -75,7 +83,7 @@ function Home() {
             De la production <br />à la <span className="italic text-gold">transformation.</span>
           </h1>
           <p className="mt-6 max-w-xl text-lg leading-relaxed text-foreground/70">
-            AROM — le goût authentique de l'ananas, du Kasaï au monde. Pilotez la campagne mensuelle
+            AROM, le goût authentique de l'ananas, du Kasaï au monde. Pilotez la campagne mensuelle
             : approvisionnement, production, stock, commercialisation, marketing et finances.
           </p>
           <div className="mt-8 flex flex-wrap gap-4">
@@ -96,12 +104,14 @@ function Home() {
 
           <dl className="mt-14 grid grid-cols-3 gap-6 border-t border-border pt-8">
             {[
-              { k: "300 kg", v: "Ananas / mois" },
-              { k: "300", v: "Bouteilles" },
-              { k: "25", v: "Clients cibles" },
+              { value: 300, suffix: " kg", v: "Ananas / mois" },
+              { value: 300, suffix: "", v: "Bouteilles" },
+              { value: 25, suffix: "", v: "Clients cibles" },
             ].map((s) => (
               <div key={s.v}>
-                <dt className="font-display text-3xl font-bold text-primary">{s.k}</dt>
+                <dt className="font-display text-3xl font-bold text-primary">
+                  <CountUp value={s.value} format={(n) => `${Math.round(n)}${s.suffix}`} />
+                </dt>
                 <dd className="mt-1 text-xs uppercase tracking-wider text-muted-foreground">
                   {s.v}
                 </dd>
@@ -124,14 +134,14 @@ function Home() {
 
       {/* PROCESS */}
       <section id="process" className="mx-auto max-w-7xl px-6 py-20">
-        <div className="mx-auto max-w-2xl text-center">
+        <Reveal className="mx-auto max-w-2xl text-center">
           <p className="text-xs font-semibold uppercase tracking-[0.3em] text-gold">
             Qualité · Fraîcheur · Traçabilité
           </p>
           <h2 className="mt-3 text-4xl font-bold text-primary md:text-5xl">
             Du champ à votre bouteille, avec passion.
           </h2>
-        </div>
+        </Reveal>
         <ol className="mt-14 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
           {[
             {
@@ -180,7 +190,7 @@ function Home() {
 
       {/* ENGAGEMENT */}
       <section id="engagement" className="mx-auto max-w-7xl px-6 py-20">
-        <div className="grid gap-8 rounded-3xl bg-primary p-10 text-primary-foreground md:grid-cols-[1fr_1.2fr] md:p-16">
+        <Reveal className="grid gap-8 rounded-3xl bg-primary p-10 text-primary-foreground md:grid-cols-[1fr_1.2fr] md:p-16">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-gold">
               Notre engagement
@@ -211,13 +221,13 @@ function Home() {
               </li>
             ))}
           </ul>
-        </div>
+        </Reveal>
       </section>
 
       {/* CAMPAGNE */}
       {/* MEDIA */}
       <section id="media" className="mx-auto max-w-7xl px-6 py-20">
-        <div className="flex flex-wrap items-end justify-between gap-4">
+        <Reveal className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-gold">
               Média & Communication
@@ -226,7 +236,7 @@ function Home() {
               Notre histoire en images.
             </h2>
             <p className="mt-3 max-w-xl text-foreground/70">
-              Vidéos de production, témoignages clients et campagnes marketing — pour partager le
+              Vidéos de production, témoignages clients et campagnes marketing, pour partager le
               savoir-faire AROM au-delà du Kasaï.
             </p>
           </div>
@@ -237,11 +247,11 @@ function Home() {
             Partager
             <span aria-hidden>→</span>
           </a>
-        </div>
+        </Reveal>
 
         <div className="mt-10 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
           {/* Featured video */}
-          <figure className="group relative overflow-hidden rounded-3xl bg-primary shadow-2xl ring-1 ring-black/5">
+          <figure className="group relative min-w-0 overflow-hidden rounded-3xl bg-primary shadow-2xl ring-1 ring-black/5">
             <video
               className="aspect-video w-full object-cover"
               controls
@@ -265,12 +275,12 @@ function Home() {
           </figure>
 
           {/* Playlist */}
-          <ul className="grid gap-4">
+          <ul className="grid min-w-0 gap-4">
             {[
               { t: "Récolte & sélection des ananas", d: "1:42", tag: "Production" },
               { t: "Atelier de transformation", d: "2:15", tag: "Qualité" },
               { t: "Témoignage · Nos clients à Kinshasa", d: "0:58", tag: "Marketing" },
-              { t: "Publicité AROM — 100% naturel", d: "0:30", tag: "Campagne" },
+              { t: "Publicité AROM : 100% naturel", d: "0:30", tag: "Campagne" },
             ].map((v) => (
               <li key={v.t}>
                 <button
@@ -308,7 +318,7 @@ function Home() {
 
       {/* SOCIAL */}
       <section id="social" className="mx-auto max-w-7xl px-6 py-20">
-        <div className="overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-card via-card to-gold/10 p-10 md:p-14">
+        <Reveal className="overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-card via-card to-gold/10 p-10 md:p-14">
           <div className="grid gap-10 md:grid-cols-[1fr_1.3fr] md:items-center">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-gold">
@@ -325,13 +335,17 @@ function Home() {
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-6">
                 <div>
-                  <p className="font-display text-3xl font-bold text-primary">+2.4k</p>
+                  <p className="font-display text-3xl font-bold text-primary">
+                    <CountUp value={2.4} format={(n) => `+${n.toFixed(1)}k`} />
+                  </p>
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
                     Abonnés cumulés
                   </p>
                 </div>
                 <div>
-                  <p className="font-display text-3xl font-bold text-primary">18</p>
+                  <p className="font-display text-3xl font-bold text-primary">
+                    <CountUp value={18} />
+                  </p>
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
                     Villes touchées
                   </p>
@@ -436,11 +450,11 @@ function Home() {
               ))}
             </ul>
           </div>
-        </div>
+        </Reveal>
       </section>
 
       <section id="campagne" className="mx-auto max-w-7xl px-6 pb-24">
-        <div className="grid gap-6 rounded-3xl border border-border bg-card p-10 md:grid-cols-[2fr_1fr]">
+        <Reveal className="grid gap-6 rounded-3xl border border-border bg-card p-10 md:grid-cols-[2fr_1fr]">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-gold">
               Campagne N°001/2026
@@ -450,7 +464,7 @@ function Home() {
             </h2>
             <p className="mt-3 max-w-lg text-foreground/70">
               Le tableau de bord opérationnel réunit approvisionnement, production, stock, ventes,
-              marketing, finances et performance du personnel — dans une seule vue.
+              marketing, finances et performance du personnel, dans une seule vue.
             </p>
           </div>
           <Link
@@ -463,7 +477,7 @@ function Home() {
               <span className="mt-4 inline-block text-2xl">→</span>
             </div>
           </Link>
-        </div>
+        </Reveal>
       </section>
 
       <footer className="border-t border-border bg-primary py-6 text-center text-xs uppercase tracking-[0.3em] text-primary-foreground">

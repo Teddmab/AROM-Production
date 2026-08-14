@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/firebase/auth";
 
@@ -10,7 +10,7 @@ export const Route = createFileRoute("/login")({
     return redirect ? { redirect } : {};
   },
   head: () => ({
-    meta: [{ title: "Connexion — AROM" }],
+    meta: [{ title: "Connexion - AROM" }],
   }),
 });
 
@@ -23,9 +23,11 @@ function LoginRoute() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (user && profile) {
-    navigate({ to: profile.role === "partner" ? "/storefront" : redirect || "/dashboard" });
-  }
+  useEffect(() => {
+    if (user && profile) {
+      navigate({ to: profile.role === "partner" ? "/storefront" : redirect || "/dashboard" });
+    }
+  }, [user, profile, redirect, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,11 +47,13 @@ function LoginRoute() {
     <div className="grid min-h-screen place-items-center bg-background px-5 py-12">
       <div className="w-full max-w-95">
         <div className="flex flex-col items-center gap-4 text-center">
-          <img
-            src="/logo-nav.png"
-            alt="AROM"
-            className="h-20 w-20 rounded-[22px] object-cover shadow-lg shadow-primary/15 ring-1 ring-black/5"
-          />
+          <Link to="/" aria-label="Retour à l'accueil">
+            <img
+              src="/logo-nav.png"
+              alt="AROM"
+              className="h-20 w-20 rounded-[22px] object-cover shadow-lg shadow-primary/15 ring-1 ring-black/5 transition active:scale-95"
+            />
+          </Link>
           <div>
             <h1 className="font-display text-[28px] font-bold leading-tight text-primary">
               Se connecter
@@ -96,6 +100,11 @@ function LoginRoute() {
           Partenaire acheteur ?{" "}
           <Link to="/storefront/signup" className="font-semibold text-primary">
             Créer un compte boutique
+          </Link>
+        </p>
+        <p className="mt-3 text-center text-[13px] text-muted-foreground">
+          <Link to="/" className="font-medium text-primary">
+            ← Retour à l'accueil
           </Link>
         </p>
       </div>

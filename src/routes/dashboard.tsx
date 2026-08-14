@@ -31,13 +31,13 @@ export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
   head: () => ({
     meta: [
-      { title: "AROM — ERP & tableau de bord opérationnel" },
+      { title: "AROM - ERP & tableau de bord opérationnel" },
       {
         name: "description",
         content:
-          "ERP AROM connecté : approvisionnement, production, stocks, ventes, marketing, finances et primes — campagne N°001/2026.",
+          "ERP AROM connecté : approvisionnement, production, stocks, ventes, marketing, finances et primes, campagne N°001/2026.",
       },
-      { property: "og:title", content: "AROM — ERP & tableau de bord opérationnel" },
+      { property: "og:title", content: "AROM - ERP & tableau de bord opérationnel" },
       {
         property: "og:description",
         content:
@@ -292,7 +292,7 @@ function KpiTile({
       <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
       <div className="mt-3 flex items-end justify-between gap-2">
         <p className="font-display text-2xl font-bold text-primary md:text-3xl">
-          {realise ?? "—"}
+          {realise ?? "-"}
           {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
         </p>
         {objectif !== undefined && (
@@ -354,7 +354,7 @@ function Table({
                 {r.map((c, j) => (
                   <td key={j} className="whitespace-nowrap px-3 py-2.5 align-middle">
                     {c === "" || c === null || c === undefined ? (
-                      <span className="text-muted-foreground/50">—</span>
+                      <span className="text-muted-foreground/50">-</span>
                     ) : (
                       c
                     )}
@@ -496,7 +496,7 @@ function ExecutiveSection() {
       <SectionHeader
         eyebrow="Tableau de bord exécutif"
         title="Vue générale de la campagne"
-        subtitle="Direction Générale — données consolidées depuis l'ERP"
+        subtitle="Direction Générale, données consolidées depuis l'ERP"
       />
       <ExportBar section="executif" />
 
@@ -559,7 +559,7 @@ function ExecutiveSection() {
         />
       </Card>
 
-      <Card title="Synthèse financière — hors amortissement">
+      <Card title="Synthèse financière (hors amortissement)">
         <Table
           headers={["Indicateur", "Valeur", "Lecture"]}
           rows={[
@@ -1022,7 +1022,7 @@ function OrdersCard() {
     });
     try {
       await batch.commit();
-      toast.success("Commande livrée — ventes enregistrées.");
+      toast.success("Commande livrée, ventes enregistrées.");
     } catch (err) {
       toast.error(
         err instanceof Error ? `Conversion impossible : ${err.message}` : "Conversion impossible.",
@@ -1527,7 +1527,7 @@ function KpiSection() {
     { k: "Pertes", o: `< ${pctFormat(p.tauxPertesMax)}`, r: pctFormat(computed.tauxPertes) },
     { k: "Clients actifs", o: String(p.objectifClients), r: String(computed.clientsActifs) },
     { k: "Marge brute", o: pctFormat(p.objectifMargeBrute), r: pctFormat(computed.margeBrute) },
-    { k: "Coût moyen / bouteille", o: "—", r: fcFormat(computed.coutMoyenBouteille) },
+    { k: "Coût moyen / bouteille", o: "-", r: fcFormat(computed.coutMoyenBouteille) },
     { k: "Créances à recouvrer", o: "0 FC", r: fcFormat(computed.creances) },
   ];
   return (
@@ -1567,7 +1567,7 @@ function ParametresSection() {
       <SectionHeader
         eyebrow="Module ERP 09"
         title="Paramètres de gestion"
-        subtitle="Hypothèses modifiables — elles recalculent tous les tableaux de bord"
+        subtitle="Hypothèses modifiables, elles recalculent tous les tableaux de bord"
         responsable="Direction Générale"
       />
       <Card
