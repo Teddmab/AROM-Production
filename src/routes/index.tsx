@@ -51,18 +51,6 @@ function Home() {
           </nav>
           <div className="flex items-center gap-3">
             <Link
-              to="/login"
-              className="hidden text-sm font-semibold text-foreground/80 transition hover:text-primary lg:inline-flex"
-            >
-              Se connecter
-            </Link>
-            <Link
-              to="/storefront/signup"
-              className="hidden items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95 lg:inline-flex"
-            >
-              Espace partenaire
-            </Link>
-            <Link
               to="/dashboard"
               className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition active:scale-95"
             >
