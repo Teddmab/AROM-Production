@@ -1,0 +1,7 @@
+{
+  // Merged into the build's generated .output/server/wrangler.json (see
+  // vite.config.ts's nitro() plugin, preset "cloudflare-module"). Only
+  // `name` needs to be pinned here — Nitro computes `main`, `assets`,
+  // and `compatibility_date` fresh on every build.
+  "name": "arom-production"
+}
