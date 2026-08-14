@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/firebase/auth";
 
@@ -11,13 +11,22 @@ export const Route = createFileRoute("/storefront/signup")({
 });
 
 function SignupRoute() {
-  const { signUpPartner } = useAuth();
+  const { signUpPartner, user, profile, loading } = useAuth();
   const navigate = useNavigate();
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Already signed in with a real account — submitting this form would
+    // silently sign that session out and create a brand-new partner
+    // account instead, so send them to where they already belong.
+    if (!loading && user && profile?.active) {
+      navigate({ to: profile.role === "partner" ? "/storefront" : "/dashboard" });
+    }
+  }, [loading, user, profile, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

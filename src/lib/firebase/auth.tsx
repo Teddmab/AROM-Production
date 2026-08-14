@@ -46,13 +46,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!u) {
         setProfile(null);
         setProfileResolved(true);
+      } else {
+        // Flip this in the same tick user becomes non-null, not in the
+        // effect below — otherwise there's a render in between where
+        // `loading` is false but the profile for the new user hasn't been
+        // fetched yet, briefly exposing the previous (often null) profile.
+        setProfileResolved(false);
       }
     });
   }, []);
 
   useEffect(() => {
     if (!user) return;
-    setProfileResolved(false);
     return onSnapshot(
       doc(db, "users", user.uid),
       (snap) => {

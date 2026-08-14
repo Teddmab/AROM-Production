@@ -15,7 +15,7 @@ export const Route = createFileRoute("/login")({
 });
 
 function LoginRoute() {
-  const { signIn, user, profile } = useAuth();
+  const { signIn, user, profile, loading, signOutUser } = useAuth();
   const navigate = useNavigate();
   const { redirect } = Route.useSearch();
   const [email, setEmail] = useState("");
@@ -24,10 +24,19 @@ function LoginRoute() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user && profile) {
-      navigate({ to: profile.role === "partner" ? "/storefront" : redirect || "/dashboard" });
+    if (loading || !user) return;
+    if (!profile) {
+      signOutUser();
+      setError("Aucun profil n'est associé à ce compte. Contactez un administrateur AROM.");
+      return;
     }
-  }, [user, profile, redirect, navigate]);
+    if (!profile.active) {
+      signOutUser();
+      setError("Ce compte a été désactivé. Contactez un administrateur AROM.");
+      return;
+    }
+    navigate({ to: profile.role === "partner" ? "/storefront" : redirect || "/dashboard" });
+  }, [loading, user, profile, redirect, navigate, signOutUser]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
