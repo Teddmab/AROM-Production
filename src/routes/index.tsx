@@ -1,16 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import heroAsset from "@/assets/arom-hero.asset.json";
 import { CountUp } from "@/components/motion/CountUp";
 import { Reveal } from "@/components/motion/Reveal";
 
 export const Route = createFileRoute("/")({
   component: Home,
-  head: () => ({
-    meta: [
-      { property: "og:image", content: heroAsset.url },
-      { name: "twitter:image", content: heroAsset.url },
-    ],
-  }),
 });
 
 function Home() {
@@ -244,7 +237,7 @@ function Home() {
               className="aspect-video w-full object-cover"
               controls
               preload="metadata"
-              poster={heroAsset.url}
+              poster="/logo-hero.png"
             >
               <source src="" type="video/mp4" />
               Votre navigateur ne supporte pas la vidéo HTML5.

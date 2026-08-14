@@ -7,11 +7,10 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Toaster } from "sonner";
 
 import appCss from "../styles.css?url";
-import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AuthProvider } from "../lib/firebase/auth";
 
 function NotFoundComponent() {
@@ -39,9 +38,6 @@ function NotFoundComponent() {
 function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   console.error(error);
   const router = useRouter();
-  useEffect(() => {
-    reportLovableError(error, { boundary: "tanstack_root_error_component" });
-  }, [error]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -106,16 +102,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         content:
           "Tableau de bord opérationnel AROM : suivi de la production et de la commercialisation des jus 100% naturels d'ananas.",
       },
-      {
-        property: "og:image",
-        content:
-          "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp",
-      },
-      {
-        name: "twitter:image",
-        content:
-          "https://storage.googleapis.com/gpt-engineer-file-uploads/NAmaMe4EoUOXmKciOIJeIxG67Dc2/social-images/social-1783854393760-IMANAYI_Market.webp",
-      },
+      { property: "og:image", content: "/logo-hero.png" },
+      { name: "twitter:image", content: "/logo-hero.png" },
     ],
     links: [
       { rel: "icon", href: "/favicon.ico", sizes: "32x32" },
