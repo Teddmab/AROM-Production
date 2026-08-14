@@ -1,12 +1,15 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import { LogOut, Minus, Plus, ShoppingBag, Truck } from "lucide-react";
+import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import { LogOut, Minus, Plus, ShoppingBag, Truck, User } from "lucide-react";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/firebase/auth";
 import { RequireRole } from "@/lib/firebase/require-role";
-import { fcFormat } from "@/lib/erp/model";
+import { fcFormat, formatDateOnly } from "@/lib/erp/model";
 import { CheckoutSheet } from "@/components/storefront/CheckoutSheet";
+import { OrderDetailSheet } from "@/components/storefront/OrderDetailSheet";
+import { ProductDetailSheet } from "@/components/storefront/ProductDetailSheet";
+import { isPromoLive, PromoBanner, type Promo } from "@/components/storefront/PromoBanner";
 
 export const Route = createFileRoute("/storefront/")({
   component: StorefrontRoute,
@@ -22,6 +25,7 @@ interface Product {
   price: number;
   active: boolean;
   imageUrl?: string;
+  description?: string;
 }
 
 interface OrderPayment {
@@ -34,6 +38,8 @@ interface Order {
   status: "pending" | "confirmed" | "fulfilled" | "cancelled";
   total: number;
   createdAt: string;
+  fulfilledAt?: string;
+  deliveryDate?: string;
   items: { productId: string; name: string; quantity: number; unitPrice: number; format: string }[];
   payment?: OrderPayment;
 }
@@ -69,6 +75,9 @@ function Storefront() {
   const [cart, setCart] = useState<Record<string, number>>({});
   const [tab, setTab] = useState<Tab>("catalogue");
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [promo, setPromo] = useState<Promo | null>(null);
+  const [detailProductId, setDetailProductId] = useState<string | null>(null);
+  const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     // Reached directly (bookmark, browser back) mid-onboarding — send them
@@ -81,6 +90,12 @@ function Storefront() {
   useEffect(() => {
     return onSnapshot(collection(db, "products"), (snap) => {
       setProducts(snap.docs.map((d) => d.data() as Product).filter((p) => p.active));
+    });
+  }, []);
+
+  useEffect(() => {
+    return onSnapshot(doc(db, "config", "promo"), (snap) => {
+      setPromo(snap.exists() ? (snap.data() as Promo) : null);
     });
   }, []);
 
@@ -141,13 +156,22 @@ function Storefront() {
             />
             <p className="font-display text-[17px] font-bold text-primary">Boutique AROM</p>
           </div>
-          <button
-            onClick={() => signOutUser()}
-            className="flex items-center gap-1.5 rounded-full bg-secondary px-3.5 py-2 text-[13px] font-semibold text-secondary-foreground transition active:scale-95"
-          >
-            <LogOut className="h-3.5 w-3.5" aria-hidden />
-            Sortir
-          </button>
+          <div className="flex items-center gap-2">
+            <Link
+              to="/storefront/profile"
+              aria-label="Mon profil"
+              className="grid h-9 w-9 place-items-center rounded-full bg-secondary text-secondary-foreground transition active:scale-90"
+            >
+              <User className="h-4 w-4" aria-hidden />
+            </Link>
+            <button
+              onClick={() => signOutUser()}
+              className="flex items-center gap-1.5 rounded-full bg-secondary px-3.5 py-2 text-[13px] font-semibold text-secondary-foreground transition active:scale-95"
+            >
+              <LogOut className="h-3.5 w-3.5" aria-hidden />
+              Sortir
+            </button>
+          </div>
         </div>
         <div className="mx-auto max-w-2xl px-5 pb-3">
           <div className="flex gap-1 rounded-full bg-secondary p-1">
@@ -178,28 +202,42 @@ function Storefront() {
               {profile?.displayName || profile?.email}
             </p>
 
+            {isPromoLive(promo) && (
+              <div className="mt-4">
+                <PromoBanner promo={promo} onProductClick={setDetailProductId} />
+              </div>
+            )}
+
             <div className="mt-4 overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
               {products.map((p, i) => (
                 <div key={p.id}>
                   {i > 0 && <div className="h-px bg-border/70" />}
                   <div className="flex items-center gap-3.5 px-4 py-3.5">
-                    {p.imageUrl ? (
-                      <img
-                        src={p.imageUrl}
-                        alt={p.name}
-                        className="h-14 w-14 shrink-0 rounded-xl object-cover ring-1 ring-black/5"
-                      />
-                    ) : (
-                      <div className="grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-secondary text-[10px] font-medium text-muted-foreground">
-                        AROM
-                      </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[15px] font-semibold text-foreground">{p.name}</p>
-                      <p className="mt-0.5 text-[13px] text-muted-foreground">
-                        {fcFormat(p.price)} / bouteille
-                      </p>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDetailProductId(p.id)}
+                      className="flex min-w-0 flex-1 items-center gap-3.5 text-left"
+                    >
+                      {p.imageUrl ? (
+                        <img
+                          src={p.imageUrl}
+                          alt={p.name}
+                          className="h-14 w-14 shrink-0 rounded-xl object-cover ring-1 ring-black/5"
+                        />
+                      ) : (
+                        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-secondary text-[10px] font-medium text-muted-foreground">
+                          AROM
+                        </div>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[15px] font-semibold text-foreground">
+                          {p.name}
+                        </span>
+                        <span className="mt-0.5 block text-[13px] text-muted-foreground">
+                          {fcFormat(p.price)} / bouteille
+                        </span>
+                      </span>
+                    </button>
                     <div className="flex shrink-0 items-center gap-3 rounded-full bg-secondary px-1 py-1">
                       <button
                         type="button"
@@ -245,7 +283,11 @@ function Storefront() {
               {orders.map((o, i) => (
                 <div key={o.id}>
                   {i > 0 && <div className="h-px bg-border/70" />}
-                  <div className="flex items-center justify-between gap-4 px-4 py-3.5">
+                  <button
+                    type="button"
+                    onClick={() => setDetailOrderId(o.id)}
+                    className="flex w-full items-center justify-between gap-4 px-4 py-3.5 text-left transition active:bg-secondary/40"
+                  >
                     <div className="min-w-0">
                       <p className="text-[15px] font-medium text-foreground">
                         {new Date(o.createdAt).toLocaleDateString("fr-FR")}
@@ -261,6 +303,11 @@ function Storefront() {
                           {paymentLabel(o.payment)}
                         </p>
                       )}
+                      {o.status === "confirmed" && o.deliveryDate && (
+                        <p className="mt-1 text-[12px] font-medium text-primary">
+                          Livraison prévue le {formatDateOnly(o.deliveryDate)}
+                        </p>
+                      )}
                     </div>
                     <div className="shrink-0 text-right">
                       <p className="text-[15px] font-semibold text-foreground">
@@ -272,7 +319,7 @@ function Storefront() {
                         {STATUS_STYLES[o.status].label}
                       </span>
                     </div>
-                  </div>
+                  </button>
                 </div>
               ))}
             </div>
@@ -314,6 +361,18 @@ function Storefront() {
           setCheckoutOpen(false);
           setTab("orders");
         }}
+      />
+
+      <ProductDetailSheet
+        product={products.find((p) => p.id === detailProductId) ?? null}
+        quantity={detailProductId ? (cart[detailProductId] ?? 0) : 0}
+        onClose={() => setDetailProductId(null)}
+        onSetQty={(qty) => detailProductId && setQty(detailProductId, qty)}
+      />
+
+      <OrderDetailSheet
+        order={orders.find((o) => o.id === detailOrderId) ?? null}
+        onClose={() => setDetailOrderId(null)}
       />
     </div>
   );

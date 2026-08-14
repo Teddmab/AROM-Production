@@ -331,3 +331,12 @@ export const fcFormat = (n: number) =>
     .replace(/\u202f|\u00a0/g, " ")} FC`;
 
 export const pctFormat = (n: number) => `${(n * 100).toFixed(1)} %`;
+
+// Formats a plain "YYYY-MM-DD" date-only string (e.g. from an <input
+// type="date">) without going through `new Date(...)`, which parses it
+// as UTC midnight and can shift the displayed day depending on the
+// viewer's timezone.
+export const formatDateOnly = (isoDate: string) => {
+  const [y, m, d] = isoDate.split("-");
+  return `${d}/${m}/${y}`;
+};

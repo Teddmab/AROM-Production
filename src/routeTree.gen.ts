@@ -15,6 +15,7 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as StorefrontIndexRouteImport } from './routes/storefront/index'
 import { Route as StorefrontSignupRouteImport } from './routes/storefront/signup'
+import { Route as StorefrontProfileRouteImport } from './routes/storefront/profile'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -46,12 +47,18 @@ const StorefrontSignupRoute = StorefrontSignupRouteImport.update({
   path: '/storefront/signup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const StorefrontProfileRoute = StorefrontProfileRouteImport.update({
+  id: '/storefront/profile',
+  path: '/storefront/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/join': typeof JoinRoute
   '/login': typeof LoginRoute
+  '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
 }
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/join': typeof JoinRoute
   '/login': typeof LoginRoute
+  '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront': typeof StorefrontIndexRoute
 }
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/join': typeof JoinRoute
   '/login': typeof LoginRoute
+  '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
 }
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/join'
     | '/login'
+    | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
   fileRoutesByTo: FileRoutesByTo
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/join'
     | '/login'
+    | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront'
   id:
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/join'
     | '/login'
+    | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
   fileRoutesById: FileRoutesById
@@ -104,6 +116,7 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   JoinRoute: typeof JoinRoute
   LoginRoute: typeof LoginRoute
+  StorefrontProfileRoute: typeof StorefrontProfileRoute
   StorefrontSignupRoute: typeof StorefrontSignupRoute
   StorefrontIndexRoute: typeof StorefrontIndexRoute
 }
@@ -152,6 +165,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof StorefrontSignupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/storefront/profile': {
+      id: '/storefront/profile'
+      path: '/storefront/profile'
+      fullPath: '/storefront/profile'
+      preLoaderRoute: typeof StorefrontProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -160,6 +180,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   JoinRoute: JoinRoute,
   LoginRoute: LoginRoute,
+  StorefrontProfileRoute: StorefrontProfileRoute,
   StorefrontSignupRoute: StorefrontSignupRoute,
   StorefrontIndexRoute: StorefrontIndexRoute,
 }

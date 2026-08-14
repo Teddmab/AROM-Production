@@ -10,7 +10,15 @@ import {
   GoogleAuthProvider,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, onSnapshot, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+import {
+  deleteField,
+  doc,
+  getDoc,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore";
 import { auth, db } from "./config";
 import { AROM_DEPOT_NAME } from "@/lib/storefront/depot";
 
@@ -92,6 +100,13 @@ interface AuthContextValue {
    * as long as `role` doesn't change.
    */
   completePartnerOnboarding: (data: PartnerOnboardingData) => Promise<void>;
+  /**
+   * For /storefront/profile — lets an already-onboarded partner correct
+   * their own boutique name, contact, address, or ID number. Same rule
+   * coverage as completePartnerOnboarding (partner self-update, `role`
+   * unchanged), so this also needed no firestore.rules change.
+   */
+  updatePartnerProfile: (data: PartnerOnboardingData & { displayName: string }) => Promise<void>;
   /**
    * Reads an invite by ID (public get, see firestore.rules) — used by
    * /join to preview who's being invited to what before asking for a
@@ -207,6 +222,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ...(data.idNumber ? { idNumber: data.idNumber } : {}),
         onboardingComplete: true,
         pointDeVente: AROM_DEPOT_NAME,
+      });
+    },
+    updatePartnerProfile: async (data) => {
+      if (!auth.currentUser) throw new Error("Vous devez être connecté.");
+      const { ville, commune, quartier, repere } = data.address;
+      await updateDoc(doc(db, "users", auth.currentUser.uid), {
+        displayName: data.displayName,
+        contactName: data.contactName,
+        phone: data.phone,
+        address: { ville, commune, quartier, ...(repere ? { repere } : {}) },
+        // Explicit deleteField() (not just omitting the key) so clearing
+        // the field in the edit form actually clears it — updateDoc
+        // leaves unlisted fields untouched otherwise.
+        idNumber: data.idNumber ? data.idNumber : deleteField(),
       });
     },
     getInvite: async (inviteId) => {
