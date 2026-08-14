@@ -10,7 +10,6 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { toast } from "sonner";
-import logoAsset from "@/assets/arom-logo.asset.json";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
 import { db } from "@/lib/firebase/config";
 import {
@@ -99,7 +98,7 @@ function Dashboard() {
         <div className="mx-auto flex max-w-[1400px] items-center gap-6 px-6 py-4">
           <Link to="/" className="flex items-center gap-3">
             <img
-              src={logoAsset.url}
+              src="/logo-nav.png"
               alt="AROM"
               className="h-11 w-11 rounded-full object-cover ring-2 ring-gold/40"
             />

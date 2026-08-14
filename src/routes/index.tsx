@@ -1,5 +1,4 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import logoAsset from "@/assets/arom-logo.asset.json";
 import heroAsset from "@/assets/arom-hero.asset.json";
 
 export const Route = createFileRoute("/")({
@@ -16,51 +15,53 @@ function Home() {
   return (
     <div className="min-h-screen">
       {/* NAV */}
-      <header className="mx-auto flex max-w-7xl items-center justify-between px-6 py-6">
-        <div className="flex items-center gap-3">
-          <img
-            src={logoAsset.url}
-            alt="AROM"
-            className="h-14 w-14 rounded-full object-cover ring-2 ring-gold/40"
-          />
-          <div>
-            <p className="font-display text-xl font-bold leading-none text-primary">AROM</p>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gold">
-              Saveurs Naturelles
-            </p>
+      <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-3">
+            <img
+              src="/logo-nav.png"
+              alt="AROM"
+              className="h-11 w-11 rounded-xl object-cover shadow-sm ring-1 ring-black/5"
+            />
+            <div>
+              <p className="font-display text-lg font-bold leading-none text-primary">AROM</p>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gold">
+                Saveurs Naturelles
+              </p>
+            </div>
           </div>
-        </div>
-        <nav className="hidden items-center gap-8 text-sm font-medium text-foreground/80 md:flex">
-          <a href="#process" className="hover:text-primary">
-            Le process
-          </a>
-          <a href="#engagement" className="hover:text-primary">
-            Engagement
-          </a>
-          <a href="#media" className="hover:text-primary">
-            Média
-          </a>
-          <a href="#social" className="hover:text-primary">
-            Réseaux
-          </a>
-          <a href="#campagne" className="hover:text-primary">
-            Campagne
-          </a>
-        </nav>
-        <div className="flex items-center gap-3">
-          <Link
-            to="/storefront/signup"
-            className="hidden items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary transition hover:bg-primary/5 sm:inline-flex"
-          >
-            Espace partenaire
-          </Link>
-          <Link
-            to="/dashboard"
-            className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition hover:bg-primary/90"
-          >
-            Tableau de bord
-            <span aria-hidden>→</span>
-          </Link>
+          <nav className="hidden items-center gap-8 text-sm font-medium text-foreground/80 md:flex">
+            <a href="#process" className="transition hover:text-primary">
+              Le process
+            </a>
+            <a href="#engagement" className="transition hover:text-primary">
+              Engagement
+            </a>
+            <a href="#media" className="transition hover:text-primary">
+              Média
+            </a>
+            <a href="#social" className="transition hover:text-primary">
+              Réseaux
+            </a>
+            <a href="#campagne" className="transition hover:text-primary">
+              Campagne
+            </a>
+          </nav>
+          <div className="flex items-center gap-3">
+            <Link
+              to="/storefront/signup"
+              className="hidden items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95 sm:inline-flex"
+            >
+              Espace partenaire
+            </Link>
+            <Link
+              to="/dashboard"
+              className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition active:scale-95"
+            >
+              Tableau de bord
+              <span aria-hidden>→</span>
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -80,14 +81,14 @@ function Home() {
           <div className="mt-8 flex flex-wrap gap-4">
             <Link
               to="/dashboard"
-              className="inline-flex items-center gap-2 rounded-full bg-primary px-7 py-3.5 text-sm font-semibold text-primary-foreground shadow-xl shadow-primary/25 transition hover:bg-primary/90"
+              className="inline-flex items-center gap-2 rounded-full bg-primary px-7 py-3.5 text-sm font-semibold text-primary-foreground shadow-xl shadow-primary/25 transition active:scale-95"
             >
               Ouvrir le tableau de bord
               <span aria-hidden>→</span>
             </Link>
             <a
               href="#process"
-              className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-card px-7 py-3.5 text-sm font-semibold text-primary transition hover:bg-primary/5"
+              className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-card px-7 py-3.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95"
             >
               Découvrir le process
             </a>
@@ -113,7 +114,7 @@ function Home() {
           <div className="absolute -inset-8 rounded-[3rem] bg-gradient-to-br from-gold/30 via-transparent to-primary/20 blur-3xl" />
           <div className="relative overflow-hidden rounded-[2rem] bg-card shadow-2xl ring-1 ring-black/5">
             <img
-              src={logoAsset.url}
+              src="/logo-hero.png"
               alt="Logo AROM"
               className="aspect-square w-full object-cover"
             />
@@ -162,7 +163,7 @@ function Home() {
           ].map((s) => (
             <li
               key={s.n}
-              className="group relative overflow-hidden rounded-2xl border border-border bg-card p-6 transition hover:-translate-y-1 hover:shadow-xl"
+              className="group relative overflow-hidden rounded-3xl border border-border bg-card p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-xl"
             >
               <div className="flex items-center gap-3">
                 <span className="grid h-10 w-10 place-items-center rounded-full bg-primary font-display text-sm font-bold text-primary-foreground">
@@ -231,7 +232,7 @@ function Home() {
           </div>
           <a
             href="#social"
-            className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary transition hover:bg-primary/5"
+            className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-card px-5 py-2.5 text-sm font-semibold text-primary shadow-sm transition active:scale-95"
           >
             Partager
             <span aria-hidden>→</span>
@@ -274,7 +275,7 @@ function Home() {
               <li key={v.t}>
                 <button
                   type="button"
-                  className="group flex w-full items-center gap-4 rounded-2xl border border-border bg-card p-4 text-left transition hover:-translate-y-0.5 hover:shadow-lg"
+                  className="group flex w-full items-center gap-4 rounded-3xl border border-border bg-card p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98]"
                 >
                   <span className="relative grid h-16 w-24 shrink-0 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-primary to-leaf">
                     <span className="grid h-9 w-9 place-items-center rounded-full bg-white/95 text-primary shadow-md transition group-hover:scale-110">
@@ -402,7 +403,7 @@ function Home() {
                     href={s.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="group flex items-center gap-4 rounded-2xl border border-border bg-card px-4 py-4 transition hover:-translate-y-0.5 hover:shadow-lg"
+                    className="group flex items-center gap-4 rounded-3xl border border-border bg-card px-4 py-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98]"
                   >
                     <span
                       className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-white shadow-md"
@@ -454,7 +455,7 @@ function Home() {
           </div>
           <Link
             to="/dashboard"
-            className="grid place-items-center rounded-2xl bg-gradient-to-br from-primary to-leaf p-8 text-center text-primary-foreground shadow-xl transition hover:scale-[1.02]"
+            className="grid place-items-center rounded-3xl bg-gradient-to-br from-primary to-leaf p-8 text-center text-primary-foreground shadow-xl transition hover:scale-[1.02] active:scale-[0.98]"
           >
             <div>
               <p className="font-display text-2xl font-bold">Accéder au tableau de bord</p>

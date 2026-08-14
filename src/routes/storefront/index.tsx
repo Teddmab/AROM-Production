@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { addDoc, collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { toast } from "sonner";
-import logoAsset from "@/assets/arom-logo.asset.json";
+import { LogOut, Minus, Plus, ShoppingBag } from "lucide-react";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/firebase/auth";
 import { RequireRole } from "@/lib/firebase/require-role";
@@ -30,6 +30,13 @@ interface Order {
   createdAt: string;
   items: { productId: string; name: string; quantity: number; unitPrice: number; format: string }[];
 }
+
+const STATUS_STYLES: Record<Order["status"], { label: string; className: string }> = {
+  pending: { label: "En attente", className: "bg-muted text-muted-foreground" },
+  confirmed: { label: "Confirmée", className: "bg-gold/20 text-primary" },
+  fulfilled: { label: "Livrée", className: "bg-success/15 text-success" },
+  cancelled: { label: "Annulée", className: "bg-destructive/10 text-destructive" },
+};
 
 function StorefrontRoute() {
   return (
@@ -85,6 +92,7 @@ function Storefront() {
   );
 
   const total = cartItems.reduce((a, i) => a + i.quantity * i.unitPrice, 0);
+  const itemCount = cartItems.reduce((a, i) => a + i.quantity, 0);
 
   const setQty = (id: string, qty: number) => setCart((c) => ({ ...c, [id]: Math.max(0, qty) }));
 
@@ -111,121 +119,140 @@ function Storefront() {
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/85 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-6 px-6 py-4">
-          <div className="flex items-center gap-3">
+      <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 backdrop-blur-xl pt-[env(safe-area-inset-top)]">
+        <div className="mx-auto flex max-w-2xl items-center justify-between gap-4 px-5 py-3">
+          <div className="flex items-center gap-2.5">
             <img
-              src={logoAsset.url}
+              src="/logo-nav.png"
               alt="AROM"
-              className="h-10 w-10 rounded-full object-cover ring-2 ring-gold/40"
+              className="h-9 w-9 rounded-[10px] object-cover ring-1 ring-black/5"
             />
-            <div className="leading-tight">
-              <p className="font-display text-lg font-bold text-primary">AROM</p>
-              <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-gold">
-                Boutique partenaire
-              </p>
-            </div>
+            <p className="font-display text-[17px] font-bold text-primary">Boutique AROM</p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-right leading-tight">
-              <p className="text-xs font-semibold text-primary">
-                {profile?.displayName || profile?.email}
-              </p>
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Partenaire
-              </p>
-            </div>
-            <button
-              onClick={() => signOutUser()}
-              className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:text-primary"
-            >
-              Déconnexion
-            </button>
-          </div>
+          <button
+            onClick={() => signOutUser()}
+            className="flex items-center gap-1.5 rounded-full bg-secondary px-3.5 py-2 text-[13px] font-semibold text-secondary-foreground transition active:scale-95"
+          >
+            <LogOut className="h-3.5 w-3.5" aria-hidden />
+            Sortir
+          </button>
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-10 px-6 py-10">
+      <main className="mx-auto max-w-2xl space-y-8 px-5 pb-32 pt-2">
         <section>
-          <h1 className="font-display text-2xl font-bold text-primary">Catalogue</h1>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {products.map((p) => (
-              <div key={p.id} className="rounded-2xl border border-border bg-card p-5">
-                <p className="font-display text-lg font-semibold text-primary">{p.name}</p>
-                <p className="mt-1 text-sm text-muted-foreground">{fcFormat(p.price)} / unité</p>
-                <div className="mt-4 flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    value={cart[p.id] ?? 0}
-                    onChange={(e) => setQty(p.id, Number(e.target.value) || 0)}
-                    className="w-20 rounded-lg border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
-                  />
-                  <span className="text-xs text-muted-foreground">bouteilles</span>
+          <h1 className="pt-4 font-display text-[34px] font-bold leading-tight tracking-tight text-primary">
+            Catalogue
+          </h1>
+          <p className="mt-1 text-[15px] text-muted-foreground">
+            {profile?.displayName || profile?.email}
+          </p>
+
+          <div className="mt-5 overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
+            {products.map((p, i) => (
+              <div key={p.id}>
+                {i > 0 && <div className="h-px bg-border/70" />}
+                <div className="flex items-center justify-between gap-4 px-4 py-3.5">
+                  <div className="min-w-0">
+                    <p className="text-[15px] font-semibold text-foreground">{p.name}</p>
+                    <p className="mt-0.5 text-[13px] text-muted-foreground">
+                      {fcFormat(p.price)} / bouteille
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 rounded-full bg-secondary px-1 py-1">
+                    <button
+                      type="button"
+                      onClick={() => setQty(p.id, (cart[p.id] ?? 0) - 1)}
+                      disabled={(cart[p.id] ?? 0) <= 0}
+                      aria-label={`Retirer ${p.name}`}
+                      className="grid h-7 w-7 place-items-center rounded-full bg-card text-primary shadow-sm transition active:scale-90 disabled:opacity-40"
+                    >
+                      <Minus className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                    <span className="w-4 text-center text-[15px] font-semibold tabular-nums text-foreground">
+                      {cart[p.id] ?? 0}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setQty(p.id, (cart[p.id] ?? 0) + 1)}
+                      aria-label={`Ajouter ${p.name}`}
+                      className="grid h-7 w-7 place-items-center rounded-full bg-primary text-primary-foreground shadow-sm transition active:scale-90"
+                    >
+                      <Plus className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
             {products.length === 0 && (
-              <p className="text-sm text-muted-foreground">Catalogue en préparation.</p>
+              <p className="px-4 py-6 text-center text-[15px] text-muted-foreground">
+                Catalogue en préparation.
+              </p>
             )}
           </div>
         </section>
 
-        {cartItems.length > 0 && (
-          <section className="rounded-2xl border border-border bg-card p-6">
-            <h2 className="font-display text-lg font-semibold text-primary">Panier</h2>
-            <ul className="mt-3 space-y-2 text-sm">
-              {cartItems.map((i) => (
-                <li key={i.productId} className="flex items-center justify-between">
-                  <span>
-                    {i.quantity} × {i.name}
-                  </span>
-                  <span className="font-medium">{fcFormat(i.quantity * i.unitPrice)}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-4 flex items-center justify-between border-t border-border pt-4">
-              <span className="font-semibold text-primary">Total</span>
-              <span className="font-display text-xl font-bold text-primary">{fcFormat(total)}</span>
-            </div>
-            <button
-              onClick={placeOrder}
-              disabled={placing}
-              className="mt-4 w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:opacity-60"
-            >
-              {placing ? "Envoi…" : "Envoyer la commande"}
-            </button>
-          </section>
-        )}
-
         <section>
-          <h2 className="font-display text-lg font-semibold text-primary">Mes commandes</h2>
-          <div className="mt-4 space-y-3">
+          <h2 className="px-1 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Mes commandes
+          </h2>
+          <div className="mt-2 overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
             {orders.length === 0 && (
-              <p className="text-sm text-muted-foreground">Aucune commande pour l'instant.</p>
+              <p className="px-4 py-6 text-center text-[15px] text-muted-foreground">
+                Aucune commande pour l'instant.
+              </p>
             )}
-            {orders.map((o) => (
-              <div
-                key={o.id}
-                className="flex items-center justify-between rounded-xl border border-border bg-card p-4 text-sm"
-              >
-                <div>
-                  <p className="font-medium text-primary">
-                    {new Date(o.createdAt).toLocaleDateString("fr-FR")}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {o.items.map((i) => `${i.quantity}× ${i.name}`).join(", ")}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="font-semibold text-primary">{fcFormat(o.total)}</p>
-                  <p className="text-xs capitalize text-muted-foreground">{o.status}</p>
+            {orders.map((o, i) => (
+              <div key={o.id}>
+                {i > 0 && <div className="h-px bg-border/70" />}
+                <div className="flex items-center justify-between gap-4 px-4 py-3.5">
+                  <div className="min-w-0">
+                    <p className="text-[15px] font-medium text-foreground">
+                      {new Date(o.createdAt).toLocaleDateString("fr-FR")}
+                    </p>
+                    <p className="mt-0.5 truncate text-[13px] text-muted-foreground">
+                      {o.items.map((it) => `${it.quantity}× ${it.name}`).join(", ")}
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="text-[15px] font-semibold text-foreground">{fcFormat(o.total)}</p>
+                    <span
+                      className={`mt-0.5 inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_STYLES[o.status].className}`}
+                    >
+                      {STATUS_STYLES[o.status].label}
+                    </span>
+                  </div>
                 </div>
               </div>
             ))}
           </div>
         </section>
       </main>
+
+      {cartItems.length > 0 && (
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border/60 bg-background/85 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]">
+          <div className="mx-auto flex max-w-2xl items-center justify-between gap-4 px-5 py-3">
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary">
+                <ShoppingBag className="h-4.5 w-4.5" aria-hidden />
+              </span>
+              <div className="leading-tight">
+                <p className="text-[13px] text-muted-foreground">
+                  {itemCount} bouteille{itemCount > 1 ? "s" : ""}
+                </p>
+                <p className="font-display text-[17px] font-bold text-primary">{fcFormat(total)}</p>
+              </div>
+            </div>
+            <button
+              onClick={placeOrder}
+              disabled={placing}
+              className="rounded-full bg-primary px-6 py-3 text-[15px] font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition active:scale-[0.97] disabled:opacity-60"
+            >
+              {placing ? "Envoi…" : "Commander"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
