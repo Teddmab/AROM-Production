@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { toast } from "sonner";
 import { useErp } from "@/lib/erp/store";
 import {
@@ -11,11 +11,10 @@ import {
 } from "@/lib/erp/export";
 
 export function ExportBar({ section }: { section: ExportSection }) {
-  const { state } = useErp();
+  const { state, filter, setFilter } = useErp();
   const campagnes = useMemo(() => campagnesDisponibles(state), [state]);
-  const [filter, setFilter] = useState<ExportFilter>({ from: "", to: "", campagne: "" });
 
-  const set = (patch: Partial<ExportFilter>) => setFilter((f) => ({ ...f, ...patch }));
+  const set = (patch: Partial<ExportFilter>) => setFilter({ ...filter, ...patch });
 
   const handlePdf = () => {
     const report = buildFilteredReport(section, state, filter);

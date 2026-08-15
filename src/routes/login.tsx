@@ -20,13 +20,16 @@ export const Route = createFileRoute("/login")({
 });
 
 function LoginRoute() {
-  const { signIn, signInWithProvider, user, profile, loading, signOutUser } = useAuth();
+  const { signIn, signInWithProvider, resetPassword, user, profile, loading, signOutUser } =
+    useAuth();
   const navigate = useNavigate();
   const { redirect } = Route.useSearch();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"login" | "reset">("login");
+  const [resetSent, setResetSent] = useState(false);
 
   useEffect(() => {
     if (loading || !user) return;
@@ -54,6 +57,21 @@ function LoginRoute() {
       setError("Identifiants invalides. Vérifiez votre e-mail et mot de passe.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await resetPassword(email);
+    } catch {
+      // Same message on success or failure — don't reveal whether an
+      // account exists for this e-mail.
+    } finally {
+      setBusy(false);
+      setResetSent(true);
     }
   };
 
@@ -96,49 +114,112 @@ function LoginRoute() {
           </div>
         </div>
 
-        <div className="mt-8">
-          <OAuthButtons onSelect={handleOAuth} busy={busy} />
-        </div>
+        {mode === "login" && (
+          <>
+            <div className="mt-8">
+              <OAuthButtons onSelect={handleOAuth} busy={busy} />
+            </div>
 
-        <div className="my-5 flex items-center gap-3">
-          <div className="h-px flex-1 bg-border" />
-          <span className="text-[12px] font-medium text-muted-foreground">ou avec e-mail</span>
-          <div className="h-px flex-1 bg-border" />
-        </div>
+            <div className="my-5 flex items-center gap-3">
+              <div className="h-px flex-1 bg-border" />
+              <span className="text-[12px] font-medium text-muted-foreground">ou avec e-mail</span>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+          </>
+        )}
+        {mode !== "login" && <div className="mt-8" />}
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div className="overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
-            <input
-              type="email"
-              required
-              autoComplete="username"
-              placeholder="E-mail"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
-            />
-            <div className="h-px bg-border/70" />
-            <input
-              type="password"
-              required
-              autoComplete="current-password"
-              placeholder="Mot de passe"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
-            />
+        {mode === "login" ? (
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
+              <input
+                type="email"
+                required
+                autoComplete="username"
+                placeholder="E-mail"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+              />
+              <div className="h-px bg-border/70" />
+              <input
+                type="password"
+                required
+                autoComplete="current-password"
+                placeholder="Mot de passe"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+              />
+            </div>
+
+            {error && <p className="px-1 text-[13px] font-medium text-destructive">{error}</p>}
+
+            <button
+              type="submit"
+              disabled={busy}
+              className="w-full rounded-2xl bg-primary py-3.5 text-[15px] font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition active:scale-[0.98] disabled:opacity-60"
+            >
+              {busy ? "Connexion…" : "Se connecter"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setMode("reset");
+                setResetSent(false);
+                setError(null);
+              }}
+              className="w-full text-center text-[13px] font-medium text-primary"
+            >
+              Mot de passe oublié ?
+            </button>
+          </form>
+        ) : resetSent ? (
+          <div className="space-y-4 rounded-2xl bg-card p-5 text-center shadow-sm ring-1 ring-black/5">
+            <p className="text-[14px] text-foreground">
+              Si un compte existe avec l'adresse <span className="font-semibold">{email}</span>, un
+              lien de réinitialisation vient d'être envoyé.
+            </p>
+            <button
+              type="button"
+              onClick={() => setMode("login")}
+              className="text-[13px] font-semibold text-primary"
+            >
+              ← Retour à la connexion
+            </button>
           </div>
+        ) : (
+          <form onSubmit={handleReset} className="space-y-3">
+            <div className="overflow-hidden rounded-2xl bg-card shadow-sm ring-1 ring-black/5">
+              <input
+                type="email"
+                required
+                autoComplete="username"
+                placeholder="E-mail"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-transparent px-4 py-3.5 text-[15px] text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+              />
+            </div>
 
-          {error && <p className="px-1 text-[13px] font-medium text-destructive">{error}</p>}
+            <button
+              type="submit"
+              disabled={busy}
+              className="w-full rounded-2xl bg-primary py-3.5 text-[15px] font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition active:scale-[0.98] disabled:opacity-60"
+            >
+              {busy ? "Envoi…" : "Envoyer le lien de réinitialisation"}
+            </button>
 
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-2xl bg-primary py-3.5 text-[15px] font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition active:scale-[0.98] disabled:opacity-60"
-          >
-            {busy ? "Connexion…" : "Se connecter"}
-          </button>
-        </form>
+            <button
+              type="button"
+              onClick={() => setMode("login")}
+              className="w-full text-center text-[13px] font-medium text-muted-foreground"
+            >
+              ← Retour à la connexion
+            </button>
+          </form>
+        )}
 
         <p className="mt-8 text-center text-[13px] text-muted-foreground">
           Partenaire acheteur ?{" "}

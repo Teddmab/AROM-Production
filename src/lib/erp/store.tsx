@@ -1,9 +1,19 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { collection, deleteDoc, doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+  updateDoc,
+} from "firebase/firestore";
 import { toast } from "sonner";
 import { db } from "@/lib/firebase/config";
 import { SEED, type ErpState } from "./model";
 import { computeErp, type ErpComputed } from "./engine";
+import { filterErpState, type ExportFilter } from "./export";
 
 type Collections =
   | "producteurs"
@@ -30,6 +40,8 @@ interface ErpContextValue {
   state: ErpState;
   computed: ErpComputed;
   ready: boolean;
+  filter: ExportFilter;
+  setFilter: (filter: ExportFilter) => void;
   addRow: <K extends Collections>(key: K, row: ErpState[K][number]) => void;
   removeRow: (key: Collections, id: string) => void;
   updateParametres: (patch: Partial<ErpState["parametres"]>) => void;
@@ -44,11 +56,15 @@ export function ErpProvider({ children }: { children: ReactNode }) {
   // corresponding listener fires.
   const [state, setState] = useState<ErpState>(SEED);
   const [ready, setReady] = useState(false);
+  const [filter, setFilter] = useState<ExportFilter>({ from: "", to: "", campagne: "" });
 
   useEffect(() => {
     const unsubs = COLLECTIONS.map((key) =>
       onSnapshot(
-        collection(db, key),
+        // stockMP's running balance ("Stock cumulé") is order-sensitive —
+        // sort chronologically at the query level rather than trusting
+        // Firestore's default (insertion/doc-id) order.
+        key === "stockMP" ? query(collection(db, key), orderBy("date")) : collection(db, key),
         (snap) => {
           const rows = snap.docs.map((d) => d.data());
           setState((s) => ({ ...s, [key]: rows }) as ErpState);
@@ -80,8 +96,12 @@ export function ErpProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ErpContextValue>(
     () => ({
       state,
-      computed: computeErp(state),
+      // Filtered by the shared Campagne/Du/Au filter (ExportBar) so every
+      // section renders through the same lens the export already used.
+      computed: computeErp(filterErpState(state, filter)),
       ready,
+      filter,
+      setFilter,
       addRow: (key, row) => {
         setDoc(doc(db, key, (row as { id: string }).id), row).catch((err) =>
           toast.error(`Enregistrement impossible : ${err.message}`),
@@ -103,7 +123,7 @@ export function ErpProvider({ children }: { children: ReactNode }) {
         );
       },
     }),
-    [state, ready],
+    [state, ready, filter],
   );
 
   return <ErpContext.Provider value={value}>{children}</ErpContext.Provider>;

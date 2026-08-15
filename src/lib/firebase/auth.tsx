@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import {
   onAuthStateChanged,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
@@ -103,6 +104,8 @@ interface AuthContextValue {
   /** True while the initial auth state / profile doc is being resolved. */
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  /** "Mot de passe oublié" on /login — Firebase Auth sends and hosts the reset flow itself. */
+  resetPassword: (email: string) => Promise<void>;
   signOutUser: () => Promise<void>;
   signUpPartner: (email: string, password: string, displayName: string) => Promise<void>;
   /**
@@ -197,6 +200,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     loading: !authResolved || !profileResolved,
     signIn: async (email, password) => {
       await signInWithEmailAndPassword(auth, email, password);
+    },
+    resetPassword: async (email) => {
+      await sendPasswordResetEmail(auth, email);
     },
     signOutUser: async () => {
       await signOut(auth);

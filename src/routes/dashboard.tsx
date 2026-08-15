@@ -15,6 +15,7 @@ import {
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
+import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
 import { db, storage } from "@/lib/firebase/config";
 import {
@@ -32,6 +33,13 @@ import {
 import { ExportBar } from "@/components/erp/ExportBar";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -494,6 +502,77 @@ function DeleteButton({ onClick }: { onClick: () => void }) {
 
 /* ---------- Sections ---------- */
 
+const trendChartConfig = {
+  bouteilles: { label: "Bouteilles produites", color: "var(--primary)" },
+  ca: { label: "Chiffre d'affaires (FC)", color: "var(--gold)" },
+} satisfies ChartConfig;
+
+/**
+ * The one real chart in the dashboard (recharts was installed but never
+ * rendered anywhere) — production volume and sales revenue by date, so
+ * the Exécutif page (every role's landing view) has an actual trend to
+ * look at instead of only number tiles.
+ */
+function TrendChart({
+  production,
+  ventes,
+}: {
+  production: { date: string; totalBouteilles: number }[];
+  ventes: { date: string; montantBrut: number }[];
+}) {
+  const byDate = new Map<string, { date: string; bouteilles: number; ca: number }>();
+  const bucket = (date: string) => {
+    if (!byDate.has(date)) byDate.set(date, { date, bouteilles: 0, ca: 0 });
+    return byDate.get(date)!;
+  };
+  production.forEach((r) => {
+    bucket(r.date).bouteilles += r.totalBouteilles;
+  });
+  ventes.forEach((r) => {
+    bucket(r.date).ca += r.montantBrut;
+  });
+  const data = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+  if (data.length === 0) {
+    return (
+      <p className="py-10 text-center text-sm text-muted-foreground">
+        Pas encore de production ou de ventes à afficher.
+      </p>
+    );
+  }
+
+  return (
+    <ChartContainer config={trendChartConfig} className="aspect-auto h-72 w-full">
+      <AreaChart data={data} margin={{ left: 4, right: 4 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis
+          dataKey="date"
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(v) => formatDateOnly(v)}
+        />
+        <ChartTooltip
+          content={<ChartTooltipContent labelFormatter={(v) => formatDateOnly(String(v))} />}
+        />
+        <Area
+          dataKey="bouteilles"
+          type="monotone"
+          fill="var(--color-bouteilles)"
+          fillOpacity={0.15}
+          stroke="var(--color-bouteilles)"
+        />
+        <Area
+          dataKey="ca"
+          type="monotone"
+          fill="var(--color-ca)"
+          fillOpacity={0.15}
+          stroke="var(--color-ca)"
+        />
+      </AreaChart>
+    </ChartContainer>
+  );
+}
+
 function ExecutiveSection() {
   const { computed, state } = useErp();
   const p = state.parametres;
@@ -548,6 +627,10 @@ function ExecutiveSection() {
           taux={computed.margeBrute / p.objectifMargeBrute}
         />
       </div>
+
+      <Card title="Évolution de la campagne">
+        <TrendChart production={computed.production} ventes={computed.ventes} />
+      </Card>
 
       <Card title="Synthèse par domaine (objectifs ERP)">
         <Table
@@ -1517,12 +1600,6 @@ function CommercialisationSection() {
       />
       <ExportBar section="commercialisation" />
 
-      <CatalogueCard />
-
-      <PromoCard />
-
-      <OrdersCard />
-
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
           label="Bouteilles vendues"
@@ -1540,109 +1617,128 @@ function CommercialisationSection() {
         <KpiTile label="Créances clients" realise={fcFormat(computed.creances)} />
       </div>
 
-      <Card
-        title="Journal des ventes"
-        action={
-          <EntryForm
-            submitLabel="Nouvelle vente"
-            fields={[
-              { name: "numero", label: "N° vente", default: "V-001" },
-              { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-              { name: "client", label: "Client" },
-              {
-                name: "canal",
-                label: "Canal",
-                type: "select",
-                options: CANAUX,
-                default: "Restaurant",
-              },
-              {
-                name: "format",
-                label: "Format",
-                type: "select",
-                options: FORMATS,
-                default: "500 ml",
-              },
-              { name: "quantite", label: "Quantité", type: "number", default: 0 },
-              {
-                name: "prixUnitaire",
-                label: "Prix unitaire FC",
-                type: "number",
-                default: p.prix500,
-              },
-              { name: "remise", label: "Remise FC", type: "number", default: 0 },
-              { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-            ]}
-            onSubmit={(v) =>
-              addRow("ventes", {
-                id: newId("VTE"),
-                numero: v.numero,
-                date: v.date,
-                idClient: v.client,
-                client: v.client,
-                canal: v.canal as Canal,
-                format: v.format as Format,
-                quantite: n(v.quantite),
-                prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
-                remise: n(v.remise),
-                encaisse: n(v.encaisse),
-                // Auto-filled from the logged-in staff member — see the
-                // matching note in ProductionSection.
-                commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
-                ...(profile?.uid ? { staffUid: profile.uid } : {}),
-              })
+      <Tabs defaultValue="catalogue">
+        <TabsList>
+          <TabsTrigger value="catalogue">Catalogue</TabsTrigger>
+          <TabsTrigger value="promotions">Promotions</TabsTrigger>
+          <TabsTrigger value="commandes">Commandes</TabsTrigger>
+          <TabsTrigger value="ventes">Ventes & clients</TabsTrigger>
+        </TabsList>
+        <TabsContent value="catalogue">
+          <CatalogueCard />
+        </TabsContent>
+        <TabsContent value="promotions">
+          <PromoCard />
+        </TabsContent>
+        <TabsContent value="commandes">
+          <OrdersCard />
+        </TabsContent>
+        <TabsContent value="ventes" className="space-y-6">
+          <Card
+            title="Journal des ventes"
+            action={
+              <EntryForm
+                submitLabel="Nouvelle vente"
+                fields={[
+                  { name: "numero", label: "N° vente", default: "V-001" },
+                  { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                  { name: "client", label: "Client" },
+                  {
+                    name: "canal",
+                    label: "Canal",
+                    type: "select",
+                    options: CANAUX,
+                    default: "Restaurant",
+                  },
+                  {
+                    name: "format",
+                    label: "Format",
+                    type: "select",
+                    options: FORMATS,
+                    default: "500 ml",
+                  },
+                  { name: "quantite", label: "Quantité", type: "number", default: 0 },
+                  {
+                    name: "prixUnitaire",
+                    label: "Prix unitaire FC",
+                    type: "number",
+                    default: p.prix500,
+                  },
+                  { name: "remise", label: "Remise FC", type: "number", default: 0 },
+                  { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+                ]}
+                onSubmit={(v) =>
+                  addRow("ventes", {
+                    id: newId("VTE"),
+                    numero: v.numero,
+                    date: v.date,
+                    idClient: v.client,
+                    client: v.client,
+                    canal: v.canal as Canal,
+                    format: v.format as Format,
+                    quantite: n(v.quantite),
+                    prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
+                    remise: n(v.remise),
+                    encaisse: n(v.encaisse),
+                    // Auto-filled from the logged-in staff member — see the
+                    // matching note in ProductionSection.
+                    commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
+                    ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                  })
+                }
+              />
             }
-          />
-        }
-      >
-        <Table
-          headers={[
-            "N°",
-            "Date",
-            "Client",
-            "Canal",
-            "Format",
-            "Qté",
-            "PU",
-            "Brut",
-            "Encaissé",
-            "Solde dû",
-            "Statut",
-            "",
-          ]}
-          rows={computed.ventes.map((v) => [
-            v.numero,
-            v.date,
-            v.client,
-            v.canal,
-            v.format,
-            v.quantite,
-            fcFormat(v.prixUnitaire),
-            fcFormat(v.montantBrut),
-            fcFormat(v.encaisse),
-            fcFormat(v.soldeDu),
-            v.statutPaiement,
-            <DeleteButton onClick={() => removeRow("ventes", v.id)} />,
-          ])}
-        />
-      </Card>
+          >
+            <Table
+              headers={[
+                "N°",
+                "Date",
+                "Client",
+                "Canal",
+                "Format",
+                "Qté",
+                "PU",
+                "Brut",
+                "Encaissé",
+                "Solde dû",
+                "Statut",
+                "",
+              ]}
+              rows={computed.ventes.map((v) => [
+                v.numero,
+                v.date,
+                v.client,
+                v.canal,
+                v.format,
+                v.quantite,
+                fcFormat(v.prixUnitaire),
+                fcFormat(v.montantBrut),
+                fcFormat(v.encaisse),
+                fcFormat(v.soldeDu),
+                v.statutPaiement,
+                <DeleteButton onClick={() => removeRow("ventes", v.id)} />,
+              ])}
+            />
+          </Card>
 
-      <Card title="Portefeuille clients par canal">
-        <Table
-          headers={["Canal", "Clients", "Bouteilles", "CA", "Encaissé", "Solde dû"]}
-          rows={CANAUX.map((c) => {
-            const rows = computed.ventes.filter((v) => v.canal === c);
-            return [
-              c,
-              new Set(rows.map((r) => r.client)).size,
-              rows.reduce((a, r) => a + r.quantite, 0),
-              fcFormat(rows.reduce((a, r) => a + r.montantBrut, 0)),
-              fcFormat(rows.reduce((a, r) => a + r.encaisse, 0)),
-              fcFormat(rows.reduce((a, r) => a + r.soldeDu, 0)),
-            ];
-          })}
-        />
-      </Card>
+          <Card title="Portefeuille clients par canal">
+            <Table
+              headers={["Canal", "Clients", "Bouteilles", "CA", "Encaissé", "Solde dû"]}
+              rows={CANAUX.map((c) => {
+                const rows = computed.ventes.filter((v) => v.canal === c);
+                return [
+                  c,
+                  new Set(rows.map((r) => r.client)).size,
+                  rows.reduce((a, r) => a + r.quantite, 0),
+                  fcFormat(rows.reduce((a, r) => a + r.montantBrut, 0)),
+                  fcFormat(rows.reduce((a, r) => a + r.encaisse, 0)),
+                  fcFormat(rows.reduce((a, r) => a + r.soldeDu, 0)),
+                ];
+              })}
+            />
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -1750,7 +1846,7 @@ function MarketingSection() {
 }
 
 function FinancesSection() {
-  const { computed } = useErp();
+  const { state, computed, addRow, removeRow } = useErp();
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -1760,6 +1856,39 @@ function FinancesSection() {
         responsable="Direction Générale"
       />
       <ExportBar section="finances" />
+
+      <Card
+        title="Charges fixes"
+        action={
+          <EntryForm
+            submitLabel="Nouvelle charge"
+            fields={[
+              { name: "rubrique", label: "Rubrique" },
+              { name: "budget", label: "Budget (FC)", type: "number", default: 0 },
+              { name: "realise", label: "Réalisé (FC)", type: "number", default: 0 },
+            ]}
+            onSubmit={(v) =>
+              addRow("charges", {
+                id: newId("CH"),
+                rubrique: v.rubrique,
+                budget: n(v.budget),
+                realise: n(v.realise),
+              })
+            }
+          />
+        }
+      >
+        <Table
+          headers={["Rubrique", "Budget", "Réalisé", ""]}
+          empty="Aucune charge fixe enregistrée."
+          rows={state.charges.map((c) => [
+            c.rubrique,
+            fcFormat(c.budget),
+            fcFormat(c.realise),
+            <DeleteButton onClick={() => removeRow("charges", c.id)} />,
+          ])}
+        />
+      </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card title="Revenus">
@@ -2039,6 +2168,7 @@ interface Boutique {
   contactName?: string;
   phone?: string;
   address?: { ville: string; commune: string; quartier: string; repere?: string };
+  idNumber?: string;
   verified?: boolean;
 }
 
@@ -2046,10 +2176,13 @@ interface Boutique {
  * Boutique verification (sprint 16) — an informational "AROM called and
  * confirmed this shop is real" flag, not a checkout gate. Partner data
  * collection already happens at onboarding (sprint 13); this just gives
- * admin something to act on afterward.
+ * admin something to act on afterward. `idNumber` (the CNI/RCCM collected
+ * at signup) is now shown here too (sprint 18) — before, admin had nothing
+ * to actually look at before clicking "Vérifié".
  */
 function BoutiquesCard() {
   const [boutiques, setBoutiques] = useState<Boutique[]>([]);
+  const [unverifiedOnly, setUnverifiedOnly] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "partner"));
@@ -2059,7 +2192,15 @@ function BoutiquesCard() {
         setBoutiques(
           snap.docs
             .map((d) => ({ uid: d.id, ...(d.data() as Omit<Boutique, "uid">) }))
-            .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+            // Unverified first — new signups are what admin needs to find,
+            // not buried in an alphabetical list of everyone already checked.
+            .sort((a, b) =>
+              !!a.verified === !!b.verified
+                ? a.displayName.localeCompare(b.displayName)
+                : a.verified
+                  ? 1
+                  : -1,
+            ),
         ),
       (err) => toast.error(`Synchronisation "boutiques" impossible : ${err.message}`),
     );
@@ -2070,12 +2211,27 @@ function BoutiquesCard() {
       toast.error(`Mise à jour impossible : ${err.message}`),
     );
 
+  const unverifiedCount = boutiques.filter((b) => !b.verified).length;
+  const visible = unverifiedOnly ? boutiques.filter((b) => !b.verified) : boutiques;
+
   return (
-    <Card title="Boutiques partenaires">
+    <Card
+      title={`Boutiques partenaires${unverifiedCount > 0 ? ` (${unverifiedCount} à vérifier)` : ""}`}
+      action={
+        <button
+          onClick={() => setUnverifiedOnly((v) => !v)}
+          className={`rounded-lg border border-border px-3 py-2 text-xs font-semibold transition ${
+            unverifiedOnly ? "bg-primary text-primary-foreground" : "text-muted-foreground"
+          }`}
+        >
+          Non vérifiées seulement
+        </button>
+      }
+    >
       <Table
-        headers={["Boutique", "Responsable", "Contact", "Adresse", "Vérifié"]}
+        headers={["Boutique", "Responsable", "Contact", "Adresse", "N° CNI/RCCM", "Vérifié"]}
         empty="Aucune boutique inscrite pour l'instant."
-        rows={boutiques.map((b) => [
+        rows={visible.map((b) => [
           b.displayName,
           b.contactName || "—",
           <div className="text-xs">
@@ -2083,6 +2239,7 @@ function BoutiquesCard() {
             <p className="text-muted-foreground">{b.email}</p>
           </div>,
           b.address ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}` : "—",
+          b.idNumber || "—",
           <button
             onClick={() => toggleVerified(b)}
             className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
@@ -2358,16 +2515,6 @@ function PersonnelSection() {
         responsable="Direction Générale"
       />
 
-      <InviteCard />
-
-      <StaffCard />
-
-      <BoutiquesCard />
-
-      <ProductionBonusCard />
-
-      <CommercialBonusCard />
-
       <Card title="Total primes campagne">
         <Table
           headers={["Période", "Base production", "Base encaissements", "Total primes"]}
@@ -2381,6 +2528,31 @@ function PersonnelSection() {
           ]}
         />
       </Card>
+
+      <Tabs defaultValue="invitations">
+        <TabsList>
+          <TabsTrigger value="invitations">Invitations</TabsTrigger>
+          <TabsTrigger value="equipe">Équipe</TabsTrigger>
+          <TabsTrigger value="boutiques">Boutiques partenaires</TabsTrigger>
+          <TabsTrigger value="primes-production">Primes production</TabsTrigger>
+          <TabsTrigger value="primes-commercial">Primes commercial</TabsTrigger>
+        </TabsList>
+        <TabsContent value="invitations">
+          <InviteCard />
+        </TabsContent>
+        <TabsContent value="equipe">
+          <StaffCard />
+        </TabsContent>
+        <TabsContent value="boutiques">
+          <BoutiquesCard />
+        </TabsContent>
+        <TabsContent value="primes-production">
+          <ProductionBonusCard />
+        </TabsContent>
+        <TabsContent value="primes-commercial">
+          <CommercialBonusCard />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -2443,6 +2615,17 @@ function ParametresSection() {
       />
     </label>
   );
+  const dateField = (label: string, key: keyof typeof p) => (
+    <label className="text-xs font-medium text-muted-foreground">
+      {label}
+      <input
+        type="date"
+        value={String(p[key])}
+        onChange={(e) => updateParametres({ [key]: e.target.value } as never)}
+        className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+      />
+    </label>
+  );
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -2477,14 +2660,11 @@ function ParametresSection() {
         </div>
       </Card>
       <Card title="Calendrier de campagne">
-        <Table
-          headers={["Étape", "Date"]}
-          rows={[
-            ["Début production", p.debutProduction],
-            ["Fin production", p.finProduction],
-            ["Fin commercialisation", p.finCommercialisation],
-          ]}
-        />
+        <div className="grid gap-4 sm:grid-cols-3">
+          {dateField("Début production", "debutProduction")}
+          {dateField("Fin production", "finProduction")}
+          {dateField("Fin commercialisation", "finCommercialisation")}
+        </div>
       </Card>
     </div>
   );
