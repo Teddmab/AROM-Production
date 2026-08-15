@@ -9,6 +9,7 @@ import {
   query,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
@@ -1988,6 +1989,71 @@ function InviteCard() {
   );
 }
 
+interface Boutique {
+  uid: string;
+  displayName: string;
+  email: string;
+  contactName?: string;
+  phone?: string;
+  address?: { ville: string; commune: string; quartier: string; repere?: string };
+  verified?: boolean;
+}
+
+/**
+ * Boutique verification (sprint 16) — an informational "AROM called and
+ * confirmed this shop is real" flag, not a checkout gate. Partner data
+ * collection already happens at onboarding (sprint 13); this just gives
+ * admin something to act on afterward.
+ */
+function BoutiquesCard() {
+  const [boutiques, setBoutiques] = useState<Boutique[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "users"), where("role", "==", "partner"));
+    return onSnapshot(
+      q,
+      (snap) =>
+        setBoutiques(
+          snap.docs
+            .map((d) => ({ uid: d.id, ...(d.data() as Omit<Boutique, "uid">) }))
+            .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+        ),
+      (err) => toast.error(`Synchronisation "boutiques" impossible : ${err.message}`),
+    );
+  }, []);
+
+  const toggleVerified = (b: Boutique) =>
+    updateDoc(doc(db, "users", b.uid), { verified: !b.verified }).catch((err) =>
+      toast.error(`Mise à jour impossible : ${err.message}`),
+    );
+
+  return (
+    <Card title="Boutiques partenaires">
+      <Table
+        headers={["Boutique", "Responsable", "Contact", "Adresse", "Vérifié"]}
+        empty="Aucune boutique inscrite pour l'instant."
+        rows={boutiques.map((b) => [
+          b.displayName,
+          b.contactName || "—",
+          <div className="text-xs">
+            <p>{b.phone ? `+${b.phone}` : "—"}</p>
+            <p className="text-muted-foreground">{b.email}</p>
+          </div>,
+          b.address ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}` : "—",
+          <button
+            onClick={() => toggleVerified(b)}
+            className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+              b.verified ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
+            }`}
+          >
+            {b.verified ? "Vérifié" : "Non vérifié"}
+          </button>,
+        ])}
+      />
+    </Card>
+  );
+}
+
 function PersonnelSection() {
   const { state, computed } = useErp();
   const p = state.parametres;
@@ -2001,6 +2067,8 @@ function PersonnelSection() {
       />
 
       <InviteCard />
+
+      <BoutiquesCard />
 
       <Card title="Directeur de Production">
         <Table

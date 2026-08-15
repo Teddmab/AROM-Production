@@ -54,6 +54,12 @@ export interface UserProfile {
   address?: PartnerAddress;
   idNumber?: string;
   pointDeVente?: string;
+  /**
+   * Partner-only (sprint 16): whether admin has confirmed this boutique
+   * is real with a phone call. Informational, not a gate — an
+   * unverified partner can still browse, order, and check out normally.
+   */
+  verified?: boolean;
 }
 
 export interface PartnerOnboardingData {
@@ -184,6 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         menus: [],
         active: true,
         onboardingComplete: false,
+        verified: false,
         createdAt: new Date().toISOString(),
       });
     },
@@ -206,6 +213,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         menus: [],
         active: true,
         onboardingComplete: false,
+        verified: false,
         createdAt: new Date().toISOString(),
       });
     },
