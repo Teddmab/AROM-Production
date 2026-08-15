@@ -75,6 +75,8 @@ export interface Production {
   q300: number;
   rejets: number;
   responsable: string;
+  /** uid of the staff member who logged this lot — powers per-person bonus tracking (sprint 17). */
+  staffUid?: string;
   statut: string;
 }
 
@@ -113,6 +115,8 @@ export interface Vente {
   remise: number;
   encaisse: number;
   commerciale: string;
+  /** uid of the staff member who logged this sale — powers per-person bonus tracking (sprint 17). */
+  staffUid?: string;
 }
 
 export interface ActionMarketing {
