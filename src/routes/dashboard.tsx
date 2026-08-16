@@ -17,6 +17,7 @@ import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
+import type { ErpComputed } from "@/lib/erp/engine";
 import { db, storage } from "@/lib/firebase/config";
 import {
   CANAUX,
@@ -365,6 +366,7 @@ function KpiTile({
   unit,
   taux,
   description,
+  breakdown,
 }: {
   label: string;
   objectif?: string | number;
@@ -373,6 +375,8 @@ function KpiTile({
   taux?: number;
   /** When set, the tile is clickable and opens an explanation modal — what this figure is and where it comes from. */
   description?: string;
+  /** The real calculation behind this figure, step by step — see DetailField. */
+  breakdown?: DetailField["breakdown"];
 }) {
   const [showDetail, setShowDetail] = useState(false);
   const pct = typeof taux === "number" ? Math.max(0, Math.min(100, Math.round(taux * 100))) : null;
@@ -423,6 +427,7 @@ function KpiTile({
               label: "Valeur",
               value: `${realise ?? "-"}${unit ? ` ${unit}` : ""}`,
               description,
+              breakdown,
             },
             ...(objectif !== undefined
               ? [
@@ -613,6 +618,141 @@ function DeleteButton({ onClick }: { onClick: (e: MouseEvent) => void }) {
   );
 }
 
+/**
+ * Real, current-number calculation trails for every aggregated figure
+ * shown across the dashboard — not just the abstract formula, the actual
+ * chain from Approvisionnement/Production/Commercialisation down to the
+ * final value. Built once per render from `computed` (already the single
+ * source every KPI/table already reads from) and reused everywhere that
+ * figure appears, so Exécutif, Finances, KPI stratégiques, and the
+ * per-section KPI tiles never show a different breakdown for the same
+ * number.
+ */
+function buildBreakdowns(computed: ErpComputed) {
+  const totalCouts: DetailField["breakdown"] = [
+    { label: "Achats ananas (Approvisionnement)", value: fcFormat(computed.coutAchats) },
+    { label: "Transport et frais (Approvisionnement)", value: fcFormat(computed.coutTransport) },
+    { label: "Autres charges d'exploitation (Finances)", value: fcFormat(computed.autresCharges) },
+    { label: "Marketing (Marketing)", value: fcFormat(computed.coutMarketing) },
+    { label: "= Total coûts", value: fcFormat(computed.totalCouts) },
+  ];
+  const resultatBrut: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires (Commercialisation)", value: fcFormat(computed.ca) },
+    { label: "− Total coûts", value: `− ${fcFormat(computed.totalCouts)}` },
+    { label: "= Résultat brut", value: fcFormat(computed.resultatBrut) },
+  ];
+  const margeBrute: DetailField["breakdown"] = [
+    { label: "Résultat brut", value: fcFormat(computed.resultatBrut) },
+    { label: "÷ Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "= Marge brute", value: pctFormat(computed.margeBrute) },
+  ];
+  const rendementSurCouts: DetailField["breakdown"] = [
+    { label: "Résultat brut", value: fcFormat(computed.resultatBrut) },
+    { label: "÷ Total coûts", value: fcFormat(computed.totalCouts) },
+    { label: "= Rendement sur coûts", value: pctFormat(computed.rendementSurCouts) },
+  ];
+  const coutMoyenBouteille: DetailField["breakdown"] = [
+    { label: "Total coûts", value: fcFormat(computed.totalCouts) },
+    { label: "÷ Bouteilles produites (Production)", value: String(computed.bouteillesProduites) },
+    { label: "= Coût moyen / bouteille", value: fcFormat(computed.coutMoyenBouteille) },
+  ];
+  const prixMoyenVendu: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires", value: fcFormat(computed.ca) },
+    {
+      label: "÷ Bouteilles vendues (Commercialisation)",
+      value: String(computed.bouteillesVendues),
+    },
+    { label: "= Prix moyen vendu", value: fcFormat(computed.prixMoyenVendu) },
+  ];
+  const margeUnitaire: DetailField["breakdown"] = [
+    { label: "Prix moyen vendu", value: fcFormat(computed.prixMoyenVendu) },
+    { label: "− Coût moyen / bouteille", value: `− ${fcFormat(computed.coutMoyenBouteille)}` },
+    { label: "= Marge unitaire", value: fcFormat(computed.margeUnitaire) },
+  ];
+  const tauxEncaissement: DetailField["breakdown"] = [
+    { label: "Encaissements (Commercialisation)", value: fcFormat(computed.encaissements) },
+    { label: "÷ Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "= Taux d'encaissement", value: pctFormat(computed.tauxEncaissement) },
+  ];
+  const creances: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "− Encaissements", value: `− ${fcFormat(computed.encaissements)}` },
+    { label: "= Créances clients", value: fcFormat(computed.creances) },
+  ];
+  const rendementMoyen: DetailField["breakdown"] = [
+    {
+      label: "Volume conditionné (Production, tous lots)",
+      value: `${(computed.volumeJus - computed.pertesL).toFixed(2)} L`,
+    },
+    { label: "÷ Volume de jus (Production)", value: `${computed.volumeJus.toFixed(2)} L` },
+    { label: "= Rendement volume", value: pctFormat(computed.rendementMoyen) },
+  ];
+  const tauxPertes: DetailField["breakdown"] = [
+    { label: "Pertes (Production)", value: `${computed.pertesL.toFixed(2)} L` },
+    { label: "÷ Volume de jus (Production)", value: `${computed.volumeJus.toFixed(2)} L` },
+    { label: "= Taux de pertes", value: pctFormat(computed.tauxPertes) },
+  ];
+  const tauxTransformation: DetailField["breakdown"] = computed.kgAchetes
+    ? [
+        { label: "Kg transformés (Production)", value: `${Math.round(computed.kgTransformes)} kg` },
+        {
+          label: "÷ Kg achetés (Approvisionnement)",
+          value: `${Math.round(computed.kgAchetes)} kg`,
+        },
+        {
+          label: "= Taux de transformation",
+          value: pctFormat(computed.kgTransformes / computed.kgAchetes),
+        },
+      ]
+    : [];
+  const tauxVente: DetailField["breakdown"] = computed.bouteillesProduites
+    ? [
+        {
+          label: "Bouteilles vendues (Commercialisation)",
+          value: String(computed.bouteillesVendues),
+        },
+        {
+          label: "÷ Bouteilles produites (Production)",
+          value: String(computed.bouteillesProduites),
+        },
+        {
+          label: "= Taux de vente",
+          value: pctFormat(computed.bouteillesVendues / computed.bouteillesProduites),
+        },
+      ]
+    : [];
+  const stockActuel: DetailField["breakdown"] = [
+    {
+      label: "Bouteilles produites (Production)",
+      value: String(computed.stockPF.reduce((a, s) => a + s.produites, 0)),
+    },
+    {
+      label: "− Bouteilles vendues (Commercialisation)",
+      value: `− ${computed.stockPF.reduce((a, s) => a + s.vendues, 0)}`,
+    },
+    {
+      label: "= Stock actuel",
+      value: String(computed.stockPF.reduce((a, s) => a + s.stock, 0)),
+    },
+  ];
+  return {
+    totalCouts,
+    resultatBrut,
+    margeBrute,
+    rendementSurCouts,
+    coutMoyenBouteille,
+    prixMoyenVendu,
+    margeUnitaire,
+    tauxEncaissement,
+    creances,
+    rendementMoyen,
+    tauxPertes,
+    tauxTransformation,
+    tauxVente,
+    stockActuel,
+  };
+}
+
 /* ---------- Sections ---------- */
 
 const trendChartConfig = {
@@ -696,7 +836,9 @@ function ExecutiveSection() {
     label: string;
     value: string;
     lecture: string;
+    breakdown?: DetailField["breakdown"];
   } | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   const finRows = [
     {
       label: "Chiffre d'affaires",
@@ -712,26 +854,31 @@ function ExecutiveSection() {
       label: "Créances clients",
       value: fcFormat(computed.creances),
       lecture: "À recouvrer — calculé automatiquement : CA − encaissements.",
+      breakdown: breakdowns.creances,
     },
     {
       label: "Total coûts",
       value: fcFormat(computed.totalCouts),
       lecture: "Exploitation — calculé automatiquement, voir le détail dans Finances.",
+      breakdown: breakdowns.totalCouts,
     },
     {
       label: "Résultat brut",
       value: fcFormat(computed.resultatBrut),
       lecture: "Avant impôt et amortissement — calculé automatiquement : CA − coûts.",
+      breakdown: breakdowns.resultatBrut,
     },
     {
       label: "Marge brute",
       value: pctFormat(computed.margeBrute),
       lecture: "Résultat / CA — calculé automatiquement.",
+      breakdown: breakdowns.margeBrute,
     },
     {
       label: "Rendement sur coûts",
       value: pctFormat(computed.rendementSurCouts),
       lecture: "Résultat / coûts — calculé automatiquement.",
+      breakdown: breakdowns.rendementSurCouts,
     },
   ];
   return (
@@ -783,6 +930,7 @@ function ExecutiveSection() {
           label="Résultat brut"
           realise={fcFormat(computed.resultatBrut)}
           description="Calculé automatiquement : chiffre d'affaires − total des coûts d'exploitation (voir Finances)."
+          breakdown={breakdowns.resultatBrut}
         />
         <KpiTile
           label="Clients actifs"
@@ -797,6 +945,7 @@ function ExecutiveSection() {
           realise={pctFormat(computed.margeBrute)}
           taux={computed.margeBrute / p.objectifMargeBrute}
           description="Calculé automatiquement : résultat brut / chiffre d'affaires."
+          breakdown={breakdowns.margeBrute}
         />
       </div>
 
@@ -872,7 +1021,12 @@ function ExecutiveSection() {
           title={selectedFinRow.label}
           onClose={() => setSelectedFinRow(null)}
           fields={[
-            { label: "Valeur", value: selectedFinRow.value, description: selectedFinRow.lecture },
+            {
+              label: "Valeur",
+              value: selectedFinRow.value,
+              description: selectedFinRow.lecture,
+              breakdown: selectedFinRow.breakdown,
+            },
           ]}
         />
       )}
@@ -1218,6 +1372,7 @@ function ProductionSection() {
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -1241,12 +1396,14 @@ function ProductionSection() {
           realise={pctFormat(computed.rendementMoyen)}
           taux={computed.rendementMoyen / 0.95}
           description="Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots."
+          breakdown={breakdowns.rendementMoyen}
         />
         <KpiTile
           label="Pertes volume"
           objectif={pctFormat(p.tauxPertesMax)}
           realise={pctFormat(computed.tauxPertes)}
           description="Calculé automatiquement : volume perdu / volume de jus, comparé au taux maximum toléré (Paramètres ERP)."
+          breakdown={breakdowns.tauxPertes}
         />
         <KpiTile
           label="Valeur production"
@@ -1491,6 +1648,7 @@ function StockSection() {
     cumul += m.entree - m.sortie;
     return { m, cumul };
   });
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader eyebrow="Module ERP 03" title="Stocks" responsable="Production / Magasin" />
@@ -1502,17 +1660,36 @@ function StockSection() {
           realise={computed.stockMPPieces}
           unit="pcs"
           description="Calculé automatiquement : cumul chronologique des entrées − sorties (Mouvements matières premières)."
+          breakdown={[
+            {
+              label: "Entrées − sorties, tous mouvements",
+              value: `${computed.stockMPPieces} pcs`,
+            },
+            { label: "= Stock matières premières", value: `${computed.stockMPPieces} pcs` },
+          ]}
         />
         <KpiTile
           label="Valeur stock MP"
           realise={fcFormat(computed.stockMPValeur)}
           description="Calculé automatiquement : stock cumulé × coût unitaire du dernier mouvement."
+          breakdown={[
+            { label: "Stock matières premières", value: `${computed.stockMPPieces} pcs` },
+            {
+              label: "× Coût unitaire (dernier mouvement)",
+              value:
+                computed.stockMPPieces !== 0
+                  ? fcFormat(computed.stockMPValeur / computed.stockMPPieces)
+                  : "—",
+            },
+            { label: "= Valeur stock MP", value: fcFormat(computed.stockMPValeur) },
+          ]}
         />
         <KpiTile
           label="Stock produits finis"
           realise={computed.stockPF.reduce((a, s) => a + s.stock, 0)}
           unit="bt"
           description="Calculé automatiquement : bouteilles produites − vendues, tous formats confondus."
+          breakdown={breakdowns.stockActuel}
         />
       </div>
 
@@ -1708,12 +1885,28 @@ function StockSection() {
               value: selectedStockPF.stock,
               description:
                 "Calculé automatiquement : produites − vendues. Aucune ligne Firestore unique ne correspond à ce chiffre — rien à modifier ou supprimer ici directement.",
+              breakdown: [
+                { label: "Produites (Production)", value: String(selectedStockPF.produites) },
+                { label: "− Vendues (Commercialisation)", value: `− ${selectedStockPF.vendues}` },
+                { label: "= Stock", value: String(selectedStockPF.stock) },
+              ],
             },
             {
               label: "Valeur stock",
               value: fcFormat(selectedStockPF.valeur),
               description:
                 "Calculé automatiquement : stock × prix de vente de ce format (Paramètres ERP).",
+              breakdown: [
+                { label: "Stock", value: String(selectedStockPF.stock) },
+                {
+                  label: "× Prix de vente (Paramètres ERP)",
+                  value:
+                    selectedStockPF.stock !== 0
+                      ? fcFormat(selectedStockPF.valeur / selectedStockPF.stock)
+                      : "—",
+                },
+                { label: "= Valeur stock", value: fcFormat(selectedStockPF.valeur) },
+              ],
             },
           ]}
         />
@@ -2350,6 +2543,7 @@ function CommercialisationSection({
   const p = state.parametres;
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
   const [selectedCanal, setSelectedCanal] = useState<Canal | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -2378,11 +2572,13 @@ function CommercialisationSection({
           realise={pctFormat(computed.tauxEncaissement)}
           taux={computed.tauxEncaissement}
           description="Calculé automatiquement : encaissements / chiffre d'affaires brut."
+          breakdown={breakdowns.tauxEncaissement}
         />
         <KpiTile
           label="Créances clients"
           realise={fcFormat(computed.creances)}
           description="Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients."
+          breakdown={breakdowns.creances}
         />
       </div>
 
@@ -2692,6 +2888,7 @@ function FunnelStage({
   secondary,
   pct,
   description,
+  breakdown,
   onView,
 }: {
   num: string;
@@ -2701,8 +2898,10 @@ function FunnelStage({
   secondary: string;
   pct: number | null;
   description: string;
+  breakdown?: DetailField["breakdown"];
   onView: () => void;
 }) {
+  const [showDetail, setShowDetail] = useState(false);
   const clampedPct = pct === null ? null : Math.max(0, Math.min(100, Math.round(pct * 100)));
   return (
     <div className="flex-1 rounded-2xl border border-border bg-card p-5">
@@ -2714,10 +2913,15 @@ function FunnelStage({
           {title}
         </p>
       </div>
-      <p className="mt-3 font-display text-2xl font-bold text-primary">
-        {headline}
-        {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
-      </p>
+      <button
+        onClick={() => setShowDetail(true)}
+        className="mt-3 block text-left transition hover:opacity-80"
+      >
+        <p className="font-display text-2xl font-bold text-primary">
+          {headline}
+          {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
+        </p>
+      </button>
       <p className="mt-1 text-xs text-muted-foreground">{secondary}</p>
       <div className="mt-3">
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
@@ -2736,6 +2940,21 @@ function FunnelStage({
       <button onClick={onView} className="mt-3 text-xs font-semibold text-primary hover:underline">
         Voir le détail →
       </button>
+
+      {showDetail && (
+        <RecordDetailModal
+          title={title}
+          onClose={() => setShowDetail(false)}
+          fields={[
+            {
+              label: "Valeur",
+              value: `${headline}${unit ? ` ${unit}` : ""}`,
+              description,
+              breakdown,
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -2758,6 +2977,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
   const tauxVenteStock = computed.bouteillesProduites
     ? computed.bouteillesVendues / computed.bouteillesProduites
     : null;
+  const breakdowns = buildBreakdowns(computed);
 
   return (
     <div className="space-y-6">
@@ -2778,6 +2998,13 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           secondary={`${state.approvisionnements.length} réception(s)`}
           pct={null}
           description="Ananas reçu des producteurs, pesé à la livraison."
+          breakdown={[
+            {
+              label: "Réceptions (Approvisionnement)",
+              value: `${state.approvisionnements.length}`,
+            },
+            { label: "= Kg reçus", value: `${Math.round(computed.kgAchetes)} kg` },
+          ]}
           onView={() => onNavigate("appro")}
         />
         <FunnelArrow />
@@ -2789,6 +3016,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           secondary={`${state.productions.length} lot(s)`}
           pct={tauxTransformation}
           description="Ananas transformé en jus et conditionné en bouteilles — le taux est le kg transformé sur le kg reçu."
+          breakdown={breakdowns.tauxTransformation}
           onView={() => onNavigate("production")}
         />
         <FunnelArrow />
@@ -2800,6 +3028,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           secondary={`Valeur ${fcFormat(valeurStockFinis)}`}
           pct={null}
           description="Bouteilles produites non encore vendues (produites − vendues)."
+          breakdown={breakdowns.stockActuel}
           onView={() => onNavigate("stock")}
         />
         <FunnelArrow />
@@ -2811,6 +3040,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           secondary={fcFormat(computed.ca)}
           pct={tauxVenteStock}
           description="Bouteilles vendues, tous canaux confondus — le taux est vendu sur produit."
+          breakdown={breakdowns.tauxVente}
           onView={() => onNavigate("commercialisation")}
         />
       </div>
@@ -3064,7 +3294,9 @@ function FinancesSection() {
     label: string;
     value: string;
     lecture?: string;
+    breakdown?: DetailField["breakdown"];
   } | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   const revenusRows = [
     {
       label: "Chiffre d'affaires brut",
@@ -3082,6 +3314,7 @@ function FinancesSection() {
       value: fcFormat(computed.creances),
       lecture:
         "Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients.",
+      breakdown: breakdowns.creances,
     },
   ];
   const coutsRows = [
@@ -3112,6 +3345,7 @@ function FinancesSection() {
       label: "TOTAL COÛTS",
       value: fcFormat(computed.totalCouts),
       lecture: "Calculé automatiquement : somme de toutes les lignes ci-dessus.",
+      breakdown: breakdowns.totalCouts,
     },
   ];
   const resultatRows = [
@@ -3119,37 +3353,44 @@ function FinancesSection() {
       label: "Résultat brut hors amortissement",
       value: fcFormat(computed.resultatBrut),
       lecture: "Calculé automatiquement : chiffre d'affaires − total des coûts.",
+      breakdown: breakdowns.resultatBrut,
     },
     {
       label: "Marge brute",
       value: pctFormat(computed.margeBrute),
       lecture: "Calculé automatiquement : résultat brut / chiffre d'affaires.",
+      breakdown: breakdowns.margeBrute,
     },
     {
       label: "Rendement sur coûts",
       value: pctFormat(computed.rendementSurCouts),
       lecture: "Calculé automatiquement : résultat brut / total des coûts.",
+      breakdown: breakdowns.rendementSurCouts,
     },
     {
       label: "Coût moyen / bouteille",
       value: fcFormat(computed.coutMoyenBouteille),
       lecture: "Calculé automatiquement : total des coûts / bouteilles produites.",
+      breakdown: breakdowns.coutMoyenBouteille,
     },
     {
       label: "Prix moyen vendu",
       value: fcFormat(computed.prixMoyenVendu),
       lecture: "Calculé automatiquement : chiffre d'affaires / bouteilles vendues.",
+      breakdown: breakdowns.prixMoyenVendu,
     },
     {
       label: "Marge unitaire",
       value: fcFormat(computed.margeUnitaire),
       lecture: "Calculé automatiquement : prix moyen vendu − coût moyen par bouteille.",
+      breakdown: breakdowns.margeUnitaire,
     },
     {
       label: "Besoin cycle suivant",
       value: fcFormat(computed.totalCouts),
       lecture:
         "Calculé automatiquement : total des coûts — trésorerie minimum recommandée pour financer la prochaine campagne.",
+      breakdown: breakdowns.totalCouts,
     },
   ];
   return (
@@ -3271,6 +3512,7 @@ function FinancesSection() {
               label: selectedRow.card === "resultat" ? "Valeur" : "Montant",
               value: selectedRow.value,
               description: selectedRow.lecture,
+              breakdown: selectedRow.breakdown,
             },
           ]}
         />
@@ -4165,12 +4407,14 @@ function PersonnelSection({
 function KpiSection() {
   const { state, computed } = useErp();
   const p = state.parametres;
+  const breakdowns = buildBreakdowns(computed);
   const items = [
     {
       k: "Taux de transformation",
       o: "100 %",
       r: pctFormat(computed.kgAchetes ? computed.kgTransformes / computed.kgAchetes : 0),
       d: "Calculé automatiquement : kg transformés (Production) / kg achetés (Approvisionnement).",
+      b: breakdowns.tauxTransformation,
     },
     {
       k: "Taux de vente",
@@ -4181,24 +4425,28 @@ function KpiSection() {
           : 0,
       ),
       d: "Calculé automatiquement : bouteilles vendues (Commercialisation) / bouteilles produites (Production).",
+      b: breakdowns.tauxVente,
     },
     {
       k: "Taux d'encaissement",
       o: "100 %",
       r: pctFormat(computed.tauxEncaissement),
       d: "Calculé automatiquement : encaissements / chiffre d'affaires brut.",
+      b: breakdowns.tauxEncaissement,
     },
     {
       k: "Rendement matière",
       o: "> 95 %",
       r: pctFormat(computed.rendementMoyen),
       d: "Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots.",
+      b: breakdowns.rendementMoyen,
     },
     {
       k: "Pertes",
       o: `< ${pctFormat(p.tauxPertesMax)}`,
       r: pctFormat(computed.tauxPertes),
       d: "Calculé automatiquement : volume perdu / volume de jus, comparé au taux maximum toléré (Paramètres ERP).",
+      b: breakdowns.tauxPertes,
     },
     {
       k: "Clients actifs",
@@ -4211,18 +4459,21 @@ function KpiSection() {
       o: pctFormat(p.objectifMargeBrute),
       r: pctFormat(computed.margeBrute),
       d: "Calculé automatiquement : résultat brut / chiffre d'affaires.",
+      b: breakdowns.margeBrute,
     },
     {
       k: "Coût moyen / bouteille",
       o: "-",
       r: fcFormat(computed.coutMoyenBouteille),
       d: "Calculé automatiquement : total des coûts d'exploitation / bouteilles produites.",
+      b: breakdowns.coutMoyenBouteille,
     },
     {
       k: "Créances à recouvrer",
       o: "0 FC",
       r: fcFormat(computed.creances),
       d: "Calculé automatiquement : chiffre d'affaires − encaissements.",
+      b: breakdowns.creances,
     },
   ];
   return (
@@ -4235,7 +4486,14 @@ function KpiSection() {
       <ExportBar section="kpi" />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {items.map((i) => (
-          <KpiTile key={i.k} label={i.k} objectif={i.o} realise={i.r} description={i.d} />
+          <KpiTile
+            key={i.k}
+            label={i.k}
+            objectif={i.o}
+            realise={i.r}
+            description={i.d}
+            breakdown={i.b}
+          />
         ))}
       </div>
     </div>

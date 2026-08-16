@@ -6,6 +6,12 @@ export interface DetailField {
   value: ReactNode;
   /** What this field is / where it was collected — the whole point of this modal. */
   description?: string;
+  /**
+   * For computed/aggregate values: the real calculation, step by step, with
+   * actual current numbers — not just the abstract formula. Last entry is
+   * conventionally the final value ("= ...").
+   */
+  breakdown?: { label: string; value: string }[];
   edit?: {
     key: string;
     type: "text" | "number" | "date" | "select";
@@ -89,6 +95,25 @@ export function RecordDetailModal({
               </p>
               {f.description && (
                 <p className="mt-0.5 text-[12px] text-muted-foreground/80">{f.description}</p>
+              )}
+              {f.breakdown && f.breakdown.length > 0 && (
+                <div className="mt-2 overflow-hidden rounded-lg border border-border/70">
+                  {f.breakdown.map((b, i) => (
+                    <div
+                      key={i}
+                      className={`flex items-center justify-between gap-3 px-2.5 py-1.5 text-xs ${
+                        i > 0 ? "border-t border-border/50" : ""
+                      } ${
+                        i === f.breakdown!.length - 1
+                          ? "bg-primary/5 font-semibold text-primary"
+                          : "text-foreground"
+                      }`}
+                    >
+                      <span>{b.label}</span>
+                      <span className="tabular-nums">{b.value}</span>
+                    </div>
+                  ))}
+                </div>
               )}
               {editing && f.edit ? (
                 f.edit.type === "select" ? (
