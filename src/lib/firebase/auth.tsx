@@ -141,6 +141,16 @@ interface AuthContextValue {
    */
   updatePartnerProfile: (data: PartnerOnboardingData & { displayName: string }) => Promise<void>;
   /**
+   * For the dashboard's "Mon profil" modal — lets an already-signed-in
+   * admin/staff account correct their own display name. Deliberately the
+   * only self-editable field: email requires Firebase Auth's own re-auth
+   * flow, and role/menus/poste are permission-scoping fields no account
+   * should be able to grant itself, even though firestore.rules' self-
+   * update rule (role unchanged) would technically allow it — this client
+   * function is the only path the UI offers, and it never touches them.
+   */
+  updateOwnProfile: (data: { displayName: string }) => Promise<void>;
+  /**
    * Reads an invite by ID (public get, see firestore.rules) — used by
    * /join to preview who's being invited to what before asking for a
    * password.
@@ -275,6 +285,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // leaves unlisted fields untouched otherwise.
         idNumber: data.idNumber ? data.idNumber : deleteField(),
       });
+    },
+    updateOwnProfile: async (data) => {
+      if (!auth.currentUser) throw new Error("Vous devez être connecté.");
+      await updateProfile(auth.currentUser, { displayName: data.displayName });
+      await updateDoc(doc(db, "users", auth.currentUser.uid), { displayName: data.displayName });
     },
     getInvite: async (inviteId) => {
       const snap = await getDoc(doc(db, "invites", inviteId));

@@ -147,7 +147,8 @@ function DashboardRoute() {
 }
 
 function Dashboard() {
-  const { profile, signOutUser } = useAuth();
+  const { profile, signOutUser, updateOwnProfile, resetPassword } = useAuth();
+  const [showProfile, setShowProfile] = useState(false);
   // A group (e.g. Parcours production) stays visible if the account can open
   // the group page itself OR at least one of its member sections — a
   // poste-scoped "Directeur de Production" account has appro/production/stock
@@ -221,14 +222,17 @@ function Dashboard() {
           </span>
 
           <div className="hidden items-center gap-3 sm:flex">
-            <div className="text-right leading-tight">
+            <button
+              onClick={() => setShowProfile(true)}
+              className="text-right leading-tight transition hover:opacity-70"
+            >
               <p className="text-xs font-semibold text-primary">
                 {profile?.displayName || profile?.email}
               </p>
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
                 {profile?.role}
               </p>
-            </div>
+            </button>
             <button
               onClick={() => signOutUser()}
               className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:text-primary"
@@ -238,6 +242,73 @@ function Dashboard() {
           </div>
         </div>
       </header>
+
+      {showProfile && profile && (
+        <RecordDetailModal
+          title="Mon profil"
+          subtitle={profile.displayName || profile.email}
+          onClose={() => setShowProfile(false)}
+          onSave={(patch) =>
+            updateOwnProfile({ displayName: String(patch.displayName) }).catch((err) =>
+              toast.error(
+                err instanceof Error
+                  ? `Mise à jour impossible : ${err.message}`
+                  : "Mise à jour impossible.",
+              ),
+            )
+          }
+          fields={[
+            {
+              label: "Nom affiché",
+              value: profile.displayName || "—",
+              description: "Visible par les autres comptes admin/staff.",
+              edit: { key: "displayName", type: "text", value: profile.displayName ?? "" },
+            },
+            {
+              label: "Email",
+              value: profile.email,
+              description: "Adresse de connexion — non modifiable ici.",
+            },
+            {
+              label: "Rôle",
+              value: profile.role === "admin" ? "Admin" : "Staff",
+              description: "Défini à la création du compte — non modifiable ici.",
+            },
+            ...(profile.poste
+              ? [
+                  {
+                    label: "Poste",
+                    value: profile.poste,
+                    description:
+                      "Détermine les sections accessibles — modifiable par un admin depuis Primes & personnel.",
+                  },
+                ]
+              : []),
+            {
+              label: "Mot de passe",
+              value: (
+                <button
+                  onClick={() =>
+                    resetPassword(profile.email)
+                      .then(() => toast.success("Email de réinitialisation envoyé."))
+                      .catch((err) =>
+                        toast.error(
+                          err instanceof Error
+                            ? `Envoi impossible : ${err.message}`
+                            : "Envoi impossible.",
+                        ),
+                      )
+                  }
+                  className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary"
+                >
+                  Recevoir un lien de réinitialisation
+                </button>
+              ),
+              description: "Un email de réinitialisation sera envoyé à votre adresse.",
+            },
+          ]}
+        />
+      )}
 
       <div className="mx-auto flex max-w-[1400px] flex-col gap-8 px-6 py-8 lg:flex-row">
         <aside className="sticky top-24 hidden h-fit w-56 shrink-0 flex-col gap-1 lg:flex">
