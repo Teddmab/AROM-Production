@@ -51,7 +51,10 @@ export type StaffPoste =
 
 export const STAFF_POSTES: { value: StaffPoste; menus: string[] }[] = [
   { value: "Directeur de Production", menus: ["appro", "production", "stock", "personnel"] },
-  { value: "Chargée de Commercialisation", menus: ["commercialisation", "marketing", "personnel"] },
+  {
+    value: "Chargée de Commercialisation",
+    menus: ["commercialisation", "promotion", "marketing", "personnel"],
+  },
   { value: "Personnalisé", menus: [] },
 ];
 

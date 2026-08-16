@@ -336,6 +336,14 @@ export const fcFormat = (n: number) =>
 
 export const pctFormat = (n: number) => `${(n * 100).toFixed(1)} %`;
 
+// `fcPerUsd` is FC per 1 USD (as returned by the exchange-rate cache) —
+// `null` when no rate has been fetched yet, in which case callers should
+// simply omit the USD figure rather than showing a wrong conversion.
+export const usdFormat = (fcAmount: number, fcPerUsd: number | null) =>
+  fcPerUsd
+    ? `≈ ${(fcAmount / fcPerUsd).toLocaleString("fr-FR", { maximumFractionDigits: 0 })} $`
+    : null;
+
 // Formats a plain "YYYY-MM-DD" date-only string (e.g. from an <input
 // type="date">) without going through `new Date(...)`, which parses it
 // as UTC midnight and can shift the displayed day depending on the

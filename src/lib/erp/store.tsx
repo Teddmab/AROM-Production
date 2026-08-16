@@ -36,6 +36,10 @@ const COLLECTIONS: Collections[] = [
   "charges",
 ];
 
+// Cached in Firestore at config/exchangeRate so every session shares one
+// fetch instead of each dashboard tab hitting the API on load.
+const EXCHANGE_RATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 interface ErpContextValue {
   state: ErpState;
   computed: ErpComputed;
@@ -46,6 +50,9 @@ interface ErpContextValue {
   removeRow: (key: Collections, id: string) => void;
   updateParametres: (patch: Partial<ErpState["parametres"]>) => void;
   reset: () => void;
+  // FC per 1 USD, from the cached rate — null until the first fetch/read
+  // resolves, so summary figures can omit the USD line rather than show 0.
+  fcPerUsd: number | null;
 }
 
 const ErpContext = createContext<ErpContextValue | null>(null);
@@ -57,6 +64,46 @@ export function ErpProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ErpState>(SEED);
   const [ready, setReady] = useState(false);
   const [filter, setFilter] = useState<ExportFilter>({ from: "", to: "", campagne: "" });
+  const [fcPerUsd, setFcPerUsd] = useState<number | null>(null);
+
+  useEffect(() => {
+    let refreshing = false;
+    const unsubExchangeRate = onSnapshot(
+      doc(db, "config", "exchangeRate"),
+      (snap) => {
+        const data = snap.exists()
+          ? (snap.data() as { fcPerUsd?: number; fetchedAt?: string })
+          : null;
+        if (data?.fcPerUsd) setFcPerUsd(data.fcPerUsd);
+
+        const isStale =
+          !data?.fetchedAt || Date.now() - Date.parse(data.fetchedAt) > EXCHANGE_RATE_MAX_AGE_MS;
+        if (!isStale || refreshing) return;
+        refreshing = true;
+        fetch("https://open.er-api.com/v6/latest/USD")
+          .then((r) => r.json())
+          .then((json: { result?: string; rates?: { CDF?: number } }) => {
+            if (json.result !== "success" || !json.rates?.CDF) return;
+            // Write is admin-only under firestore.rules' generic `config/{doc}`
+            // rule (matches every other config doc) — a staff session's write
+            // is silently rejected here, and the cached rate just goes another
+            // day before an admin session refreshes it. Not worth a rules
+            // carve-out for a background, non-sensitive refresh.
+            return setDoc(doc(db, "config", "exchangeRate"), {
+              fcPerUsd: json.rates.CDF,
+              fetchedAt: new Date().toISOString(),
+            });
+          })
+          .catch((err) => console.warn("Taux de change : rafraîchissement impossible", err))
+          .finally(() => {
+            refreshing = false;
+          });
+      },
+      (err) => console.warn(`Synchronisation "exchangeRate" impossible : ${err.message}`),
+    );
+
+    return unsubExchangeRate;
+  }, []);
 
   useEffect(() => {
     const unsubs = COLLECTIONS.map((key) =>
@@ -102,6 +149,7 @@ export function ErpProvider({ children }: { children: ReactNode }) {
       ready,
       filter,
       setFilter,
+      fcPerUsd,
       addRow: (key, row) => {
         setDoc(doc(db, key, (row as { id: string }).id), row).catch((err) =>
           toast.error(`Enregistrement impossible : ${err.message}`),
@@ -123,7 +171,7 @@ export function ErpProvider({ children }: { children: ReactNode }) {
         );
       },
     }),
-    [state, ready, filter],
+    [state, ready, filter, fcPerUsd],
   );
 
   return <ErpContext.Provider value={value}>{children}</ErpContext.Provider>;

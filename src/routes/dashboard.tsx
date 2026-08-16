@@ -27,6 +27,7 @@ import {
   formatDateOnly,
   pctFormat,
   prixFormat,
+  usdFormat,
   type Canal,
   type Format,
   type Qualite,
@@ -71,6 +72,7 @@ type SectionId =
   | "production"
   | "stock"
   | "commercialisation"
+  | "promotion"
   | "parcours"
   | "marketing"
   | "finances"
@@ -100,6 +102,7 @@ const SECTIONS: {
       { id: "production", label: "Production", isSection: true },
       { id: "stock", label: "Stock", isSection: true },
       { id: "commercialisation", label: "Commercialisation", isSection: true },
+      { id: "promotion", label: "Promotion", isSection: true },
     ],
   },
   { id: "marketing", label: "Marketing", num: "02" },
@@ -162,7 +165,7 @@ function Dashboard() {
     setActive(sectionId);
     if (subTabId) setActiveSubTab((s) => ({ ...s, [sectionId]: subTabId }));
   };
-  const { computed } = useErp();
+  const { computed, fcPerUsd } = useErp();
 
   return (
     <div className="min-h-screen">
@@ -198,6 +201,11 @@ function Dashboard() {
               <p className="text-sm font-semibold text-primary">
                 {fcFormat(computed.encaissements)}
               </p>
+              {usdFormat(computed.encaissements, fcPerUsd) && (
+                <p className="text-[10px] text-muted-foreground">
+                  {usdFormat(computed.encaissements, fcPerUsd)}
+                </p>
+              )}
             </div>
             <Divider />
             <div>
@@ -333,6 +341,7 @@ function Dashboard() {
               onTabChange={(v) => setActiveSubTab((s) => ({ ...s, commercialisation: v }))}
             />
           )}
+          {active === "promotion" && <PromotionSection />}
           {active === "parcours" && <ParcoursSection onNavigate={setActive} />}
           {active === "marketing" && <MarketingSection />}
           {active === "finances" && <FinancesSection />}
@@ -417,6 +426,7 @@ function KpiTile({
   taux,
   description,
   breakdown,
+  secondary,
 }: {
   label: string;
   objectif?: string | number;
@@ -427,6 +437,8 @@ function KpiTile({
   description?: string;
   /** The real calculation behind this figure, step by step — see DetailField. */
   breakdown?: DetailField["breakdown"];
+  /** Small muted line under the value — the USD-equivalent for monetary summary tiles. */
+  secondary?: string | null;
 }) {
   const [showDetail, setShowDetail] = useState(false);
   const pct = typeof taux === "number" ? Math.max(0, Math.min(100, Math.round(taux * 100))) : null;
@@ -454,6 +466,7 @@ function KpiTile({
             </p>
           )}
         </div>
+        {secondary && <p className="mt-0.5 text-xs text-muted-foreground">{secondary}</p>}
         {pct !== null && (
           <div className="mt-3">
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
@@ -877,7 +890,7 @@ function TrendChart({
 }
 
 function ExecutiveSection() {
-  const { computed, state } = useErp();
+  const { computed, state, fcPerUsd } = useErp();
   const p = state.parametres;
   const [selectedObjectif, setSelectedObjectif] = useState<
     (typeof computed.objectifs)[number] | null
@@ -889,32 +902,37 @@ function ExecutiveSection() {
     breakdown?: DetailField["breakdown"];
   } | null>(null);
   const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
   const finRows = [
     {
       label: "Chiffre d'affaires",
-      value: fcFormat(computed.ca),
+      value: fcWithUsd(computed.ca),
       lecture: "Brut — calculé automatiquement, somme des ventes.",
     },
     {
       label: "Encaissements",
-      value: fcFormat(computed.encaissements),
+      value: fcWithUsd(computed.encaissements),
       lecture: "Trésorerie reçue — calculé automatiquement.",
     },
     {
       label: "Créances clients",
-      value: fcFormat(computed.creances),
+      value: fcWithUsd(computed.creances),
       lecture: "À recouvrer — calculé automatiquement : CA − encaissements.",
       breakdown: breakdowns.creances,
     },
     {
       label: "Total coûts",
-      value: fcFormat(computed.totalCouts),
+      value: fcWithUsd(computed.totalCouts),
       lecture: "Exploitation — calculé automatiquement, voir le détail dans Finances.",
       breakdown: breakdowns.totalCouts,
     },
     {
       label: "Résultat brut",
-      value: fcFormat(computed.resultatBrut),
+      value: fcWithUsd(computed.resultatBrut),
       lecture: "Avant impôt et amortissement — calculé automatiquement : CA − coûts.",
       breakdown: breakdowns.resultatBrut,
     },
@@ -973,11 +991,13 @@ function ExecutiveSection() {
         <KpiTile
           label="Chiffre d'affaires"
           realise={fcFormat(computed.ca)}
+          secondary={usdFormat(computed.ca, fcPerUsd)}
           description="Calculé automatiquement : somme des montants bruts de toutes les ventes."
         />
         <KpiTile
           label="Résultat brut"
           realise={fcFormat(computed.resultatBrut)}
+          secondary={usdFormat(computed.resultatBrut, fcPerUsd)}
           description="Calculé automatiquement : chiffre d'affaires − total des coûts d'exploitation (voir Finances)."
           breakdown={breakdowns.resultatBrut}
         />
@@ -1086,7 +1106,7 @@ function ExecutiveSection() {
 }
 
 function ApproSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const p = state.parametres;
   const [selectedAppro, setSelectedAppro] = useState<(typeof computed.appro)[number] | null>(null);
   const [selectedProducteur, setSelectedProducteur] = useState<
@@ -1311,11 +1331,13 @@ function ApproSection() {
         <KpiTile
           label="Coût matière"
           realise={fcFormat(computed.coutAchats)}
+          secondary={usdFormat(computed.coutAchats, fcPerUsd)}
           description="Calculé automatiquement : somme des valeurs d'achat (quantité reçue × prix/kg) sur toutes les réceptions."
         />
         <KpiTile
           label="Transport & frais"
           realise={fcFormat(computed.coutTransport)}
+          secondary={usdFormat(computed.coutTransport, fcPerUsd)}
           description="Calculé automatiquement : somme du transport et autres frais sur toutes les réceptions."
         />
       </div>
@@ -1420,7 +1442,7 @@ function ApproSection() {
 }
 
 function ProductionSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
@@ -1459,6 +1481,7 @@ function ProductionSection() {
         <KpiTile
           label="Valeur production"
           realise={fcFormat(computed.valeurProduction)}
+          secondary={usdFormat(computed.valeurProduction, fcPerUsd)}
           description="Calculé automatiquement : quantités par format × prix de vente définis dans Paramètres ERP, sommé sur tous les lots."
         />
       </div>
@@ -1688,7 +1711,7 @@ function ProductionSection() {
 }
 
 function StockSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const [selectedMouvement, setSelectedMouvement] = useState<{
     m: (typeof state.stockMP)[number];
     cumul: number;
@@ -1723,6 +1746,7 @@ function StockSection() {
         <KpiTile
           label="Valeur stock MP"
           realise={fcFormat(computed.stockMPValeur)}
+          secondary={usdFormat(computed.stockMPValeur, fcPerUsd)}
           description="Calculé automatiquement : stock cumulé × coût unitaire du dernier mouvement."
           breakdown={[
             { label: "Stock matières premières", value: `${computed.stockMPPieces} pcs` },
@@ -2592,7 +2616,7 @@ function CommercialisationSection({
   activeTab: string;
   onTabChange: (tab: string) => void;
 }) {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
@@ -2617,6 +2641,7 @@ function CommercialisationSection({
         <KpiTile
           label="Chiffre d'affaires"
           realise={fcFormat(computed.ca)}
+          secondary={usdFormat(computed.ca, fcPerUsd)}
           description="Calculé automatiquement : somme des montants bruts de toutes les ventes."
         />
         <KpiTile
@@ -2630,6 +2655,7 @@ function CommercialisationSection({
         <KpiTile
           label="Créances clients"
           realise={fcFormat(computed.creances)}
+          secondary={usdFormat(computed.creances, fcPerUsd)}
           description="Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients."
           breakdown={breakdowns.creances}
         />
@@ -2638,15 +2664,11 @@ function CommercialisationSection({
       <Tabs value={activeTab} onValueChange={onTabChange}>
         <TabsList>
           <TabsTrigger value="catalogue">Catalogue</TabsTrigger>
-          <TabsTrigger value="promotions">Promotions</TabsTrigger>
           <TabsTrigger value="commandes">Commandes</TabsTrigger>
           <TabsTrigger value="ventes">Ventes & clients</TabsTrigger>
         </TabsList>
         <TabsContent value="catalogue">
           <CatalogueCard />
-        </TabsContent>
-        <TabsContent value="promotions">
-          <PromoCard />
         </TabsContent>
         <TabsContent value="commandes">
           <OrdersCard />
@@ -2928,6 +2950,20 @@ function CommercialisationSection({
   );
 }
 
+function PromotionSection() {
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        eyebrow="Module ERP 04"
+        title="Promotion"
+        responsable="Chargée de Commercialisation"
+        subtitle="Bandeau promo affiché sur la boutique partenaire."
+      />
+      <PromoCard />
+    </div>
+  );
+}
+
 /**
  * One stage of the Parcours production funnel (sprint 20). Purely a new
  * way of looking at numbers `useErp()` already computes — no new
@@ -3039,11 +3075,16 @@ const stageLabels: Record<string, string> = {
 };
 
 function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
-  const { state, computed } = useErp();
+  const { state, computed, fcPerUsd } = useErp();
   const [expandedStage, setExpandedStage] = useState<
     "appro" | "production" | "stock" | "commercialisation" | null
   >(null);
   const toggle = (id: typeof expandedStage) => setExpandedStage((cur) => (cur === id ? null : id));
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
 
   const stockActuel = computed.stockPF.reduce((a, s) => a + s.stock, 0);
   const valeurStockFinis = computed.stockPF.reduce((a, s) => a + s.valeur, 0);
@@ -3110,7 +3151,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           title="Stock"
           headline={stockActuel}
           unit="bt"
-          secondary={`Valeur ${fcFormat(valeurStockFinis)}`}
+          secondary={`Valeur ${fcWithUsd(valeurStockFinis)}`}
           pct={null}
           description="Bouteilles produites non encore vendues (produites − vendues)."
           breakdown={breakdowns.stockActuel}
@@ -3123,7 +3164,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           title="Commercialisation"
           headline={computed.bouteillesVendues}
           unit="bt"
-          secondary={fcFormat(computed.ca)}
+          secondary={fcWithUsd(computed.ca)}
           pct={tauxVenteStock}
           description="Bouteilles vendues, tous canaux confondus — le taux est vendu sur produit."
           breakdown={breakdowns.tauxVente}
@@ -3182,7 +3223,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
 }
 
 function MarketingSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const [selectedAction, setSelectedAction] = useState<(typeof state.marketing)[number] | null>(
     null,
   );
@@ -3198,6 +3239,7 @@ function MarketingSection() {
         <KpiTile
           label="Budget engagé"
           realise={fcFormat(computed.coutMarketing)}
+          secondary={usdFormat(computed.coutMarketing, fcPerUsd)}
           description="Calculé automatiquement : somme du coût réel de toutes les actions marketing."
         />
         <KpiTile
@@ -3421,7 +3463,7 @@ function MarketingSection() {
 }
 
 function FinancesSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const [selectedCharge, setSelectedCharge] = useState<(typeof state.charges)[number] | null>(null);
   const [selectedRow, setSelectedRow] = useState<{
     card: "revenus" | "couts" | "resultat";
@@ -3431,21 +3473,26 @@ function FinancesSection() {
     breakdown?: DetailField["breakdown"];
   } | null>(null);
   const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
   const revenusRows = [
     {
       label: "Chiffre d'affaires brut",
-      value: fcFormat(computed.ca),
+      value: fcWithUsd(computed.ca),
       lecture: "Calculé automatiquement : somme des montants bruts de toutes les ventes.",
     },
     {
       label: "Encaissements",
-      value: fcFormat(computed.encaissements),
+      value: fcWithUsd(computed.encaissements),
       lecture:
         "Calculé automatiquement : somme des montants réellement encaissés sur toutes les ventes.",
     },
     {
       label: "Créances clients",
-      value: fcFormat(computed.creances),
+      value: fcWithUsd(computed.creances),
       lecture:
         "Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients.",
       breakdown: breakdowns.creances,
@@ -3454,30 +3501,30 @@ function FinancesSection() {
   const coutsRows = [
     {
       label: "Achats ananas",
-      value: fcFormat(computed.coutAchats),
+      value: fcWithUsd(computed.coutAchats),
       lecture:
         "Calculé automatiquement : somme des valeurs d'achat de toutes les réceptions (Approvisionnement).",
     },
     {
       label: "Transport et frais",
-      value: fcFormat(computed.coutTransport),
+      value: fcWithUsd(computed.coutTransport),
       lecture:
         "Calculé automatiquement : somme du transport et autres frais de toutes les réceptions.",
     },
     {
       label: "Autres charges d'exploitation",
-      value: fcFormat(computed.autresCharges),
+      value: fcWithUsd(computed.autresCharges),
       lecture:
         "Calculé automatiquement : somme des montants « Réalisé » des Charges fixes ci-dessus.",
     },
     {
       label: "Marketing",
-      value: fcFormat(computed.coutMarketing),
+      value: fcWithUsd(computed.coutMarketing),
       lecture: "Calculé automatiquement : somme des coûts réels de toutes les actions marketing.",
     },
     {
       label: "TOTAL COÛTS",
-      value: fcFormat(computed.totalCouts),
+      value: fcWithUsd(computed.totalCouts),
       lecture: "Calculé automatiquement : somme de toutes les lignes ci-dessus.",
       breakdown: breakdowns.totalCouts,
     },
@@ -3485,7 +3532,7 @@ function FinancesSection() {
   const resultatRows = [
     {
       label: "Résultat brut hors amortissement",
-      value: fcFormat(computed.resultatBrut),
+      value: fcWithUsd(computed.resultatBrut),
       lecture: "Calculé automatiquement : chiffre d'affaires − total des coûts.",
       breakdown: breakdowns.resultatBrut,
     },
@@ -3503,25 +3550,25 @@ function FinancesSection() {
     },
     {
       label: "Coût moyen / bouteille",
-      value: fcFormat(computed.coutMoyenBouteille),
+      value: fcWithUsd(computed.coutMoyenBouteille),
       lecture: "Calculé automatiquement : total des coûts / bouteilles produites.",
       breakdown: breakdowns.coutMoyenBouteille,
     },
     {
       label: "Prix moyen vendu",
-      value: fcFormat(computed.prixMoyenVendu),
+      value: fcWithUsd(computed.prixMoyenVendu),
       lecture: "Calculé automatiquement : chiffre d'affaires / bouteilles vendues.",
       breakdown: breakdowns.prixMoyenVendu,
     },
     {
       label: "Marge unitaire",
-      value: fcFormat(computed.margeUnitaire),
+      value: fcWithUsd(computed.margeUnitaire),
       lecture: "Calculé automatiquement : prix moyen vendu − coût moyen par bouteille.",
       breakdown: breakdowns.margeUnitaire,
     },
     {
       label: "Besoin cycle suivant",
-      value: fcFormat(computed.totalCouts),
+      value: fcWithUsd(computed.totalCouts),
       lecture:
         "Calculé automatiquement : total des coûts — trésorerie minimum recommandée pour financer la prochaine campagne.",
       breakdown: breakdowns.totalCouts,
@@ -4540,9 +4587,14 @@ function PersonnelSection({
 }
 
 function KpiSection() {
-  const { state, computed } = useErp();
+  const { state, computed, fcPerUsd } = useErp();
   const p = state.parametres;
   const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
   const items = [
     {
       k: "Taux de transformation",
@@ -4599,14 +4651,14 @@ function KpiSection() {
     {
       k: "Coût moyen / bouteille",
       o: "-",
-      r: fcFormat(computed.coutMoyenBouteille),
+      r: fcWithUsd(computed.coutMoyenBouteille),
       d: "Calculé automatiquement : total des coûts d'exploitation / bouteilles produites.",
       b: breakdowns.coutMoyenBouteille,
     },
     {
       k: "Créances à recouvrer",
       o: "0 FC",
-      r: fcFormat(computed.creances),
+      r: fcWithUsd(computed.creances),
       d: "Calculé automatiquement : chiffre d'affaires − encaissements.",
       b: breakdowns.creances,
     },
