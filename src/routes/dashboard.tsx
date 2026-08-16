@@ -15,7 +15,7 @@ import {
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
-import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
 import { db, storage } from "@/lib/firebase/config";
@@ -30,6 +30,7 @@ import {
   usdFormat,
   type Canal,
   type Format,
+  type Parametres,
   type Qualite,
 } from "@/lib/erp/model";
 import { ExportBar } from "@/components/erp/ExportBar";
@@ -38,6 +39,8 @@ import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
 import {
   ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
@@ -960,6 +963,269 @@ function TrendChart({
   );
 }
 
+const objectifsChartConfig = {
+  appro: { label: "Ananas achetés", color: "var(--primary)" },
+  production: { label: "Bouteilles produites", color: "var(--gold)" },
+  ventes: { label: "Bouteilles vendues", color: "var(--destructive)" },
+  encaissement: { label: "Taux d'encaissement", color: "var(--warning)" },
+  clients: { label: "Clients actifs", color: "var(--leaf)" },
+} satisfies ChartConfig;
+
+/**
+ * Cumulative progress toward each "Synthèse par domaine" objectif, as % of
+ * target over the campaign's actual dated activity — a sequence view
+ * alongside the snapshot table, so progress pacing (not just the current
+ * total) is visible. Marge brute isn't included here: its cost side
+ * includes Charges fixes, which has no per-row date (a fixed budget line,
+ * not dated transactions), so a smooth day-by-day trajectory for it would
+ * be approximate in a way the other five metrics aren't.
+ */
+function ObjectifsTrendChart({
+  appro,
+  production,
+  ventes,
+  parametres,
+}: {
+  appro: { date: string; qteRecueKg: number }[];
+  production: { date: string; totalBouteilles: number }[];
+  ventes: {
+    date: string;
+    quantite: number;
+    encaisse: number;
+    montantBrut: number;
+    client: string;
+  }[];
+  parametres: Parametres;
+}) {
+  const byDate = new Map<
+    string,
+    { kg: number; bt: number; vendues: number; ca: number; encaisse: number; clients: Set<string> }
+  >();
+  const bucket = (date: string) => {
+    if (!byDate.has(date)) {
+      byDate.set(date, { kg: 0, bt: 0, vendues: 0, ca: 0, encaisse: 0, clients: new Set() });
+    }
+    return byDate.get(date)!;
+  };
+  appro.forEach((r) => {
+    bucket(r.date).kg += r.qteRecueKg;
+  });
+  production.forEach((r) => {
+    bucket(r.date).bt += r.totalBouteilles;
+  });
+  ventes.forEach((r) => {
+    const b = bucket(r.date);
+    b.vendues += r.quantite;
+    b.ca += r.montantBrut;
+    b.encaisse += r.encaisse;
+    b.clients.add(r.client);
+  });
+
+  const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
+  if (dates.length === 0) {
+    return (
+      <p className="py-10 text-center text-sm text-muted-foreground">
+        Pas encore de données datées à afficher.
+      </p>
+    );
+  }
+
+  const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
+  let cumKg = 0;
+  let cumBt = 0;
+  let cumVendues = 0;
+  let cumCa = 0;
+  let cumEncaisse = 0;
+  const clientsVus = new Set<string>();
+  const data = dates.map((date) => {
+    const d = byDate.get(date)!;
+    cumKg += d.kg;
+    cumBt += d.bt;
+    cumVendues += d.vendues;
+    cumCa += d.ca;
+    cumEncaisse += d.encaisse;
+    d.clients.forEach((c) => clientsVus.add(c));
+    return {
+      date,
+      appro: pct(cumKg, parametres.objectifAnanasKg),
+      production: pct(cumBt, parametres.objectifBouteilles),
+      ventes: pct(cumVendues, parametres.objectifBouteilles),
+      encaissement: pct(cumEncaisse, cumCa),
+      clients: pct(clientsVus.size, parametres.objectifClients),
+    };
+  });
+
+  return (
+    <ChartContainer config={objectifsChartConfig} className="aspect-auto h-72 w-full">
+      <LineChart data={data} margin={{ left: 4, right: 4 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis
+          dataKey="date"
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(v) => formatDateOnly(v)}
+        />
+        <YAxis tickLine={false} axisLine={false} width={40} tickFormatter={(v) => `${v}%`} />
+        <ChartTooltip
+          content={<ChartTooltipContent labelFormatter={(v) => formatDateOnly(String(v))} />}
+        />
+        <ChartLegend content={<ChartLegendContent />} />
+        <Line
+          dataKey="appro"
+          type="monotone"
+          stroke="var(--color-appro)"
+          strokeWidth={2}
+          dot={false}
+        />
+        <Line
+          dataKey="production"
+          type="monotone"
+          stroke="var(--color-production)"
+          strokeWidth={2}
+          dot={false}
+        />
+        <Line
+          dataKey="ventes"
+          type="monotone"
+          stroke="var(--color-ventes)"
+          strokeWidth={2}
+          dot={false}
+        />
+        <Line
+          dataKey="encaissement"
+          type="monotone"
+          stroke="var(--color-encaissement)"
+          strokeWidth={2}
+          dot={false}
+        />
+        <Line
+          dataKey="clients"
+          type="monotone"
+          stroke="var(--color-clients)"
+          strokeWidth={2}
+          dot={false}
+        />
+      </LineChart>
+    </ChartContainer>
+  );
+}
+
+const financesChartConfig = {
+  ca: { label: "Chiffre d'affaires", color: "var(--gold)" },
+  couts: { label: "Total coûts", color: "var(--destructive)" },
+  resultat: { label: "Résultat brut", color: "var(--primary)" },
+} satisfies ChartConfig;
+
+/**
+ * Cumulative CA / coûts / résultat over the campaign's dated activity,
+ * ending exactly at the same figures the "Synthèse financière" table
+ * above it shows — Charges fixes (no per-row date) is folded in as a
+ * constant baseline present from the first dated point, rather than
+ * spread arbitrarily across days, so the two never disagree.
+ */
+function FinancesTrendChart({
+  appro,
+  ventes,
+  marketing,
+  autresCharges,
+}: {
+  appro: { date: string; valeurAchat: number; transport: number }[];
+  ventes: { date: string; montantBrut: number }[];
+  marketing: { date: string; coutReel: number }[];
+  autresCharges: number;
+}) {
+  const byDate = new Map<string, { couts: number; ca: number }>();
+  const bucket = (date: string) => {
+    if (!byDate.has(date)) byDate.set(date, { couts: 0, ca: 0 });
+    return byDate.get(date)!;
+  };
+  appro.forEach((r) => {
+    bucket(r.date).couts += r.valeurAchat + r.transport;
+  });
+  marketing.forEach((r) => {
+    bucket(r.date).couts += r.coutReel;
+  });
+  ventes.forEach((r) => {
+    bucket(r.date).ca += r.montantBrut;
+  });
+
+  const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
+  if (dates.length === 0) {
+    return (
+      <p className="py-10 text-center text-sm text-muted-foreground">
+        Pas encore de données datées à afficher.
+      </p>
+    );
+  }
+
+  let cumCa = 0;
+  let cumCouts = autresCharges;
+  const data = dates.map((date) => {
+    const d = byDate.get(date)!;
+    cumCa += d.ca;
+    cumCouts += d.couts;
+    return {
+      date,
+      ca: Math.round(cumCa),
+      couts: Math.round(cumCouts),
+      resultat: Math.round(cumCa - cumCouts),
+    };
+  });
+
+  return (
+    <ChartContainer config={financesChartConfig} className="aspect-auto h-72 w-full">
+      <AreaChart data={data} margin={{ left: 4, right: 4 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis
+          dataKey="date"
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(v) => formatDateOnly(v)}
+        />
+        <ChartTooltip
+          content={
+            <ChartTooltipContent
+              labelFormatter={(v) => formatDateOnly(String(v))}
+              formatter={(value, name, item) => (
+                <div className="flex w-full items-center justify-between gap-3">
+                  <span className="text-muted-foreground">
+                    {financesChartConfig[item.dataKey as keyof typeof financesChartConfig]?.label}
+                  </span>
+                  <span className="font-medium tabular-nums text-foreground">
+                    {fcFormat(Number(value))}
+                  </span>
+                </div>
+              )}
+            />
+          }
+        />
+        <ChartLegend content={<ChartLegendContent />} />
+        <Area
+          dataKey="ca"
+          type="monotone"
+          fill="var(--color-ca)"
+          fillOpacity={0.12}
+          stroke="var(--color-ca)"
+        />
+        <Area
+          dataKey="couts"
+          type="monotone"
+          fill="var(--color-couts)"
+          fillOpacity={0.12}
+          stroke="var(--color-couts)"
+        />
+        <Area
+          dataKey="resultat"
+          type="monotone"
+          fill="var(--color-resultat)"
+          fillOpacity={0.12}
+          stroke="var(--color-resultat)"
+        />
+      </AreaChart>
+    </ChartContainer>
+  );
+}
+
 function ExecutiveSection() {
   const { computed, state, fcPerUsd } = useErp();
   const p = state.parametres;
@@ -1108,6 +1374,17 @@ function ExecutiveSection() {
             <Status statut={o.statut} />,
           ])}
         />
+        <div className="mt-6 border-t border-border/70 pt-6">
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Progression cumulée (% de l'objectif)
+          </p>
+          <ObjectifsTrendChart
+            appro={computed.appro}
+            production={computed.production}
+            ventes={computed.ventes}
+            parametres={p}
+          />
+        </div>
       </Card>
 
       {selectedObjectif && (
@@ -1154,6 +1431,17 @@ function ExecutiveSection() {
           headers={["Indicateur", "Valeur", "Lecture"]}
           rows={finRows.map((r) => [r.label, r.value, r.lecture])}
         />
+        <div className="mt-6 border-t border-border/70 pt-6">
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Évolution cumulée (FC)
+          </p>
+          <FinancesTrendChart
+            appro={computed.appro}
+            ventes={computed.ventes}
+            marketing={state.marketing}
+            autresCharges={computed.autresCharges}
+          />
+        </div>
       </Card>
 
       {selectedFinRow && (
