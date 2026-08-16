@@ -732,10 +732,19 @@ function Status({
 type FieldDef = {
   name: string;
   label: string;
-  type?: "text" | "number" | "date" | "select";
+  type?: "text" | "number" | "date" | "select" | "multiselect";
   options?: readonly string[];
+  /** For type "multiselect": the pickable records, richer than a plain option string. */
+  multiOptions?: { value: string; label: string }[];
   default?: string | number;
+  /** Blocks submit (with a toast) while empty. Used for required source links. */
+  required?: boolean;
 };
+
+// Multiselect values are stored as a single comma-joined string inside the
+// same Record<string,string> as every other field, then split back into an
+// array at the call site — keeps EntryForm's onSubmit signature unchanged.
+const MULTI_SEP = ",";
 
 function EntryForm({
   fields,
@@ -765,6 +774,11 @@ function EntryForm({
     <form
       onSubmit={(e) => {
         e.preventDefault();
+        const missing = fields.find((f) => f.required && !values[f.name]);
+        if (missing) {
+          toast.error(`${missing.label} requis.`);
+          return;
+        }
         onSubmit(values);
         setValues(initial());
         setOpen(false);
@@ -775,6 +789,7 @@ function EntryForm({
         {fields.map((f) => (
           <label key={f.name} className="text-xs font-medium text-muted-foreground">
             {f.label}
+            {f.required ? <span className="text-destructive"> *</span> : null}
             {f.type === "select" ? (
               <select
                 value={values[f.name]}
@@ -787,6 +802,38 @@ function EntryForm({
                   </option>
                 ))}
               </select>
+            ) : f.type === "multiselect" ? (
+              <div className="mt-1 max-h-32 w-full space-y-1 overflow-y-auto rounded-lg border border-border bg-card p-2">
+                {f.multiOptions?.length ? (
+                  f.multiOptions.map((o) => {
+                    const selected = values[f.name] ? values[f.name].split(MULTI_SEP) : [];
+                    const checked = selected.includes(o.value);
+                    return (
+                      <label
+                        key={o.value}
+                        className="flex items-center gap-2 text-xs text-foreground"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            setValues((v) => {
+                              const cur = v[f.name] ? v[f.name].split(MULTI_SEP) : [];
+                              const next = checked
+                                ? cur.filter((id) => id !== o.value)
+                                : [...cur, o.value];
+                              return { ...v, [f.name]: next.join(MULTI_SEP) };
+                            })
+                          }
+                        />
+                        {o.label}
+                      </label>
+                    );
+                  })
+                ) : (
+                  <span className="text-xs text-muted-foreground">Aucun élément disponible.</span>
+                )}
+              </div>
             ) : (
               <input
                 type={f.type ?? "text"}
@@ -2218,6 +2265,16 @@ function ProductionSection() {
                   options: ["En cours", "Terminé"],
                   default: "Terminé",
                 },
+                {
+                  name: "approvisionnementIds",
+                  label: "Réceptions sources",
+                  type: "multiselect",
+                  required: true,
+                  multiOptions: computed.appro.map((r) => ({
+                    value: r.id,
+                    label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
+                  })),
+                },
               ]}
               onSubmit={(v) =>
                 addRow("productions", {
@@ -2237,6 +2294,9 @@ function ProductionSection() {
                   responsable: profile?.displayName || profile?.email || "Équipe production",
                   ...(profile?.uid ? { staffUid: profile.uid } : {}),
                   statut: v.statut,
+                  approvisionnementIds: v.approvisionnementIds
+                    ? v.approvisionnementIds.split(",")
+                    : [],
                 })
               }
             />
@@ -2381,6 +2441,16 @@ function ProductionSection() {
               },
             },
             {
+              label: "Réceptions sources",
+              value: selectedLot.approvisionnementIds?.length
+                ? selectedLot.approvisionnementIds
+                    .map((id) => computed.appro.find((a) => a.id === id)?.numero ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Réception(s) d'ananas ayant alimenté ce lot, sélectionnées à la saisie — sert à remonter la chaîne appro → production → vente.",
+            },
+            {
               label: "Responsable",
               value: selectedLot.responsable,
               description:
@@ -2437,6 +2507,32 @@ function StockSection() {
     return { m, cumul };
   });
   const breakdowns = buildBreakdowns(computed);
+
+  // Traçabilité par lot : remonte appro → production, puis attribue les
+  // ventes qui référencent ce lot. Une vente reliée à plusieurs lots compte
+  // dans chacun — c'est une vue de traçabilité, pas une répartition
+  // comptable exacte (le KPI/Finances agrégé reste la source de vérité).
+  const traceRows = computed.production.map((r) => {
+    const approRows = computed.appro.filter((a) => (r.approvisionnementIds ?? []).includes(a.id));
+    const kgSources = approRows.length
+      ? approRows.reduce((acc, a) => acc + a.qteRecueKg, 0)
+      : r.kgUtilises;
+    const ventesLiees = computed.ventes.filter((v) => v.productionIds?.includes(r.id));
+    const bouteillesVendues = ventesLiees.reduce((acc, v) => acc + v.quantite, 0);
+    return {
+      id: r.id,
+      lot: r.lot,
+      date: r.date,
+      approNumeros: approRows.map((a) => a.numero),
+      kgSources,
+      totalBouteilles: r.totalBouteilles,
+      bouteillesVendues,
+      stockRestant: Math.max(r.totalBouteilles - bouteillesVendues, 0),
+      ventesNumeros: ventesLiees.map((v) => v.numero),
+    };
+  });
+  const [selectedTraceLot, setSelectedTraceLot] = useState<(typeof traceRows)[number] | null>(null);
+
   return (
     <div className="space-y-6">
       <SectionHeader eyebrow="Module ERP 03" title="Stocks" responsable="Production / Magasin" />
@@ -2697,6 +2793,81 @@ function StockSection() {
                       : "—",
                 },
                 { label: "= Valeur stock", value: fcFormat(selectedStockPF.valeur) },
+              ],
+            },
+          ]}
+        />
+      )}
+
+      <Card title="Traçabilité par lot (appro → production → vente)">
+        <Table
+          onRowClick={(i) => setSelectedTraceLot(traceRows[i])}
+          headers={[
+            "Lot",
+            "Réceptions sources",
+            "Kg sources",
+            "Bouteilles produites",
+            "Bouteilles vendues (liées)",
+            "Stock restant (estimé)",
+          ]}
+          rows={traceRows.map((t) => [
+            t.lot,
+            t.approNumeros.length ? t.approNumeros.join(", ") : "—",
+            t.kgSources,
+            t.totalBouteilles,
+            t.bouteillesVendues,
+            t.stockRestant,
+          ])}
+        />
+      </Card>
+
+      {selectedTraceLot && (
+        <RecordDetailModal
+          title={`Traçabilité — Lot ${selectedTraceLot.lot}`}
+          subtitle={selectedTraceLot.date}
+          onClose={() => setSelectedTraceLot(null)}
+          fields={[
+            {
+              label: "Réceptions sources",
+              value: selectedTraceLot.approNumeros.length
+                ? selectedTraceLot.approNumeros.join(", ")
+                : "—",
+              description:
+                "Réceptions Approvisionnement liées à ce lot (saisies sur la fiche de production).",
+            },
+            {
+              label: "Kg sources",
+              value: selectedTraceLot.kgSources,
+              description:
+                "Somme des kg reçus sur les réceptions liées ; si aucune réception n'est liée (lot créé avant le sprint 30), affiche les kg utilisés du lot.",
+            },
+            {
+              label: "Bouteilles produites",
+              value: selectedTraceLot.totalBouteilles,
+              description: "Total conditionné pour ce lot, tous formats confondus.",
+            },
+            {
+              label: "Ventes liées",
+              value: selectedTraceLot.ventesNumeros.length
+                ? selectedTraceLot.ventesNumeros.join(", ")
+                : "—",
+              description: "Ventes du Journal des ventes ayant sélectionné ce lot comme source.",
+            },
+            {
+              label: "Bouteilles vendues (liées)",
+              value: selectedTraceLot.bouteillesVendues,
+              description:
+                "Somme des quantités des ventes liées. Estimation de traçabilité : une vente reliée à plusieurs lots compte dans chacun, donc ce chiffre peut différer du détail exact de répartition. Le stock produits finis agrégé ci-dessus reste la source de vérité comptable.",
+            },
+            {
+              label: "Stock restant (estimé)",
+              value: selectedTraceLot.stockRestant,
+              description:
+                "Calculé automatiquement : bouteilles produites − bouteilles vendues (liées).",
+              breakdown: [
+                { label: "Produites", value: String(selectedTraceLot.totalBouteilles) },
+                { label: "− Vendues (liées)", value: `− ${selectedTraceLot.bouteillesVendues}` },
+                { label: "= Stock restant (estimé)", value: String(selectedTraceLot.stockRestant) },
               ],
             },
           ]}
@@ -3337,6 +3508,31 @@ function CommercialisationSection({
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
   const [selectedCanal, setSelectedCanal] = useState<Canal | null>(null);
   const breakdowns = buildBreakdowns(computed);
+
+  // Promotion → commercialisation: a vente reads as "sous promotion" when the
+  // active promo's linked catalogue product shares its format and the vente
+  // falls inside the promo's date window (if one is set).
+  const [promo, setPromo] = useState<Promo>(EMPTY_PROMO);
+  const [promoProducts, setPromoProducts] = useState<{ id: string; format: Format }[]>([]);
+  useEffect(() => {
+    return onSnapshot(doc(db, "config", "promo"), (snap) =>
+      setPromo(snap.exists() ? { ...EMPTY_PROMO, ...(snap.data() as Promo) } : EMPTY_PROMO),
+    );
+  }, []);
+  useEffect(() => {
+    return onSnapshot(collection(db, "products"), (snap) =>
+      setPromoProducts(snap.docs.map((d) => d.data() as { id: string; format: Format })),
+    );
+  }, []);
+  const promoFormat = promo.active
+    ? promoProducts.find((pr) => pr.id === promo.productId)?.format
+    : undefined;
+  const isSousPromotion = (v: { format: Format; date: string }) =>
+    !!promoFormat &&
+    v.format === promoFormat &&
+    (!promo.startDate || v.date >= promo.startDate) &&
+    (!promo.endDate || v.date <= promo.endDate);
+
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -3423,6 +3619,16 @@ function CommercialisationSection({
                     },
                     { name: "remise", label: "Remise FC", type: "number", default: 0 },
                     { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+                    {
+                      name: "productionIds",
+                      label: "Lots sources",
+                      type: "multiselect",
+                      required: true,
+                      multiOptions: computed.production.map((r) => ({
+                        value: r.id,
+                        label: `${r.lot} — ${r.date}`,
+                      })),
+                    },
                   ]}
                   onSubmit={(v) =>
                     addRow("ventes", {
@@ -3441,6 +3647,7 @@ function CommercialisationSection({
                       // matching note in ProductionSection.
                       commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
                       ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                      productionIds: v.productionIds ? v.productionIds.split(",") : [],
                     })
                   }
                 />
@@ -3461,6 +3668,7 @@ function CommercialisationSection({
                 "Encaissé",
                 "Solde dû",
                 "Statut",
+                "Promo",
                 "",
               ]}
               rows={computed.ventes.map((v) => [
@@ -3475,6 +3683,11 @@ function CommercialisationSection({
                 fcFormat(v.encaisse),
                 fcFormat(v.soldeDu),
                 v.statutPaiement,
+                isSousPromotion(v) ? (
+                  <span className="badge-status bg-warning/20 text-warning">Sous promo</span>
+                ) : (
+                  "—"
+                ),
                 <DeleteButton
                   onClick={(e) => {
                     e.stopPropagation();
@@ -3569,6 +3782,22 @@ function CommercialisationSection({
                   description:
                     "Montant réellement encaissé — s'il est inférieur au montant brut, la différence reste en créance client.",
                   edit: { key: "encaisse", type: "number", value: String(selectedVente.encaisse) },
+                },
+                {
+                  label: "Promotion",
+                  value: isSousPromotion(selectedVente) ? "Sous promo" : "—",
+                  description:
+                    "Calculé automatiquement : la promotion active (Paramètres ERP) s'applique quand son format et sa fenêtre de dates couvrent cette vente.",
+                },
+                {
+                  label: "Lots sources",
+                  value: selectedVente.productionIds?.length
+                    ? selectedVente.productionIds
+                        .map((id) => computed.production.find((r) => r.id === id)?.lot ?? id)
+                        .join(", ")
+                    : "—",
+                  description:
+                    "Lot(s) de production ayant fourni les bouteilles vendues, sélectionnés à la saisie — sert à remonter la chaîne production → vente.",
                 },
                 {
                   label: "Commerciale",

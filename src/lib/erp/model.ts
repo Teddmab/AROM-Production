@@ -78,6 +78,12 @@ export interface Production {
   /** uid of the staff member who logged this lot — powers per-person bonus tracking (sprint 17). */
   staffUid?: string;
   statut: string;
+  /**
+   * Réceptions (`Approvisionnement.id`) ayant alimenté ce lot — traçabilité
+   * amont, requise à la saisie depuis le sprint 30. Optionnel dans le type
+   * car les lots créés avant ce sprint n'ont pas ce champ.
+   */
+  approvisionnementIds?: string[];
 }
 
 export interface MouvementStockMP {
@@ -117,6 +123,13 @@ export interface Vente {
   commerciale: string;
   /** uid of the staff member who logged this sale — powers per-person bonus tracking (sprint 17). */
   staffUid?: string;
+  /**
+   * Lots de production (`Production.id`) ayant fourni les bouteilles
+   * vendues — traçabilité amont, requise à la saisie depuis le sprint 30.
+   * Optionnel dans le type car les ventes créées avant ce sprint n'ont pas
+   * ce champ.
+   */
+  productionIds?: string[];
 }
 
 export interface ActionMarketing {
