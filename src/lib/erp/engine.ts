@@ -142,7 +142,19 @@ export function computeErp(state: ErpState): ErpComputed {
 
   const coutMarketing = sum(state.marketing.map((r) => r.coutReel));
   const autresCharges = sum(state.charges.map((r) => r.realise));
-  const totalCouts = coutAchats + coutTransport + autresCharges + coutMarketing;
+  // Staff bonuses are a real cost of running the campaign — folded into
+  // totalCouts (and everything derived from it: resultatBrut, margeBrute,
+  // rendementSurCouts, coutMoyenBouteille, margeUnitaire) rather than only
+  // shown separately on the Primes & personnel page.
+  const primeProduction = sum(production.map((r) => r.valeurProduction)) * p.tauxPrimeProduction;
+  const commissionCommerciale = encaissements * p.tauxCommission;
+  const totalCouts =
+    coutAchats +
+    coutTransport +
+    autresCharges +
+    coutMarketing +
+    primeProduction +
+    commissionCommerciale;
   const resultatBrut = ca - totalCouts;
 
   const stockPF = (["500 ml", "330 ml", "300 ml"] as Format[]).map((f) => {
@@ -163,9 +175,6 @@ export function computeErp(state: ErpState): ErpComputed {
   const tauxEncaissement = safeDiv(encaissements, ca);
   const margeBrute = safeDiv(resultatBrut, ca);
   const tauxPertes = safeDiv(pertesL, volumeJus);
-
-  const primeProduction = sum(production.map((r) => r.valeurProduction)) * p.tauxPrimeProduction;
-  const commissionCommerciale = encaissements * p.tauxCommission;
 
   const objectifs: ErpComputed["objectifs"] = [
     {

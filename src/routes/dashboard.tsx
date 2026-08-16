@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { Check } from "lucide-react";
 import {
   collection,
   deleteDoc,
@@ -873,6 +874,11 @@ function buildBreakdowns(computed: ErpComputed) {
     { label: "Transport et frais (Approvisionnement)", value: fcFormat(computed.coutTransport) },
     { label: "Autres charges d'exploitation (Finances)", value: fcFormat(computed.autresCharges) },
     { label: "Marketing (Marketing)", value: fcFormat(computed.coutMarketing) },
+    { label: "Prime production (Primes & personnel)", value: fcFormat(computed.primeProduction) },
+    {
+      label: "Commission commerciale (Primes & personnel)",
+      value: fcFormat(computed.commissionCommerciale),
+    },
     { label: "= Total coûts", value: fcFormat(computed.totalCouts) },
   ];
   const resultatBrut: DetailField["breakdown"] = [
@@ -1744,9 +1750,11 @@ function TachesSection() {
                           e.stopPropagation();
                           complete(t);
                         }}
-                        className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
+                        aria-label="Marquer terminé"
+                        title="Marquer terminé"
+                        className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
                       >
-                        Marquer terminé
+                        <Check className="h-4 w-4" aria-hidden />
                       </button>
                     </li>
                   ))}
@@ -4236,9 +4244,22 @@ function FinancesSection() {
       lecture: "Calculé automatiquement : somme des coûts réels de toutes les actions marketing.",
     },
     {
+      label: "Prime production",
+      value: fcWithUsd(computed.primeProduction),
+      lecture:
+        "Calculé automatiquement : valeur de production × taux prime production (Paramètres ERP). Voir aussi Primes & personnel.",
+    },
+    {
+      label: "Commission commerciale",
+      value: fcWithUsd(computed.commissionCommerciale),
+      lecture:
+        "Calculé automatiquement : encaissements × taux commission (Paramètres ERP). Voir aussi Primes & personnel.",
+    },
+    {
       label: "TOTAL COÛTS",
       value: fcWithUsd(computed.totalCouts),
-      lecture: "Calculé automatiquement : somme de toutes les lignes ci-dessus.",
+      lecture:
+        "Calculé automatiquement : somme de toutes les lignes ci-dessus, primes et commissions comprises.",
       breakdown: breakdowns.totalCouts,
     },
   ];
@@ -5308,22 +5329,41 @@ function KpiSection() {
     const usd = usdFormat(n, fcPerUsd);
     return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
   };
+  // Signed gap in percentage points between réalisé and objectif — "où en
+  // est vraiment l'entreprise", pas juste le ratio. Positive/negative
+  // framing flips for `lowerIsBetter` metrics (Pertes) so "en dessous du
+  // seuil" always reads as the good outcome.
+  const gapPts = (realise: number, objectif: number) => {
+    const deltaPts = (realise - objectif) * 100;
+    const sign = deltaPts > 0 ? "+" : deltaPts < 0 ? "−" : "±";
+    const direction = deltaPts >= 0 ? "au-dessus" : "en dessous";
+    return `${sign}${Math.abs(deltaPts).toFixed(1)} pts ${direction} de l'objectif`;
+  };
+  const gapCount = (realise: number, objectif: number, unit = "") => {
+    const delta = realise - objectif;
+    const sign = delta > 0 ? "+" : delta < 0 ? "−" : "±";
+    return `${sign}${Math.abs(Math.round(delta))}${unit ? ` ${unit}` : ""} vs objectif`;
+  };
+  const tauxTransformation = computed.kgAchetes ? computed.kgTransformes / computed.kgAchetes : 0;
+  const tauxVente = computed.bouteillesProduites
+    ? computed.bouteillesVendues / computed.bouteillesProduites
+    : 0;
   const items = [
     {
       k: "Taux de transformation",
       o: "100 %",
-      r: pctFormat(computed.kgAchetes ? computed.kgTransformes / computed.kgAchetes : 0),
+      r: pctFormat(tauxTransformation),
+      t: tauxTransformation,
+      gap: gapPts(tauxTransformation, 1),
       d: "Calculé automatiquement : kg transformés (Production) / kg achetés (Approvisionnement).",
       b: breakdowns.tauxTransformation,
     },
     {
       k: "Taux de vente",
       o: "100 %",
-      r: pctFormat(
-        computed.bouteillesProduites
-          ? computed.bouteillesVendues / computed.bouteillesProduites
-          : 0,
-      ),
+      r: pctFormat(tauxVente),
+      t: tauxVente,
+      gap: gapPts(tauxVente, 1),
       d: "Calculé automatiquement : bouteilles vendues (Commercialisation) / bouteilles produites (Production).",
       b: breakdowns.tauxVente,
     },
@@ -5331,6 +5371,8 @@ function KpiSection() {
       k: "Taux d'encaissement",
       o: "100 %",
       r: pctFormat(computed.tauxEncaissement),
+      t: computed.tauxEncaissement,
+      gap: gapPts(computed.tauxEncaissement, 1),
       d: "Calculé automatiquement : encaissements / chiffre d'affaires brut.",
       b: breakdowns.tauxEncaissement,
     },
@@ -5338,6 +5380,8 @@ function KpiSection() {
       k: "Rendement matière",
       o: "> 95 %",
       r: pctFormat(computed.rendementMoyen),
+      t: computed.rendementMoyen / 0.95,
+      gap: gapPts(computed.rendementMoyen, 0.95),
       d: "Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots.",
       b: breakdowns.rendementMoyen,
     },
@@ -5345,6 +5389,7 @@ function KpiSection() {
       k: "Pertes",
       o: `< ${pctFormat(p.tauxPertesMax)}`,
       r: pctFormat(computed.tauxPertes),
+      gap: gapPts(computed.tauxPertes, p.tauxPertesMax),
       d: "Calculé automatiquement : volume perdu / volume de jus, comparé au taux maximum toléré (Paramètres ERP).",
       b: breakdowns.tauxPertes,
     },
@@ -5352,12 +5397,16 @@ function KpiSection() {
       k: "Clients actifs",
       o: String(p.objectifClients),
       r: String(computed.clientsActifs),
+      t: p.objectifClients ? computed.clientsActifs / p.objectifClients : 0,
+      gap: gapCount(computed.clientsActifs, p.objectifClients),
       d: "Calculé automatiquement : nombre de clients distincts ayant au moins une vente enregistrée.",
     },
     {
       k: "Marge brute",
       o: pctFormat(p.objectifMargeBrute),
       r: pctFormat(computed.margeBrute),
+      t: p.objectifMargeBrute ? computed.margeBrute / p.objectifMargeBrute : 0,
+      gap: gapPts(computed.margeBrute, p.objectifMargeBrute),
       d: "Calculé automatiquement : résultat brut / chiffre d'affaires.",
       b: breakdowns.margeBrute,
     },
@@ -5372,6 +5421,10 @@ function KpiSection() {
       k: "Créances à recouvrer",
       o: "0 FC",
       r: fcWithUsd(computed.creances),
+      gap:
+        computed.creances > 0
+          ? `${fcFormat(computed.creances)} restent à recouvrer`
+          : "Aucune créance en attente",
       d: "Calculé automatiquement : chiffre d'affaires − encaissements.",
       b: breakdowns.creances,
     },
@@ -5381,7 +5434,7 @@ function KpiSection() {
       <SectionHeader
         eyebrow="Module ERP 06"
         title="Indicateurs stratégiques"
-        subtitle="Calculés en temps réel à partir des modules ERP"
+        subtitle="Calculés en temps réel à partir des modules ERP — l'écart affiché sous chaque chiffre situe où en est vraiment la campagne par rapport à l'objectif"
       />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {items.map((i) => (
@@ -5390,6 +5443,8 @@ function KpiSection() {
             label={i.k}
             objectif={i.o}
             realise={i.r}
+            taux={i.t}
+            secondary={i.gap}
             description={i.d}
             breakdown={i.b}
           />
