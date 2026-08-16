@@ -36,6 +36,24 @@ export interface PartnerAddress {
   repere?: string;
 }
 
+/**
+ * Staff-only (sprint 17). A poste both labels the account (cosmetic) and,
+ * as of firestore.rules, actually scopes which internal ERP collections
+ * that account can read/write — see AROM-Backend/firestore.rules and
+ * AROM-Documentation/rbac.md. "Personnalisé" (or no poste at all) keeps
+ * the original unrestricted staff access with manually-picked `menus`.
+ */
+export type StaffPoste =
+  | "Directeur de Production"
+  | "Chargée de Commercialisation"
+  | "Personnalisé";
+
+export const STAFF_POSTES: { value: StaffPoste; menus: string[] }[] = [
+  { value: "Directeur de Production", menus: ["appro", "production", "stock", "personnel"] },
+  { value: "Chargée de Commercialisation", menus: ["commercialisation", "marketing", "personnel"] },
+  { value: "Personnalisé", menus: [] },
+];
+
 export interface UserProfile {
   uid: string;
   email: string;
@@ -60,6 +78,8 @@ export interface UserProfile {
    * unverified partner can still browse, order, and check out normally.
    */
   verified?: boolean;
+  /** Staff-only (sprint 17) — see StaffPoste. */
+  poste?: StaffPoste;
 }
 
 export interface PartnerOnboardingData {
@@ -73,6 +93,7 @@ export interface Invite {
   email: string;
   role: "admin" | "staff";
   menus: "all" | string[];
+  poste?: StaffPoste;
   used: boolean;
 }
 
@@ -264,6 +285,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         displayName,
         role: invite.role,
         menus: invite.menus,
+        ...(invite.poste ? { poste: invite.poste } : {}),
         active: true,
         inviteId,
         createdAt: new Date().toISOString(),

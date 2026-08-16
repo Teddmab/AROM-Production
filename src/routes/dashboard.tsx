@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   onSnapshot,
   orderBy,
@@ -30,7 +31,7 @@ import {
 } from "@/lib/erp/model";
 import { ExportBar } from "@/components/erp/ExportBar";
 import { RequireRole } from "@/lib/firebase/require-role";
-import { useAuth, canAccessMenu } from "@/lib/firebase/auth";
+import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -718,6 +719,7 @@ function ApproSection() {
 
 function ProductionSection() {
   const { state, computed, addRow, removeRow } = useErp();
+  const { profile } = useAuth();
   const p = state.parametres;
   return (
     <div className="space-y-6">
@@ -763,7 +765,6 @@ function ProductionSection() {
               { name: "q330", label: "330 ml produits", type: "number", default: 0 },
               { name: "q300", label: "300 ml produits", type: "number", default: 0 },
               { name: "rejets", label: "Rejets", type: "number", default: 0 },
-              { name: "responsable", label: "Responsable", default: "Directeur de production" },
               {
                 name: "statut",
                 label: "Statut lot",
@@ -783,7 +784,12 @@ function ProductionSection() {
                 q330: n(v.q330),
                 q300: n(v.q300),
                 rejets: n(v.rejets),
-                responsable: v.responsable,
+                // Auto-filled from the logged-in staff member — one less
+                // field to type, and reliable enough (a real uid) to power
+                // per-person bonus tracking (sprint 17), unlike matching on
+                // free-text names.
+                responsable: profile?.displayName || profile?.email || "Équipe production",
+                ...(profile?.uid ? { staffUid: profile.uid } : {}),
                 statut: v.statut,
               })
             }
@@ -1500,6 +1506,7 @@ function OrdersCard() {
 
 function CommercialisationSection() {
   const { state, computed, addRow, removeRow } = useErp();
+  const { profile } = useAuth();
   const p = state.parametres;
   return (
     <div className="space-y-6">
@@ -1565,11 +1572,6 @@ function CommercialisationSection() {
               },
               { name: "remise", label: "Remise FC", type: "number", default: 0 },
               { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-              {
-                name: "commerciale",
-                label: "Commerciale",
-                default: "Chargée de commercialisation",
-              },
             ]}
             onSubmit={(v) =>
               addRow("ventes", {
@@ -1584,7 +1586,10 @@ function CommercialisationSection() {
                 prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
                 remise: n(v.remise),
                 encaisse: n(v.encaisse),
-                commerciale: v.commerciale,
+                // Auto-filled from the logged-in staff member — see the
+                // matching note in ProductionSection.
+                commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
+                ...(profile?.uid ? { staffUid: profile.uid } : {}),
               })
             }
           />
@@ -1812,6 +1817,7 @@ interface Invite {
   email: string;
   role: "admin" | "staff";
   menus: "all" | string[];
+  poste?: StaffPoste;
   used: boolean;
   usedBy?: string;
   createdAt: string;
@@ -1828,6 +1834,7 @@ function InviteCard() {
   const [invites, setInvites] = useState<Invite[]>([]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"admin" | "staff">("staff");
+  const [poste, setPoste] = useState<StaffPoste>("Personnalisé");
   const [menus, setMenus] = useState<string[]>([]);
   const [allMenus, setAllMenus] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1853,11 +1860,18 @@ function InviteCard() {
       return;
     }
     const inviteRef = doc(collection(db, "invites"));
+    const posteMenus = STAFF_POSTES.find((p) => p.value === poste)?.menus;
     try {
       await setDoc(inviteRef, {
         email: email.trim(),
         role,
-        menus: role === "admin" || allMenus ? "all" : menus,
+        menus:
+          role === "admin" || allMenus
+            ? "all"
+            : role === "staff" && poste !== "Personnalisé" && posteMenus
+              ? posteMenus
+              : menus,
+        ...(role === "staff" ? { poste } : {}),
         used: false,
         createdBy: profile.uid,
         createdAt: new Date().toISOString(),
@@ -1865,6 +1879,7 @@ function InviteCard() {
       setEmail("");
       setMenus([]);
       setAllMenus(false);
+      setPoste("Personnalisé");
       toast.success("Invitation créée — copiez le lien pour la partager.");
     } catch (err) {
       toast.error(
@@ -1925,6 +1940,33 @@ function InviteCard() {
 
       {role === "staff" && (
         <div className="mt-3">
+          <p className="text-xs font-medium text-muted-foreground">Poste</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {STAFF_POSTES.map((p) => (
+              <button
+                key={p.value}
+                type="button"
+                onClick={() => setPoste(p.value)}
+                className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                  poste === p.value
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-secondary text-secondary-foreground"
+                }`}
+              >
+                {p.value}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {poste === "Personnalisé"
+              ? "Accès complet ; choisissez les sections visibles ci-dessous. Aucune restriction de données appliquée."
+              : `Sections et données limitées à : ${STAFF_POSTES.find((p) => p.value === poste)?.menus.join(", ")}.`}
+          </p>
+        </div>
+      )}
+
+      {role === "staff" && poste === "Personnalisé" && (
+        <div className="mt-3">
           <p className="text-xs font-medium text-muted-foreground">Sections accessibles</p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
@@ -1959,10 +2001,11 @@ function InviteCard() {
 
       <div className="mt-5 overflow-hidden rounded-xl border border-border">
         <Table
-          headers={["E-mail", "Rôle", "Sections", "Statut", "Lien"]}
+          headers={["E-mail", "Rôle", "Poste", "Sections", "Statut", "Lien"]}
           rows={invites.map((inv) => [
             inv.email,
             inv.role,
+            inv.poste || "—",
             inv.menus === "all" ? "Toutes" : inv.menus.join(", ") || "—",
             inv.used ? (
               <span className="badge-status bg-success/15 text-success">Utilisée</span>
@@ -2054,111 +2097,276 @@ function BoutiquesCard() {
   );
 }
 
-function PersonnelSection() {
+interface StaffMember {
+  uid: string;
+  displayName: string;
+  email: string;
+  poste?: StaffPoste;
+}
+
+/**
+ * Assign/change an existing staff member's poste (sprint 17) — the
+ * invite flow only sets it at invite time, so accounts created before
+ * this sprint (or via the CLI script) need a way to opt in afterward.
+ * Picking a named poste also resets `menus` to match it, so the sidebar
+ * stays consistent with what firestore.rules now actually enforces.
+ */
+function StaffCard() {
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "users"), where("role", "==", "staff"));
+    return onSnapshot(
+      q,
+      (snap) =>
+        setStaff(
+          snap.docs
+            .map((d) => ({ uid: d.id, ...(d.data() as Omit<StaffMember, "uid">) }))
+            .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+        ),
+      (err) => toast.error(`Synchronisation "équipe" impossible : ${err.message}`),
+    );
+  }, []);
+
+  const setPosteFor = (s: StaffMember, value: string) => {
+    const poste = value === "" ? undefined : (value as StaffPoste);
+    const posteMenus = poste ? STAFF_POSTES.find((p) => p.value === poste)?.menus : undefined;
+    updateDoc(doc(db, "users", s.uid), {
+      poste: poste ?? deleteField(),
+      // Only a named poste (not "Personnalisé", not clearing it) resets
+      // menus automatically — those two cases keep whatever menus the
+      // account already had, since there's no manual menu editor yet for
+      // existing accounts.
+      ...(poste && poste !== "Personnalisé" && posteMenus ? { menus: posteMenus } : {}),
+    }).catch((err) => toast.error(`Mise à jour impossible : ${err.message}`));
+  };
+
+  return (
+    <Card title="Équipe (staff)">
+      <Table
+        headers={["Nom", "E-mail", "Poste"]}
+        empty="Aucun compte staff pour l'instant."
+        rows={staff.map((s) => [
+          s.displayName,
+          s.email,
+          <select
+            value={s.poste ?? ""}
+            onChange={(e) => setPosteFor(s, e.target.value)}
+            className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
+          >
+            <option value="">— Non assigné (accès complet) —</option>
+            {STAFF_POSTES.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.value}
+              </option>
+            ))}
+          </select>,
+        ])}
+      />
+    </Card>
+  );
+}
+
+/**
+ * Per-person bonus tracking (sprint 17) — replaces a single org-wide
+ * "Prime"/"Commission" line with one row per staff member holding this
+ * poste, computed from *their own* production.staffUid / vente.staffUid
+ * entries. Anything logged before this sprint (or by someone without
+ * this poste — admin, "Personnalisé" staff) has no matching staffUid;
+ * shown as a separate "Non attribué" line so the total still reconciles
+ * with the org-wide figure instead of silently dropping it.
+ */
+function ProductionBonusCard() {
   const { state, computed } = useErp();
   const p = state.parametres;
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "users"), where("role", "==", "staff"));
+    return onSnapshot(q, (snap) =>
+      setStaff(
+        snap.docs
+          .map((d) => ({ uid: d.id, ...(d.data() as Omit<StaffMember, "uid">) }))
+          .filter((s) => s.poste === "Directeur de Production"),
+      ),
+    );
+  }, []);
+
+  const rows = staff.map((s) => {
+    const mine = computed.production.filter((r) => r.staffUid === s.uid);
+    const valeur = mine.reduce((a, r) => a + r.valeurProduction, 0);
+    return {
+      ...s,
+      bouteilles: mine.reduce((a, r) => a + r.totalBouteilles, 0),
+      valeur,
+      prime: valeur * p.tauxPrimeProduction,
+    };
+  });
+  const attribue = rows.reduce((a, r) => a + r.valeur, 0);
+  const nonAttribue = computed.valeurProduction - attribue;
+
+  return (
+    <Card title="Directeur de Production">
+      <Table
+        headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
+        rows={[
+          [
+            "Production",
+            `${p.objectifBouteilles} bouteilles`,
+            computed.bouteillesProduites,
+            <Status
+              statut={
+                computed.bouteillesProduites >= p.objectifBouteilles ? "Atteint" : "À surveiller"
+              }
+            />,
+          ],
+          [
+            "Rendement volume",
+            "> 95 %",
+            pctFormat(computed.rendementMoyen),
+            <Status statut={computed.rendementMoyen >= 0.95 ? "Atteint" : "À surveiller"} />,
+          ],
+          [
+            "Pertes",
+            `< ${pctFormat(p.tauxPertesMax)}`,
+            pctFormat(computed.tauxPertes),
+            <Status statut={computed.tauxPertes <= p.tauxPertesMax ? "Conforme" : "Excès"} />,
+          ],
+        ]}
+      />
+      <p className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Prime par personne ({pctFormat(p.tauxPrimeProduction)} de la valeur produite)
+      </p>
+      <Table
+        headers={["Nom", "Bouteilles", "Valeur produite", "Prime"]}
+        empty="Aucun Directeur de Production assigné — voir la carte Équipe ci-dessus."
+        rows={[
+          ...rows.map((r) => [r.displayName, r.bouteilles, fcFormat(r.valeur), fcFormat(r.prime)]),
+          ...(nonAttribue > 0.01
+            ? [
+                [
+                  "Non attribué",
+                  "—",
+                  fcFormat(nonAttribue),
+                  fcFormat(nonAttribue * p.tauxPrimeProduction),
+                ],
+              ]
+            : []),
+        ]}
+      />
+    </Card>
+  );
+}
+
+function CommercialBonusCard() {
+  const { state, computed } = useErp();
+  const p = state.parametres;
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "users"), where("role", "==", "staff"));
+    return onSnapshot(q, (snap) =>
+      setStaff(
+        snap.docs
+          .map((d) => ({ uid: d.id, ...(d.data() as Omit<StaffMember, "uid">) }))
+          .filter((s) => s.poste === "Chargée de Commercialisation"),
+      ),
+    );
+  }, []);
+
+  const rows = staff.map((s) => {
+    const mine = computed.ventes.filter((v) => v.staffUid === s.uid);
+    const encaisse = mine.reduce((a, v) => a + v.encaisse, 0);
+    return {
+      ...s,
+      bouteilles: mine.reduce((a, v) => a + v.quantite, 0),
+      encaisse,
+      commission: encaisse * p.tauxCommission,
+    };
+  });
+  const attribue = rows.reduce((a, r) => a + r.encaisse, 0);
+  const nonAttribue = computed.encaissements - attribue;
+
+  return (
+    <Card title="Chargée de Commercialisation">
+      <Table
+        headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
+        rows={[
+          [
+            "Ventes",
+            `${p.objectifBouteilles} bouteilles`,
+            computed.bouteillesVendues,
+            <Status
+              statut={
+                computed.bouteillesVendues >= p.objectifBouteilles ? "Atteint" : "À surveiller"
+              }
+            />,
+          ],
+          [
+            "Clients",
+            `${p.objectifClients} clients`,
+            computed.clientsActifs,
+            <Status
+              statut={computed.clientsActifs >= p.objectifClients ? "Atteint" : "À surveiller"}
+            />,
+          ],
+          [
+            "Encaissement",
+            "100 %",
+            pctFormat(computed.tauxEncaissement),
+            <Status statut={computed.tauxEncaissement >= 1 ? "Atteint" : "À surveiller"} />,
+          ],
+        ]}
+      />
+      <p className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Commission par personne ({pctFormat(p.tauxCommission)} des encaissements)
+      </p>
+      <Table
+        headers={["Nom", "Bouteilles vendues", "Encaissé", "Commission"]}
+        empty="Aucune Chargée de Commercialisation assignée — voir la carte Équipe ci-dessus."
+        rows={[
+          ...rows.map((r) => [
+            r.displayName,
+            r.bouteilles,
+            fcFormat(r.encaisse),
+            fcFormat(r.commission),
+          ]),
+          ...(nonAttribue > 0.01
+            ? [
+                [
+                  "Non attribué",
+                  "—",
+                  fcFormat(nonAttribue),
+                  fcFormat(nonAttribue * p.tauxCommission),
+                ],
+              ]
+            : []),
+        ]}
+      />
+    </Card>
+  );
+}
+
+function PersonnelSection() {
+  const { computed } = useErp();
   return (
     <div className="space-y-6">
       <SectionHeader
         eyebrow="Module ERP 07"
         title="Primes & commissions"
-        subtitle="Calcul automatique sur production conforme et encaissements"
+        subtitle="Calcul automatique sur production conforme et encaissements, par personne"
         responsable="Direction Générale"
       />
 
       <InviteCard />
 
+      <StaffCard />
+
       <BoutiquesCard />
 
-      <Card title="Directeur de Production">
-        <Table
-          headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
-          rows={[
-            [
-              "Production",
-              `${p.objectifBouteilles} bouteilles`,
-              computed.bouteillesProduites,
-              <Status
-                statut={
-                  computed.bouteillesProduites >= p.objectifBouteilles ? "Atteint" : "À surveiller"
-                }
-              />,
-            ],
-            [
-              "Rendement volume",
-              "> 95 %",
-              pctFormat(computed.rendementMoyen),
-              <Status statut={computed.rendementMoyen >= 0.95 ? "Atteint" : "À surveiller"} />,
-            ],
-            [
-              "Pertes",
-              `< ${pctFormat(p.tauxPertesMax)}`,
-              pctFormat(computed.tauxPertes),
-              <Status statut={computed.tauxPertes <= p.tauxPertesMax ? "Conforme" : "Excès"} />,
-            ],
-          ]}
-        />
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl bg-primary/5 p-4 text-sm">
-          <span className="font-semibold text-primary">Prime</span>
-          <span className="rounded-md bg-card px-3 py-1.5 font-medium">
-            {fcFormat(computed.valeurProduction)}
-          </span>
-          <span className="text-muted-foreground">×</span>
-          <span className="rounded-md bg-gold px-3 py-1.5 font-bold text-primary">
-            {pctFormat(p.tauxPrimeProduction)}
-          </span>
-          <span className="text-muted-foreground">=</span>
-          <span className="rounded-md bg-primary px-3 py-1.5 font-semibold text-primary-foreground">
-            {fcFormat(computed.primeProduction)}
-          </span>
-        </div>
-      </Card>
+      <ProductionBonusCard />
 
-      <Card title="Chargée de Commercialisation">
-        <Table
-          headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
-          rows={[
-            [
-              "Ventes",
-              `${p.objectifBouteilles} bouteilles`,
-              computed.bouteillesVendues,
-              <Status
-                statut={
-                  computed.bouteillesVendues >= p.objectifBouteilles ? "Atteint" : "À surveiller"
-                }
-              />,
-            ],
-            [
-              "Clients",
-              `${p.objectifClients} clients`,
-              computed.clientsActifs,
-              <Status
-                statut={computed.clientsActifs >= p.objectifClients ? "Atteint" : "À surveiller"}
-              />,
-            ],
-            [
-              "Encaissement",
-              "100 %",
-              pctFormat(computed.tauxEncaissement),
-              <Status statut={computed.tauxEncaissement >= 1 ? "Atteint" : "À surveiller"} />,
-            ],
-          ]}
-        />
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl bg-primary/5 p-4 text-sm">
-          <span className="font-semibold text-primary">Commission</span>
-          <span className="rounded-md bg-card px-3 py-1.5 font-medium">
-            {fcFormat(computed.encaissements)}
-          </span>
-          <span className="text-muted-foreground">×</span>
-          <span className="rounded-md bg-gold px-3 py-1.5 font-bold text-primary">
-            {pctFormat(p.tauxCommission)}
-          </span>
-          <span className="text-muted-foreground">=</span>
-          <span className="rounded-md bg-primary px-3 py-1.5 font-semibold text-primary-foreground">
-            {fcFormat(computed.commissionCommerciale)}
-          </span>
-        </div>
-      </Card>
+      <CommercialBonusCard />
 
       <Card title="Total primes campagne">
         <Table
