@@ -16,13 +16,13 @@ import { connectStorageEmulator, getStorage } from "firebase/storage";
  * allowing overrides for local dev against a different project.
  */
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? "AIzaSyBMPGIylnf_XBoSRuBmqEXmsZlj1z2j6hE",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "arom-production.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID ?? "arom-production",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? "AIzaSyAwoaasS4P5m0Q3j3L8tXjN5Cwdu6q_UIM",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "arom-production-657f2.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID ?? "arom-production-657f2",
   storageBucket:
-    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? "arom-production.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "66641088420",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID ?? "1:66641088420:web:f07bec5c323b92c7b9bb31",
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? "arom-production-657f2.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "227952105868",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID ?? "1:227952105868:web:c7e76ac2a322d144bb5ea9",
 };
 
 export const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
