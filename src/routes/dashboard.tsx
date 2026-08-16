@@ -70,6 +70,7 @@ type SectionId =
   | "production"
   | "stock"
   | "commercialisation"
+  | "parcours"
   | "marketing"
   | "finances"
   | "personnel"
@@ -98,12 +99,13 @@ const SECTIONS: {
       { id: "ventes", label: "Ventes & clients" },
     ],
   },
-  { id: "marketing", label: "Marketing", num: "05" },
-  { id: "finances", label: "Finances", num: "06" },
+  { id: "parcours", label: "Parcours production", num: "05" },
+  { id: "marketing", label: "Marketing", num: "06" },
+  { id: "finances", label: "Finances", num: "07" },
   {
     id: "personnel",
     label: "Primes & personnel",
-    num: "07",
+    num: "08",
     subItems: [
       { id: "invitations", label: "Invitations" },
       { id: "equipe", label: "Équipe" },
@@ -112,9 +114,9 @@ const SECTIONS: {
       { id: "primes-commercial", label: "Primes commercial" },
     ],
   },
-  { id: "kpi", label: "KPI stratégiques", num: "08" },
-  { id: "parametres", label: "Paramètres ERP", num: "09" },
-  { id: "roadmap", label: "Feuille de route", num: "10" },
+  { id: "kpi", label: "KPI stratégiques", num: "09" },
+  { id: "parametres", label: "Paramètres ERP", num: "10" },
+  { id: "roadmap", label: "Feuille de route", num: "11" },
 ];
 
 function DashboardRoute() {
@@ -280,6 +282,7 @@ function Dashboard() {
               onTabChange={(v) => setActiveSubTab((s) => ({ ...s, commercialisation: v }))}
             />
           )}
+          {active === "parcours" && <ParcoursSection onNavigate={setActive} />}
           {active === "marketing" && <MarketingSection />}
           {active === "finances" && <FinancesSection />}
           {active === "personnel" && (
@@ -2674,6 +2677,147 @@ function CommercialisationSection({
   );
 }
 
+/**
+ * One stage of the Parcours production funnel (sprint 20). Purely a new
+ * way of looking at numbers `useErp()` already computes — no new
+ * Firestore fields, no new writes. `pct` is the completion ratio versus
+ * the previous stage; `null` renders as "—" (an honest "not started yet"
+ * for an early campaign) instead of a misleading 0%/NaN%.
+ */
+function FunnelStage({
+  num,
+  title,
+  headline,
+  unit,
+  secondary,
+  pct,
+  description,
+  onView,
+}: {
+  num: string;
+  title: string;
+  headline: string | number;
+  unit?: string;
+  secondary: string;
+  pct: number | null;
+  description: string;
+  onView: () => void;
+}) {
+  const clampedPct = pct === null ? null : Math.max(0, Math.min(100, Math.round(pct * 100)));
+  return (
+    <div className="flex-1 rounded-2xl border border-border bg-card p-5">
+      <div className="flex items-center gap-2">
+        <span className="grid h-6 w-6 place-items-center rounded-lg bg-primary/5 text-[10px] font-bold text-primary">
+          {num}
+        </span>
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {title}
+        </p>
+      </div>
+      <p className="mt-3 font-display text-2xl font-bold text-primary">
+        {headline}
+        {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">{secondary}</p>
+      <div className="mt-3">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
+          {clampedPct !== null && (
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-primary to-leaf"
+              style={{ width: `${clampedPct}%` }}
+            />
+          )}
+        </div>
+        <p className="mt-1 text-right text-[10px] font-semibold text-muted-foreground">
+          {pct === null ? "—" : pctFormat(pct)}
+        </p>
+      </div>
+      <p className="mt-3 text-[11px] text-muted-foreground/80">{description}</p>
+      <button onClick={onView} className="mt-3 text-xs font-semibold text-primary hover:underline">
+        Voir le détail →
+      </button>
+    </div>
+  );
+}
+
+function FunnelArrow() {
+  return (
+    <div className="hidden items-center justify-center px-1 text-xl text-muted-foreground/60 lg:flex">
+      →
+    </div>
+  );
+}
+
+function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
+  const { state, computed } = useErp();
+  const stockActuel = computed.stockPF.reduce((a, s) => a + s.stock, 0);
+  const valeurStockFinis = computed.stockPF.reduce((a, s) => a + s.valeur, 0);
+  const tauxTransformation = computed.kgAchetes
+    ? computed.kgTransformes / computed.kgAchetes
+    : null;
+  const tauxVenteStock = computed.bouteillesProduites
+    ? computed.bouteillesVendues / computed.bouteillesProduites
+    : null;
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        eyebrow="Module ERP 05"
+        title="Parcours production"
+        subtitle="Le produit, de la réception à la vente, en un coup d'œil — aucune nouvelle saisie, uniquement les chiffres déjà calculés par les autres modules"
+        responsable="Direction Générale"
+      />
+      <ExportBar section="parcours" />
+
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
+        <FunnelStage
+          num="01"
+          title="Approvisionnement"
+          headline={Math.round(computed.kgAchetes)}
+          unit="kg"
+          secondary={`${state.approvisionnements.length} réception(s)`}
+          pct={null}
+          description="Ananas reçu des producteurs, pesé à la livraison."
+          onView={() => onNavigate("appro")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="02"
+          title="Production"
+          headline={computed.bouteillesProduites}
+          unit="bt"
+          secondary={`${state.productions.length} lot(s)`}
+          pct={tauxTransformation}
+          description="Ananas transformé en jus et conditionné en bouteilles — le taux est le kg transformé sur le kg reçu."
+          onView={() => onNavigate("production")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="03"
+          title="Stock"
+          headline={stockActuel}
+          unit="bt"
+          secondary={`Valeur ${fcFormat(valeurStockFinis)}`}
+          pct={null}
+          description="Bouteilles produites non encore vendues (produites − vendues)."
+          onView={() => onNavigate("stock")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="04"
+          title="Commercialisation"
+          headline={computed.bouteillesVendues}
+          unit="bt"
+          secondary={fcFormat(computed.ca)}
+          pct={tauxVenteStock}
+          description="Bouteilles vendues, tous canaux confondus — le taux est vendu sur produit."
+          onView={() => onNavigate("commercialisation")}
+        />
+      </div>
+    </div>
+  );
+}
+
 function MarketingSection() {
   const { state, computed, addRow, removeRow } = useErp();
   const [selectedAction, setSelectedAction] = useState<(typeof state.marketing)[number] | null>(
@@ -2682,7 +2826,7 @@ function MarketingSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 05"
+        eyebrow="Module ERP 06"
         title="Marketing & prospection"
         responsable="Chargée de Commercialisation"
       />
@@ -3011,7 +3155,7 @@ function FinancesSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 06"
+        eyebrow="Module ERP 07"
         title="Finances de campagne"
         subtitle="Analyse hors amortissement"
         responsable="Direction Générale"
@@ -3942,7 +4086,7 @@ function PersonnelSection({
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 07"
+        eyebrow="Module ERP 08"
         title="Primes & commissions"
         subtitle="Calcul automatique sur production conforme et encaissements, par personne"
         responsable="Direction Générale"
@@ -4084,7 +4228,7 @@ function KpiSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 08"
+        eyebrow="Module ERP 09"
         title="Indicateurs stratégiques"
         subtitle="Calculés en temps réel à partir des modules ERP"
       />
@@ -4127,7 +4271,7 @@ function ParametresSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 09"
+        eyebrow="Module ERP 10"
         title="Paramètres de gestion"
         subtitle="Hypothèses modifiables, elles recalculent tous les tableaux de bord"
         responsable="Direction Générale"
@@ -4179,7 +4323,7 @@ function RoadmapSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 10"
+        eyebrow="Module ERP 11"
         title="Feuille de route de croissance"
         subtitle="Trajectoire d'industrialisation suivie par la production réelle"
       />
