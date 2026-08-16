@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { doc, setDoc, writeBatch } from "firebase/firestore";
 import { toast } from "sonner";
 import { X, Upload } from "lucide-react";
@@ -29,6 +29,7 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const [decisions, setDecisions] = useState<Record<number, "add" | "skip">>({});
   const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [readyToConfirm, setReadyToConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const targetDef = IMPORT_TARGETS[target];
@@ -42,6 +43,7 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
     setParsed(null);
     setDecisions({});
     setFileName("");
+    setReadyToConfirm(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -117,6 +119,12 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!readyToConfirm) return;
+    const t = setTimeout(() => setReadyToConfirm(false), 4000);
+    return () => clearTimeout(t);
+  }, [readyToConfirm]);
 
   const addCount = Object.values(decisions).filter((d) => d === "add").length;
 
@@ -247,12 +255,13 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                                     {isDup ? (
                                       <select
                                         value={decisions[i]}
-                                        onChange={(e) =>
+                                        onChange={(e) => {
                                           setDecisions((d) => ({
                                             ...d,
                                             [i]: e.target.value as "add" | "skip",
-                                          }))
-                                        }
+                                          }));
+                                          setReadyToConfirm(false);
+                                        }}
                                         className="rounded-lg border border-border bg-card px-2 py-1 text-xs"
                                       >
                                         <option value="skip">Ignorer</option>
@@ -283,13 +292,19 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                   Choisir un autre fichier
                 </button>
                 <button
-                  onClick={confirmImport}
+                  onClick={() => (readyToConfirm ? confirmImport() : setReadyToConfirm(true))}
                   disabled={busy || addCount === 0}
-                  className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
+                  className={`rounded-lg px-4 py-2 text-xs font-semibold disabled:opacity-50 ${
+                    readyToConfirm
+                      ? "bg-destructive text-destructive-foreground"
+                      : "bg-primary text-primary-foreground"
+                  }`}
                 >
                   {busy
                     ? "Import en cours…"
-                    : `Importer ${addCount} ligne${addCount > 1 ? "s" : ""}`}
+                    : readyToConfirm
+                      ? `Confirmer l'ajout de ${addCount} ligne${addCount > 1 ? "s" : ""} ?`
+                      : `Importer ${addCount} ligne${addCount > 1 ? "s" : ""}`}
                 </button>
               </div>
             )}

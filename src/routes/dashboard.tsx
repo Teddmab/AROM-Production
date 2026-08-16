@@ -36,6 +36,7 @@ import {
 import { ExportBar } from "@/components/erp/ExportBar";
 import { ImportButton } from "@/components/erp/ImportButton";
 import type { ImportLog } from "@/lib/erp/import";
+import type { SiteContent, SiteVideo } from "@/lib/site-content";
 import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
@@ -818,14 +819,40 @@ function EntryForm({
 
 const n = (v: string | undefined) => Number(v ?? 0) || 0;
 
+/**
+ * Two clicks to delete anything, everywhere (sprint 28) — first click asks
+ * "Confirmer ?", auto-reverting after a few seconds if untouched; only the
+ * second click actually fires the caller's `onClick`. One shared component,
+ * so every "Suppr." button in the app got this without a per-call-site
+ * change — matches the confirm step RecordDetailModal's own delete flow
+ * already had.
+ */
 function DeleteButton({ onClick }: { onClick: (e: MouseEvent) => void }) {
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirming]);
+
   return (
     <button
-      onClick={onClick}
-      className="text-xs font-semibold text-destructive hover:underline"
-      aria-label="Supprimer la ligne"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (confirming) {
+          setConfirming(false);
+          onClick(e);
+        } else {
+          setConfirming(true);
+        }
+      }}
+      className={`text-xs font-semibold underline-offset-2 ${
+        confirming ? "text-destructive underline" : "text-destructive hover:underline"
+      }`}
+      aria-label={confirming ? "Confirmer la suppression de la ligne" : "Supprimer la ligne"}
     >
-      Suppr.
+      {confirming ? "Confirmer ?" : "Suppr."}
     </button>
   );
 }
@@ -1549,6 +1576,7 @@ function TachesSection() {
   const { profile } = useAuth();
   const { state } = useErp();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   useEffect(() => {
     return onSnapshot(
@@ -1595,6 +1623,50 @@ function TachesSection() {
 
   const pending = tasks.filter((t) => t.status === "pending");
   const doneCount = tasks.length - pending.length;
+
+  const formatDateTime = (iso?: string) =>
+    iso
+      ? new Date(iso).toLocaleString("fr-FR", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "—";
+
+  const NEXT_ACTION: Record<TaskStage, string> = {
+    production:
+      "Une fois cette tâche terminée, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour la même réception.",
+    stock:
+      "Dernière étape du suivi Stock pour cette réception — aucune tâche n'est créée après celle-ci.",
+    commercialisation:
+      "Dernière étape du suivi Commercialisation pour cette réception — aucune tâche n'est créée après celle-ci.",
+  };
+
+  // What led to this task existing, in order — for "stock"/"commercialisation"
+  // tasks that's the originating "production" task's own completion (they
+  // don't share a Firestore reference to each other, only the same
+  // `sourceLabel`, so the lineage is reconstructed by matching on it).
+  const buildHistory = (task: Task): DetailField["breakdown"] => {
+    const steps: { label: string; value: string }[] = [
+      { label: "Réception reçue", value: task.sourceLabel },
+    ];
+    if (task.stage !== "production") {
+      const origin = tasks.find(
+        (t) => t.stage === "production" && t.sourceLabel === task.sourceLabel,
+      );
+      steps.push({
+        label: "Production terminée",
+        value: origin?.completedAt ? formatDateTime(origin.completedAt) : "—",
+      });
+    }
+    steps.push({
+      label: task.status === "done" ? "Cette tâche, terminée" : "Cette tâche, en attente",
+      value: task.status === "done" ? formatDateTime(task.completedAt) : "En cours",
+    });
+    return steps;
+  };
 
   // One-off catch-up for réceptions that predate this feature (or slipped
   // through for any other reason) — checks every stage=production task
@@ -1663,11 +1735,15 @@ function TachesSection() {
                   {stageTasks.map((t) => (
                     <li
                       key={t.id}
-                      className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+                      onClick={() => setSelectedTask(t)}
+                      className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
                     >
                       <span className="text-sm text-foreground">{t.title}</span>
                       <button
-                        onClick={() => complete(t)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          complete(t);
+                        }}
                         className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
                       >
                         Marquer terminé
@@ -1686,6 +1762,32 @@ function TachesSection() {
           {doneCount} tâche{doneCount > 1 ? "s" : ""} terminée{doneCount > 1 ? "s" : ""} cette
           campagne.
         </p>
+      )}
+
+      {selectedTask && (
+        <RecordDetailModal
+          title={selectedTask.title}
+          subtitle={STAGE_LABELS[selectedTask.stage]}
+          onClose={() => setSelectedTask(null)}
+          fields={[
+            {
+              label: "Historique",
+              value: selectedTask.status === "done" ? "Terminée" : "En attente",
+              description: "Ce qui a déjà été fait pour cette réception, et quand.",
+              breakdown: buildHistory(selectedTask),
+            },
+            {
+              label: "Créée le",
+              value: formatDateTime(selectedTask.createdAt),
+              description: "Date de création de cette tâche.",
+            },
+            {
+              label: "Prochaine étape",
+              value: NEXT_ACTION[selectedTask.stage],
+              description: "Ce qui se passe automatiquement une fois cette tâche marquée terminée.",
+            },
+          ]}
+        />
       )}
     </div>
   );
@@ -5299,6 +5401,14 @@ function KpiSection() {
   );
 }
 
+// The 3 Paramètres ERP fields the public landing page's hero stats mirror —
+// see src/lib/site-content.ts.
+const HERO_STAT_SOURCE_KEYS = {
+  objectifAnanasKg: "ananasKg",
+  objectifBouteilles: "bouteilles",
+  objectifClients: "clients",
+} as const;
+
 function ParametresSection() {
   const { state, updateParametres, reset } = useErp();
   const p = state.parametres;
@@ -5309,7 +5419,32 @@ function ParametresSection() {
         type="number"
         step={step}
         value={String(p[key])}
-        onChange={(e) => updateParametres({ [key]: Number(e.target.value) } as never)}
+        onChange={(e) => {
+          const value = Number(e.target.value);
+          updateParametres({ [key]: value } as never);
+          // Keeps the public landing page's hero stats in sync the moment
+          // an admin changes the matching objectif — see HERO_STAT_SOURCE_KEYS.
+          if (key in HERO_STAT_SOURCE_KEYS) {
+            const heroKey = HERO_STAT_SOURCE_KEYS[key as keyof typeof HERO_STAT_SOURCE_KEYS];
+            setDoc(
+              doc(db, "config", "siteContent"),
+              {
+                heroStats: {
+                  ananasKg: heroKey === "ananasKg" ? value : p.objectifAnanasKg,
+                  bouteilles: heroKey === "bouteilles" ? value : p.objectifBouteilles,
+                  clients: heroKey === "clients" ? value : p.objectifClients,
+                },
+              },
+              { merge: true },
+            ).catch((err) =>
+              toast.error(
+                err instanceof Error
+                  ? `Synchronisation page d'accueil impossible : ${err.message}`
+                  : "Synchronisation page d'accueil impossible.",
+              ),
+            );
+          }
+        }}
         className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
       />
     </label>
@@ -5365,8 +5500,182 @@ function ParametresSection() {
           {dateField("Fin commercialisation", "finCommercialisation")}
         </div>
       </Card>
+      <SiteContentCard />
       <ImportLogCard />
     </div>
+  );
+}
+
+/**
+ * Public landing page content (sprint 28) — the hero stats mirror
+ * automatically from "Objectifs & tarifs" above (see HERO_STAT_SOURCE_KEYS),
+ * shown here read-only for confirmation. The video is the one genuinely new
+ * editable field, and — unlike every auto-save field elsewhere on this
+ * page — requires an explicit "Enregistrer" click: it's public-facing
+ * marketing content, not an internal KPI target, so a deliberate publish
+ * step matters here in a way it doesn't for, say, a price field.
+ */
+function SiteContentCard() {
+  const { profile } = useAuth();
+  const { state } = useErp();
+  const [content, setContent] = useState<SiteContent>({
+    videos: [],
+    heroStats: { ananasKg: 0, bouteilles: 0, clients: 0 },
+  });
+  const [title, setTitle] = useState("");
+  const [tag, setTag] = useState("");
+  const [duration, setDuration] = useState("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    return onSnapshot(doc(db, "config", "siteContent"), (snap) => {
+      if (snap.exists())
+        setContent((c) => ({
+          ...c,
+          ...(snap.data() as SiteContent),
+          videos: (snap.data() as SiteContent).videos ?? [],
+        }));
+    });
+  }, []);
+
+  if (profile?.role !== "admin") return null;
+
+  const saveVideos = (videos: SiteVideo[]) =>
+    setDoc(doc(db, "config", "siteContent"), { videos }, { merge: true }).catch((err) =>
+      toast.error(
+        err instanceof Error
+          ? `Mise à jour impossible : ${err.message}`
+          : "Mise à jour impossible.",
+      ),
+    );
+
+  const addVideo = async () => {
+    if (!videoFile || !title.trim()) return;
+    setSaving(true);
+    try {
+      const path = `site/video-${Date.now()}-${videoFile.name}`;
+      const storageRef = ref(storage, path);
+      await uploadBytes(storageRef, videoFile);
+      const videoUrl = await getDownloadURL(storageRef);
+      const newVideo: SiteVideo = {
+        id: newId("VID"),
+        title: title.trim(),
+        tag: tag.trim() || "Média",
+        ...(duration.trim() ? { duration: duration.trim() } : {}),
+        videoUrl,
+      };
+      await saveVideos([...content.videos, newVideo]);
+      setTitle("");
+      setTag("");
+      setDuration("");
+      setVideoFile(null);
+      toast.success("Vidéo ajoutée à la page d'accueil.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Envoi de la vidéo impossible : ${err.message}`
+          : "Envoi de la vidéo impossible.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeVideo = (id: string) => saveVideos(content.videos.filter((v) => v.id !== id));
+
+  return (
+    <Card title="Page d'accueil — Notre histoire en images">
+      <div className="space-y-5">
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">
+            Statistiques affichées sur la page d'accueil
+          </p>
+          <p className="mt-1 text-sm text-foreground">
+            {state.parametres.objectifAnanasKg} kg d'ananas/mois ·{" "}
+            {state.parametres.objectifBouteilles} bouteilles · {state.parametres.objectifClients}{" "}
+            clients cibles
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Modifiables ci-dessus, dans « Objectifs & tarifs ».
+          </p>
+        </div>
+
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">
+            Vidéos ({content.videos.length}) — la première est mise en avant, les suivantes forment
+            la playlist
+          </p>
+          {content.videos.length === 0 ? (
+            <p className="mt-1 text-sm text-muted-foreground">
+              Aucune vidéo envoyée pour le moment.
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-2">
+              {content.videos.map((v, i) => (
+                <li
+                  key={v.id}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {i === 0 && (
+                        <span className="mr-1.5 rounded-full bg-gold/20 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                          À la une
+                        </span>
+                      )}
+                      {v.title}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {v.tag}
+                      {v.duration ? ` · ${v.duration}` : ""}
+                    </p>
+                  </div>
+                  <DeleteButton onClick={() => removeVideo(v.id)} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-dashed border-border p-4">
+          <p className="mb-3 text-xs font-medium text-muted-foreground">Ajouter une vidéo</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Titre (ex. Récolte & sélection des ananas)"
+              className="rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground sm:col-span-2"
+            />
+            <input
+              value={tag}
+              onChange={(e) => setTag(e.target.value)}
+              placeholder="Catégorie (ex. Production)"
+              className="rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            />
+            <input
+              value={duration}
+              onChange={(e) => setDuration(e.target.value)}
+              placeholder="Durée affichée (ex. 1:42, optionnel)"
+              className="rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            />
+            <input
+              type="file"
+              accept="video/mp4"
+              onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)}
+              className="text-xs text-muted-foreground file:mr-3 file:rounded-lg file:border file:border-border file:bg-background file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-primary sm:col-span-2"
+            />
+          </div>
+          <button
+            onClick={addVideo}
+            disabled={!videoFile || !title.trim() || saving}
+            className="mt-3 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
+          >
+            {saving ? "Envoi…" : "Enregistrer"}
+          </button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

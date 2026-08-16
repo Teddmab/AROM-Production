@@ -1,12 +1,46 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { doc, onSnapshot } from "firebase/firestore";
 import { CountUp } from "@/components/motion/CountUp";
 import { Reveal } from "@/components/motion/Reveal";
+import { db } from "@/lib/firebase/config";
+import type { SiteContent, SiteVideo } from "@/lib/site-content";
 
 export const Route = createFileRoute("/")({
   component: Home,
 });
 
+const DEFAULT_HERO_STATS: SiteContent["heroStats"] = {
+  ananasKg: 300,
+  bouteilles: 300,
+  clients: 25,
+};
+
 function Home() {
+  // Public, unauthenticated read — landing page content is admin-managed
+  // from Paramètres ERP (sprint 28), mirrored here so it updates without a
+  // redeploy. Falls back to sensible defaults before the first snapshot
+  // arrives (or if the doc doesn't exist yet).
+  const [siteContent, setSiteContent] = useState<SiteContent>({
+    videos: [],
+    heroStats: DEFAULT_HERO_STATS,
+  });
+  useEffect(() => {
+    return onSnapshot(doc(db, "config", "siteContent"), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data() as SiteContent;
+        setSiteContent({
+          ...data,
+          videos: data.videos ?? [],
+          heroStats: data.heroStats ?? DEFAULT_HERO_STATS,
+        });
+      }
+    });
+  }, []);
+  const [featured, ...playlist] = siteContent.videos;
+  const [activeVideo, setActiveVideo] = useState<SiteVideo | undefined>(undefined);
+  const shownVideo = activeVideo ?? featured;
+
   return (
     <div className="min-h-screen overflow-x-clip">
       {/* NAV */}
@@ -85,9 +119,9 @@ function Home() {
 
           <dl className="mt-14 grid grid-cols-3 gap-6 border-t border-border pt-8">
             {[
-              { value: 300, suffix: " kg", v: "Ananas / mois" },
-              { value: 300, suffix: "", v: "Bouteilles" },
-              { value: 25, suffix: "", v: "Clients cibles" },
+              { value: siteContent.heroStats.ananasKg, suffix: " kg", v: "Ananas / mois" },
+              { value: siteContent.heroStats.bouteilles, suffix: "", v: "Bouteilles" },
+              { value: siteContent.heroStats.clients, suffix: "", v: "Clients cibles" },
             ].map((s) => (
               <div key={s.v}>
                 <dt className="font-display text-3xl font-bold text-primary">
@@ -233,67 +267,76 @@ function Home() {
         <div className="mt-10 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
           {/* Featured video */}
           <figure className="group relative min-w-0 overflow-hidden rounded-3xl bg-primary shadow-2xl ring-1 ring-black/5">
-            <video
-              className="aspect-video w-full object-cover"
-              controls
-              preload="metadata"
-              poster="/logo-hero.png"
-            >
-              <source src="" type="video/mp4" />
-              Votre navigateur ne supporte pas la vidéo HTML5.
-            </video>
+            {shownVideo ? (
+              <video
+                key={shownVideo.id}
+                className="aspect-video w-full object-cover"
+                controls
+                preload="metadata"
+                poster="/logo-hero.png"
+              >
+                <source src={shownVideo.videoUrl} type="video/mp4" />
+                Votre navigateur ne supporte pas la vidéo HTML5.
+              </video>
+            ) : (
+              <img src="/logo-hero.png" alt="AROM" className="aspect-video w-full object-cover" />
+            )}
             <figcaption className="flex items-center justify-between gap-4 bg-primary px-6 py-4 text-primary-foreground">
               <div>
-                <p className="font-display text-lg font-semibold">Du champ à la bouteille</p>
+                <p className="font-display text-lg font-semibold">
+                  {shownVideo?.title ?? "Du champ à la bouteille"}
+                </p>
                 <p className="text-xs uppercase tracking-[0.2em] text-gold">
-                  Reportage · Campagne 001/2026
+                  {shownVideo?.tag ?? "Reportage"} · Campagne N°001/2026
                 </p>
               </div>
-              <span className="badge-status bg-gold/20 text-gold">
-                <span className="h-1.5 w-1.5 rounded-full bg-gold" /> À la une
-              </span>
+              {shownVideo === featured && (
+                <span className="badge-status bg-gold/20 text-gold">
+                  <span className="h-1.5 w-1.5 rounded-full bg-gold" /> À la une
+                </span>
+              )}
             </figcaption>
           </figure>
 
           {/* Playlist */}
-          <ul className="grid min-w-0 gap-4">
-            {[
-              { t: "Récolte & sélection des ananas", d: "1:42", tag: "Production" },
-              { t: "Atelier de transformation", d: "2:15", tag: "Qualité" },
-              { t: "Témoignage · Nos clients à Kinshasa", d: "0:58", tag: "Marketing" },
-              { t: "Publicité AROM : 100% naturel", d: "0:30", tag: "Campagne" },
-            ].map((v) => (
-              <li key={v.t}>
-                <button
-                  type="button"
-                  className="group flex w-full items-center gap-4 rounded-3xl border border-border bg-card p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98]"
-                >
-                  <span className="relative grid h-16 w-24 shrink-0 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-primary to-leaf">
-                    <span className="grid h-9 w-9 place-items-center rounded-full bg-white/95 text-primary shadow-md transition group-hover:scale-110">
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="currentColor"
-                        aria-hidden
-                      >
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    </span>
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold text-primary">{v.t}</span>
-                    <span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="rounded-full bg-gold/15 px-2 py-0.5 font-semibold text-primary">
-                        {v.tag}
+          {playlist.length > 0 && (
+            <ul className="grid min-w-0 gap-4">
+              {playlist.map((v) => (
+                <li key={v.id}>
+                  <button
+                    type="button"
+                    onClick={() => setActiveVideo(v)}
+                    className="group flex w-full items-center gap-4 rounded-3xl border border-border bg-card p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98]"
+                  >
+                    <span className="relative grid h-16 w-24 shrink-0 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-primary to-leaf">
+                      <span className="grid h-9 w-9 place-items-center rounded-full bg-white/95 text-primary shadow-md transition group-hover:scale-110">
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          aria-hidden
+                        >
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
                       </span>
-                      <span>{v.d}</span>
                     </span>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold text-primary">
+                        {v.title}
+                      </span>
+                      <span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                        <span className="rounded-full bg-gold/15 px-2 py-0.5 font-semibold text-primary">
+                          {v.tag}
+                        </span>
+                        {v.duration && <span>{v.duration}</span>}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </section>
 
