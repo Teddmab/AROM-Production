@@ -83,30 +83,31 @@ const SECTIONS: {
   id: SectionId;
   label: string;
   num: string;
-  subItems?: { id: string; label: string }[];
+  subItems?: { id: string; label: string; isSection?: boolean }[];
+  /** Sub-items always show (not just while this section is active) — for
+   * groups where the members are full independent pages people need to
+   * reach directly, not in-page tabs reached by visiting the parent first. */
+  alwaysExpanded?: boolean;
 }[] = [
   { id: "executif", label: "Exécutif", num: "00" },
-  { id: "appro", label: "Approvisionnement", num: "01" },
-  { id: "production", label: "Production", num: "02" },
-  { id: "stock", label: "Stock", num: "03" },
   {
-    id: "commercialisation",
-    label: "Commercialisation",
-    num: "04",
+    id: "parcours",
+    label: "Parcours production",
+    num: "01",
+    alwaysExpanded: true,
     subItems: [
-      { id: "catalogue", label: "Catalogue" },
-      { id: "promotions", label: "Promotions" },
-      { id: "commandes", label: "Commandes" },
-      { id: "ventes", label: "Ventes & clients" },
+      { id: "appro", label: "Approvisionnement", isSection: true },
+      { id: "production", label: "Production", isSection: true },
+      { id: "stock", label: "Stock", isSection: true },
+      { id: "commercialisation", label: "Commercialisation", isSection: true },
     ],
   },
-  { id: "parcours", label: "Parcours production", num: "05" },
-  { id: "marketing", label: "Marketing", num: "06" },
-  { id: "finances", label: "Finances", num: "07" },
+  { id: "marketing", label: "Marketing", num: "02" },
+  { id: "finances", label: "Finances", num: "03" },
   {
     id: "personnel",
     label: "Primes & personnel",
-    num: "08",
+    num: "04",
     subItems: [
       { id: "invitations", label: "Invitations" },
       { id: "equipe", label: "Équipe" },
@@ -115,10 +116,22 @@ const SECTIONS: {
       { id: "primes-commercial", label: "Primes commercial" },
     ],
   },
-  { id: "kpi", label: "KPI stratégiques", num: "09" },
-  { id: "parametres", label: "Paramètres ERP", num: "10" },
-  { id: "roadmap", label: "Feuille de route", num: "11" },
+  { id: "kpi", label: "KPI stratégiques", num: "05" },
+  { id: "parametres", label: "Paramètres ERP", num: "06" },
+  { id: "roadmap", label: "Feuille de route", num: "07" },
 ];
+
+/**
+ * Flat list of every real section, including ones nested as a group's
+ * `subItems` (Parcours production's Approvisionnement/Production/Stock/
+ * Commercialisation) — the sidebar groups them, but a manual "menus"
+ * picker (InviteCard's "Personnalisé" poste) still needs to offer every
+ * section individually, not just the top-level groups.
+ */
+const ALL_MENU_OPTIONS: { id: string; label: string }[] = SECTIONS.flatMap((s) => [
+  { id: s.id, label: s.label },
+  ...(s.subItems?.filter((si) => si.isSection).map((si) => ({ id: si.id, label: si.label })) ?? []),
+]);
 
 function DashboardRoute() {
   return (
@@ -132,7 +145,15 @@ function DashboardRoute() {
 
 function Dashboard() {
   const { profile, signOutUser } = useAuth();
-  const visibleSections = SECTIONS.filter((s) => canAccessMenu(profile, s.id));
+  // A group (e.g. Parcours production) stays visible if the account can open
+  // the group page itself OR at least one of its member sections — a
+  // poste-scoped "Directeur de Production" account has appro/production/stock
+  // in `menus` but not "parcours" itself, and still needs to reach them.
+  const visibleSections = SECTIONS.filter(
+    (s) =>
+      canAccessMenu(profile, s.id) ||
+      s.subItems?.some((si) => si.isSection && canAccessMenu(profile, si.id)),
+  );
   const [active, setActive] = useState<SectionId>(visibleSections[0]?.id ?? "executif");
   // Keyed by section id, one entry per tabbed section — defaults to that
   // section's first tab the first time it's visited.
@@ -212,50 +233,67 @@ function Dashboard() {
 
       <div className="mx-auto flex max-w-[1400px] flex-col gap-8 px-6 py-8 lg:flex-row">
         <aside className="sticky top-24 hidden h-fit w-56 shrink-0 flex-col gap-1 lg:flex">
-          {visibleSections.map((s) => (
-            <div key={s.id}>
-              <button
-                onClick={() => setActive(s.id)}
-                className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                  active === s.id
-                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/15"
-                    : "text-foreground/70 hover:bg-primary/5 hover:text-primary"
-                }`}
-              >
-                <span
-                  className={`grid h-7 w-7 place-items-center rounded-lg font-display text-[11px] font-bold ${
-                    active === s.id ? "bg-gold text-primary" : "bg-primary/5 text-primary"
+          {visibleSections.map((s) => {
+            const canOpen = canAccessMenu(profile, s.id);
+            const visibleSubItems = s.subItems?.filter(
+              (si) => !si.isSection || canAccessMenu(profile, si.id),
+            );
+            return (
+              <div key={s.id}>
+                <button
+                  onClick={canOpen ? () => setActive(s.id) : undefined}
+                  className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+                    active === s.id
+                      ? "bg-primary text-primary-foreground shadow-lg shadow-primary/15"
+                      : canOpen
+                        ? "text-foreground/70 hover:bg-primary/5 hover:text-primary"
+                        : "cursor-default text-foreground/50"
                   }`}
                 >
-                  {s.num}
-                </span>
-                <span className="font-medium">{s.label}</span>
-              </button>
-              {/* Shortcut access to this section's tabs — only shown once
-                  the section is active, so the sidebar stays compact for
-                  the 9 sections that don't have sub-tabs. */}
-              {s.subItems && active === s.id && (
-                <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border pl-3">
-                  {s.subItems.map((sub) => {
-                    const isActiveSub = (activeSubTab[s.id] ?? s.subItems![0].id) === sub.id;
-                    return (
-                      <button
-                        key={sub.id}
-                        onClick={() => goTo(s.id, sub.id)}
-                        className={`rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
-                          isActiveSub
-                            ? "font-semibold text-primary"
-                            : "text-muted-foreground hover:text-primary"
-                        }`}
-                      >
-                        {sub.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          ))}
+                  <span
+                    className={`grid h-7 w-7 place-items-center rounded-lg font-display text-[11px] font-bold ${
+                      active === s.id ? "bg-gold text-primary" : "bg-primary/5 text-primary"
+                    }`}
+                  >
+                    {s.num}
+                  </span>
+                  <span className="font-medium">{s.label}</span>
+                </button>
+                {/* Shortcut access to this section's members. In-page-tab
+                    groups (Personnel) only expand once active, keeping the
+                    sidebar compact; `alwaysExpanded` groups (Parcours
+                    production) list their member pages permanently, since
+                    those are full pages people need to reach directly, not
+                    tabs reached by visiting the parent first. */}
+                {visibleSubItems &&
+                  visibleSubItems.length > 0 &&
+                  (s.alwaysExpanded || active === s.id) && (
+                    <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border pl-3">
+                      {visibleSubItems.map((sub) => {
+                        const isActiveSub = sub.isSection
+                          ? active === sub.id
+                          : (activeSubTab[s.id] ?? s.subItems![0].id) === sub.id;
+                        return (
+                          <button
+                            key={sub.id}
+                            onClick={() =>
+                              sub.isSection ? setActive(sub.id as SectionId) : goTo(s.id, sub.id)
+                            }
+                            className={`rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                              isActiveSub
+                                ? "font-semibold text-primary"
+                                : "text-muted-foreground hover:text-primary"
+                            }`}
+                          >
+                            {sub.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+              </div>
+            );
+          })}
         </aside>
 
         <div className="lg:hidden">
@@ -264,11 +302,23 @@ function Dashboard() {
             onChange={(e) => setActive(e.target.value as SectionId)}
             className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-primary"
           >
-            {visibleSections.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.num} · {s.label}
-              </option>
-            ))}
+            {visibleSections.flatMap((s) => [
+              ...(canAccessMenu(profile, s.id)
+                ? [
+                    <option key={s.id} value={s.id}>
+                      {s.num} · {s.label}
+                    </option>,
+                  ]
+                : []),
+              ...(s.subItems
+                ?.filter((si) => si.isSection && canAccessMenu(profile, si.id))
+                .map((si) => (
+                  <option key={si.id} value={si.id}>
+                    {"　"}
+                    {si.label}
+                  </option>
+                )) ?? []),
+            ])}
           </select>
         </div>
 
@@ -888,7 +938,6 @@ function ExecutiveSection() {
         title="Vue générale de la campagne"
         subtitle="Direction Générale, données consolidées depuis l'ERP"
       />
-      <ExportBar section="executif" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -1030,6 +1079,8 @@ function ExecutiveSection() {
           ]}
         />
       )}
+
+      <ExportBar section="executif" />
     </div>
   );
 }
@@ -1048,7 +1099,6 @@ function ApproSection() {
         title="Approvisionnement"
         responsable="Directeur de Production"
       />
-      <ExportBar section="appro" />
 
       <Card
         title="Réceptions fournisseurs"
@@ -1363,6 +1413,8 @@ function ApproSection() {
           ]}
         />
       )}
+
+      <ExportBar section="appro" />
     </div>
   );
 }
@@ -1380,7 +1432,6 @@ function ProductionSection() {
         title="Production & transformation"
         responsable="Directeur de Production"
       />
-      <ExportBar section="production" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -1630,6 +1681,8 @@ function ProductionSection() {
           ]}
         />
       )}
+
+      <ExportBar section="production" />
     </div>
   );
 }
@@ -1652,7 +1705,6 @@ function StockSection() {
   return (
     <div className="space-y-6">
       <SectionHeader eyebrow="Module ERP 03" title="Stocks" responsable="Production / Magasin" />
-      <ExportBar section="stock" />
 
       <div className="grid gap-4 sm:grid-cols-3">
         <KpiTile
@@ -1911,6 +1963,8 @@ function StockSection() {
           ]}
         />
       )}
+
+      <ExportBar section="stock" />
     </div>
   );
 }
@@ -2551,7 +2605,6 @@ function CommercialisationSection({
         title="Ventes & encaissements"
         responsable="Chargée de Commercialisation"
       />
-      <ExportBar section="commercialisation" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -2869,6 +2922,8 @@ function CommercialisationSection({
             })()}
         </TabsContent>
       </Tabs>
+
+      <ExportBar section="commercialisation" />
     </div>
   );
 }
@@ -2889,7 +2944,8 @@ function FunnelStage({
   pct,
   description,
   breakdown,
-  onView,
+  expanded,
+  onToggle,
 }: {
   num: string;
   title: string;
@@ -2899,12 +2955,17 @@ function FunnelStage({
   pct: number | null;
   description: string;
   breakdown?: DetailField["breakdown"];
-  onView: () => void;
+  expanded: boolean;
+  onToggle: () => void;
 }) {
   const [showDetail, setShowDetail] = useState(false);
   const clampedPct = pct === null ? null : Math.max(0, Math.min(100, Math.round(pct * 100)));
   return (
-    <div className="flex-1 rounded-2xl border border-border bg-card p-5">
+    <div
+      className={`flex-1 rounded-2xl border bg-card p-5 transition ${
+        expanded ? "border-primary ring-2 ring-primary/30" : "border-border"
+      }`}
+    >
       <div className="flex items-center gap-2">
         <span className="grid h-6 w-6 place-items-center rounded-lg bg-primary/5 text-[10px] font-bold text-primary">
           {num}
@@ -2937,8 +2998,11 @@ function FunnelStage({
         </p>
       </div>
       <p className="mt-3 text-[11px] text-muted-foreground/80">{description}</p>
-      <button onClick={onView} className="mt-3 text-xs font-semibold text-primary hover:underline">
-        Voir le détail →
+      <button
+        onClick={onToggle}
+        className="mt-3 text-xs font-semibold text-primary hover:underline"
+      >
+        {expanded ? "Masquer les détails ↑" : "Voir le détail ↓"}
       </button>
 
       {showDetail && (
@@ -2967,8 +3031,20 @@ function FunnelArrow() {
   );
 }
 
+const stageLabels: Record<string, string> = {
+  appro: "Approvisionnement",
+  production: "Production",
+  stock: "Stock",
+  commercialisation: "Commercialisation",
+};
+
 function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
   const { state, computed } = useErp();
+  const [expandedStage, setExpandedStage] = useState<
+    "appro" | "production" | "stock" | "commercialisation" | null
+  >(null);
+  const toggle = (id: typeof expandedStage) => setExpandedStage((cur) => (cur === id ? null : id));
+
   const stockActuel = computed.stockPF.reduce((a, s) => a + s.stock, 0);
   const valeurStockFinis = computed.stockPF.reduce((a, s) => a + s.valeur, 0);
   const tauxTransformation = computed.kgAchetes
@@ -2979,15 +3055,22 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
     : null;
   const breakdowns = buildBreakdowns(computed);
 
+  const recentAppro = [...computed.appro].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const recentProduction = [...computed.production]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 5);
+  const recentVentes = [...computed.ventes]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 5);
+
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 05"
+        eyebrow="Vue transverse"
         title="Parcours production"
         subtitle="Le produit, de la réception à la vente, en un coup d'œil — aucune nouvelle saisie, uniquement les chiffres déjà calculés par les autres modules"
         responsable="Direction Générale"
       />
-      <ExportBar section="parcours" />
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
         <FunnelStage
@@ -3005,7 +3088,8 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
             },
             { label: "= Kg reçus", value: `${Math.round(computed.kgAchetes)} kg` },
           ]}
-          onView={() => onNavigate("appro")}
+          expanded={expandedStage === "appro"}
+          onToggle={() => toggle("appro")}
         />
         <FunnelArrow />
         <FunnelStage
@@ -3017,7 +3101,8 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           pct={tauxTransformation}
           description="Ananas transformé en jus et conditionné en bouteilles — le taux est le kg transformé sur le kg reçu."
           breakdown={breakdowns.tauxTransformation}
-          onView={() => onNavigate("production")}
+          expanded={expandedStage === "production"}
+          onToggle={() => toggle("production")}
         />
         <FunnelArrow />
         <FunnelStage
@@ -3029,7 +3114,8 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           pct={null}
           description="Bouteilles produites non encore vendues (produites − vendues)."
           breakdown={breakdowns.stockActuel}
-          onView={() => onNavigate("stock")}
+          expanded={expandedStage === "stock"}
+          onToggle={() => toggle("stock")}
         />
         <FunnelArrow />
         <FunnelStage
@@ -3041,9 +3127,56 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           pct={tauxVenteStock}
           description="Bouteilles vendues, tous canaux confondus — le taux est vendu sur produit."
           breakdown={breakdowns.tauxVente}
-          onView={() => onNavigate("commercialisation")}
+          expanded={expandedStage === "commercialisation"}
+          onToggle={() => toggle("commercialisation")}
         />
       </div>
+
+      {expandedStage && (
+        <Card title={stageLabels[expandedStage]}>
+          {expandedStage === "appro" && (
+            <Table
+              headers={["N°", "Date", "Fournisseur", "Reçu"]}
+              empty="Aucune réception enregistrée."
+              rows={recentAppro.map((r) => [r.numero, r.date, r.fournisseur, `${r.qteRecueKg} kg`])}
+            />
+          )}
+          {expandedStage === "production" && (
+            <Table
+              headers={["Lot", "Date", "Total bouteilles", "Statut"]}
+              empty="Aucun lot de production enregistré."
+              rows={recentProduction.map((r) => [r.lot, r.date, r.totalBouteilles, r.statut])}
+            />
+          )}
+          {expandedStage === "stock" && (
+            <Table
+              headers={["Format", "Produites", "Vendues", "Stock", "Valeur"]}
+              rows={computed.stockPF.map((s) => [
+                s.format,
+                s.produites,
+                s.vendues,
+                s.stock,
+                fcFormat(s.valeur),
+              ])}
+            />
+          )}
+          {expandedStage === "commercialisation" && (
+            <Table
+              headers={["N°", "Date", "Client", "Montant"]}
+              empty="Aucune vente enregistrée."
+              rows={recentVentes.map((v) => [v.numero, v.date, v.client, fcFormat(v.montantBrut)])}
+            />
+          )}
+          <button
+            onClick={() => onNavigate(expandedStage)}
+            className="mt-4 text-sm font-semibold text-primary hover:underline"
+          >
+            Ouvrir {stageLabels[expandedStage]} en entier →
+          </button>
+        </Card>
+      )}
+
+      <ExportBar section="parcours" />
     </div>
   );
 }
@@ -3056,11 +3189,10 @@ function MarketingSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 06"
+        eyebrow="Module ERP 02"
         title="Marketing & prospection"
         responsable="Chargée de Commercialisation"
       />
-      <ExportBar section="marketing" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -3282,6 +3414,8 @@ function MarketingSection() {
           ]}
         />
       )}
+
+      <ExportBar section="marketing" />
     </div>
   );
 }
@@ -3396,12 +3530,11 @@ function FinancesSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 07"
+        eyebrow="Module ERP 03"
         title="Finances de campagne"
         subtitle="Analyse hors amortissement"
         responsable="Direction Générale"
       />
-      <ExportBar section="finances" />
 
       <Card
         title="Charges fixes"
@@ -3517,6 +3650,8 @@ function FinancesSection() {
           ]}
         />
       )}
+
+      <ExportBar section="finances" />
     </div>
   );
 }
@@ -3691,7 +3826,7 @@ function InviteCard() {
               Toutes les sections
             </button>
             {!allMenus &&
-              SECTIONS.map((s) => (
+              ALL_MENU_OPTIONS.map((s) => (
                 <button
                   key={s.id}
                   type="button"
@@ -4328,7 +4463,7 @@ function PersonnelSection({
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 08"
+        eyebrow="Module ERP 04"
         title="Primes & commissions"
         subtitle="Calcul automatique sur production conforme et encaissements, par personne"
         responsable="Direction Générale"
@@ -4479,11 +4614,10 @@ function KpiSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 09"
+        eyebrow="Module ERP 05"
         title="Indicateurs stratégiques"
         subtitle="Calculés en temps réel à partir des modules ERP"
       />
-      <ExportBar section="kpi" />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {items.map((i) => (
           <KpiTile
@@ -4496,6 +4630,8 @@ function KpiSection() {
           />
         ))}
       </div>
+
+      <ExportBar section="kpi" />
     </div>
   );
 }
@@ -4529,7 +4665,7 @@ function ParametresSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 10"
+        eyebrow="Module ERP 06"
         title="Paramètres de gestion"
         subtitle="Hypothèses modifiables, elles recalculent tous les tableaux de bord"
         responsable="Direction Générale"
@@ -4581,7 +4717,7 @@ function RoadmapSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 11"
+        eyebrow="Module ERP 07"
         title="Feuille de route de croissance"
         subtitle="Trajectoire d'industrialisation suivie par la production réelle"
       />
