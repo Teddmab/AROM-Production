@@ -71,6 +71,7 @@ export const Route = createFileRoute("/dashboard")({
 
 type SectionId =
   | "executif"
+  | "taches"
   | "appro"
   | "production"
   | "stock"
@@ -95,10 +96,11 @@ const SECTIONS: {
   alwaysExpanded?: boolean;
 }[] = [
   { id: "executif", label: "Exécutif", num: "00" },
+  { id: "taches", label: "Tâches", num: "01" },
   {
     id: "parcours",
     label: "Parcours production",
-    num: "01",
+    num: "02",
     alwaysExpanded: true,
     subItems: [
       { id: "appro", label: "Approvisionnement", isSection: true },
@@ -108,12 +110,12 @@ const SECTIONS: {
       { id: "promotion", label: "Promotion", isSection: true },
     ],
   },
-  { id: "marketing", label: "Marketing", num: "02" },
-  { id: "finances", label: "Finances", num: "03" },
+  { id: "marketing", label: "Marketing", num: "03" },
+  { id: "finances", label: "Finances", num: "04" },
   {
     id: "personnel",
     label: "Primes & personnel",
-    num: "04",
+    num: "05",
     subItems: [
       { id: "invitations", label: "Invitations" },
       { id: "equipe", label: "Équipe" },
@@ -122,9 +124,9 @@ const SECTIONS: {
       { id: "primes-commercial", label: "Primes commercial" },
     ],
   },
-  { id: "kpi", label: "KPI stratégiques", num: "05" },
-  { id: "parametres", label: "Paramètres ERP", num: "06" },
-  { id: "roadmap", label: "Feuille de route", num: "07" },
+  { id: "kpi", label: "KPI stratégiques", num: "06" },
+  { id: "parametres", label: "Paramètres ERP", num: "07" },
+  { id: "roadmap", label: "Feuille de route", num: "08" },
 ];
 
 /**
@@ -138,6 +140,49 @@ const ALL_MENU_OPTIONS: { id: string; label: string }[] = SECTIONS.flatMap((s) =
   { id: s.id, label: s.label },
   ...(s.subItems?.filter((si) => si.isSection).map((si) => ({ id: si.id, label: si.label })) ?? []),
 ]);
+
+/**
+ * Workflow tasks (sprint 26): "Inviter un membre" led to "have I implemented
+ * the task feature" — the answer was no, so this adds it. Approvisionnement
+ * → Production → {Stock, Commercialisation} is a chain of manual hand-offs,
+ * not an automatic one — a Production lot has no field linking it back to
+ * the réception(s) it consumed (sprint 20's deliberate call: AROM pools raw
+ * ananas in shared storage, batches aren't physically traceable), so a task
+ * can't be auto-completed by detecting a matching downstream record. Staff
+ * click "Marquer terminé" once they've actually done the work; completing a
+ * "production" task fires off its "stock" and "commercialisation" follow-ups
+ * in the same action.
+ */
+type TaskStage = "production" | "stock" | "commercialisation";
+interface Task {
+  id: string;
+  stage: TaskStage;
+  title: string;
+  /** The originating réception's numéro — carried through every task spawned from it, so the chain reads as one story even though the underlying records don't link to each other. */
+  sourceLabel: string;
+  status: "pending" | "done";
+  createdAt: string;
+  completedAt?: string;
+  completedBy?: string;
+}
+
+function createTask(stage: TaskStage, title: string, sourceLabel: string) {
+  const id = newId("TASK");
+  setDoc(doc(db, "tasks", id), {
+    id,
+    stage,
+    title,
+    sourceLabel,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  } satisfies Task).catch((err) =>
+    toast.error(
+      err instanceof Error
+        ? `Création de tâche impossible : ${err.message}`
+        : "Création de tâche impossible.",
+    ),
+  );
+}
 
 function DashboardRoute() {
   return (
@@ -170,6 +215,22 @@ function Dashboard() {
     if (subTabId) setActiveSubTab((s) => ({ ...s, [sectionId]: subTabId }));
   };
   const { computed, fcPerUsd } = useErp();
+
+  const [pendingTaskCount, setPendingTaskCount] = useState(0);
+  useEffect(() => {
+    if (!canAccessMenu(profile, "taches")) return;
+    const visibleStages: TaskStage[] =
+      profile?.poste === "Directeur de Production"
+        ? ["production", "stock"]
+        : profile?.poste === "Chargée de Commercialisation"
+          ? ["commercialisation"]
+          : ["production", "stock", "commercialisation"];
+    return onSnapshot(query(collection(db, "tasks"), where("status", "==", "pending")), (snap) => {
+      setPendingTaskCount(
+        snap.docs.filter((d) => visibleStages.includes((d.data() as Task).stage)).length,
+      );
+    });
+  }, [profile]);
 
   return (
     <div className="min-h-screen">
@@ -339,7 +400,18 @@ function Dashboard() {
                   >
                     {s.num}
                   </span>
-                  <span className="font-medium">{s.label}</span>
+                  <span className="flex-1 font-medium">{s.label}</span>
+                  {s.id === "taches" && pendingTaskCount > 0 && (
+                    <span
+                      className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-[10px] font-bold ${
+                        active === s.id
+                          ? "bg-primary-foreground text-primary"
+                          : "bg-gold text-primary"
+                      }`}
+                    >
+                      {pendingTaskCount}
+                    </span>
+                  )}
                 </button>
                 {/* Shortcut access to this section's members. In-page-tab
                     groups (Personnel) only expand once active, keeping the
@@ -406,6 +478,7 @@ function Dashboard() {
 
         <main className="min-w-0 flex-1">
           {active === "executif" && <ExecutiveSection />}
+          {active === "taches" && <TachesSection />}
           {active === "appro" && <ApproSection />}
           {active === "production" && <ProductionSection />}
           {active === "stock" && <StockSection />}
@@ -1464,6 +1537,158 @@ function ExecutiveSection() {
   );
 }
 
+const STAGE_LABELS: Record<TaskStage, string> = {
+  production: "Production",
+  stock: "Stock",
+  commercialisation: "Commercialisation",
+};
+
+function TachesSection() {
+  const { profile } = useAuth();
+  const { state } = useErp();
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "tasks"), orderBy("createdAt", "asc")),
+      (snap) => setTasks(snap.docs.map((d) => d.data() as Task)),
+      (err) => toast.error(`Synchronisation "tâches" impossible : ${err.message}`),
+    );
+  }, []);
+
+  // A poste-scoped account only sees the stage(s) it actually owns — matches
+  // sprint 17's data scoping. Admin, unscoped, and "Personnalisé" staff see
+  // everything, same as every other section.
+  const visibleStages: TaskStage[] =
+    profile?.poste === "Directeur de Production"
+      ? ["production", "stock"]
+      : profile?.poste === "Chargée de Commercialisation"
+        ? ["commercialisation"]
+        : ["production", "stock", "commercialisation"];
+
+  const complete = async (task: Task) => {
+    if (!profile) return;
+    try {
+      await updateDoc(doc(db, "tasks", task.id), {
+        status: "done",
+        completedAt: new Date().toISOString(),
+        completedBy: profile.uid,
+      });
+      if (task.stage === "production") {
+        createTask("stock", `Ranger en stock le lot issu de ${task.sourceLabel}`, task.sourceLabel);
+        createTask(
+          "commercialisation",
+          `Mettre en vente le lot issu de ${task.sourceLabel}`,
+          task.sourceLabel,
+        );
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Mise à jour impossible : ${err.message}`
+          : "Mise à jour impossible.",
+      );
+    }
+  };
+
+  const pending = tasks.filter((t) => t.status === "pending");
+  const doneCount = tasks.length - pending.length;
+
+  // One-off catch-up for réceptions that predate this feature (or slipped
+  // through for any other reason) — checks every stage=production task
+  // ever created (done or pending, not just currently-pending ones), so a
+  // réception whose task was already completed is correctly left alone;
+  // only réceptions with zero task lineage get backfilled.
+  const backfillMissingTasks = () => {
+    const covered = new Set(
+      tasks.filter((t) => t.stage === "production").map((t) => t.sourceLabel),
+    );
+    const missing = state.approvisionnements.filter((a) => !covered.has(a.numero));
+    if (missing.length === 0) {
+      toast.info("Aucune tâche manquante — tout est déjà suivi.");
+      return;
+    }
+    missing.forEach((a) => {
+      createTask(
+        "production",
+        `Transformer la réception ${a.numero} (${a.qteRecueKg} kg)`,
+        a.numero,
+      );
+    });
+    toast.success(
+      `${missing.length} tâche${missing.length > 1 ? "s" : ""} de production créée${missing.length > 1 ? "s" : ""}.`,
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        eyebrow="Suivi opérationnel"
+        title="Tâches"
+        subtitle="Ce qu'il reste à faire pour faire avancer chaque réception jusqu'à la vente"
+      />
+
+      {profile?.role === "admin" && (
+        <div className="flex justify-end">
+          <button
+            onClick={backfillMissingTasks}
+            className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
+          >
+            Générer les tâches manquantes
+          </button>
+        </div>
+      )}
+
+      <div
+        className={`grid gap-4 ${
+          visibleStages.length === 1
+            ? ""
+            : visibleStages.length === 2
+              ? "sm:grid-cols-2"
+              : "sm:grid-cols-2 xl:grid-cols-3"
+        }`}
+      >
+        {visibleStages.map((stage) => {
+          const stageTasks = pending.filter((t) => t.stage === stage);
+          return (
+            <Card key={stage} title={STAGE_LABELS[stage]}>
+              {stageTasks.length === 0 ? (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  Rien à faire ici pour le moment.
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {stageTasks.map((t) => (
+                    <li
+                      key={t.id}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+                    >
+                      <span className="text-sm text-foreground">{t.title}</span>
+                      <button
+                        onClick={() => complete(t)}
+                        className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
+                      >
+                        Marquer terminé
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+          );
+        })}
+      </div>
+
+      {doneCount > 0 && (
+        <p className="text-center text-xs text-muted-foreground">
+          {doneCount} tâche{doneCount > 1 ? "s" : ""} terminée{doneCount > 1 ? "s" : ""} cette
+          campagne.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ApproSection() {
   const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const p = state.parametres;
@@ -1503,7 +1728,7 @@ function ApproSection() {
                 default: "Conforme",
               },
             ]}
-            onSubmit={(v) =>
+            onSubmit={(v) => {
               addRow("approvisionnements", {
                 id: newId("APP"),
                 numero: v.numero,
@@ -1518,8 +1743,13 @@ function ApproSection() {
                 transport: n(v.transport),
                 autresFrais: n(v.autresFrais),
                 qualite: v.qualite as Qualite,
-              })
-            }
+              });
+              createTask(
+                "production",
+                `Transformer la réception ${v.numero} (${n(v.qteRecueKg)} kg)`,
+                v.numero,
+              );
+            }}
           />
         }
       >
@@ -3589,7 +3819,7 @@ function MarketingSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 02"
+        eyebrow="Module ERP 03"
         title="Marketing & prospection"
         responsable="Chargée de Commercialisation"
       />
@@ -3936,7 +4166,7 @@ function FinancesSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 03"
+        eyebrow="Module ERP 04"
         title="Finances de campagne"
         subtitle="Analyse hors amortissement"
         responsable="Direction Générale"
@@ -4869,7 +5099,7 @@ function PersonnelSection({
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 04"
+        eyebrow="Module ERP 05"
         title="Primes & commissions"
         subtitle="Calcul automatique sur production conforme et encaissements, par personne"
         responsable="Direction Générale"
@@ -5025,7 +5255,7 @@ function KpiSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 05"
+        eyebrow="Module ERP 06"
         title="Indicateurs stratégiques"
         subtitle="Calculés en temps réel à partir des modules ERP"
       />
@@ -5076,7 +5306,7 @@ function ParametresSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 06"
+        eyebrow="Module ERP 07"
         title="Paramètres de gestion"
         subtitle="Hypothèses modifiables, elles recalculent tous les tableaux de bord"
         responsable="Direction Générale"
@@ -5128,7 +5358,7 @@ function RoadmapSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 07"
+        eyebrow="Module ERP 08"
         title="Feuille de route de croissance"
         subtitle="Trajectoire d'industrialisation suivie par la production réelle"
       />
