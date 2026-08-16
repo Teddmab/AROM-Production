@@ -13,6 +13,7 @@ export type ExportSection =
   | "production"
   | "stock"
   | "commercialisation"
+  | "parcours"
   | "marketing"
   | "finances"
   | "kpi";
@@ -46,6 +47,7 @@ export const SECTION_LABELS: Record<ExportSection, { titre: string; responsable:
     titre: "Ventes & commercialisation",
     responsable: "Chargée de commercialisation",
   },
+  parcours: { titre: "Parcours production", responsable: "Direction générale" },
   marketing: { titre: "Marketing & communication", responsable: "Chargée de commercialisation" },
   finances: { titre: "Finances", responsable: "Direction générale" },
 };
@@ -379,6 +381,27 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         ["Taux d'encaissement", pctFormat(c.tauxEncaissement)],
         ["Clients actifs", c.clientsActifs],
         ["Prix moyen vendu", fcFormat(c.prixMoyenVendu)],
+      ],
+    });
+  }
+
+  if (section === "parcours") {
+    const tauxTransformation = c.kgAchetes ? c.kgTransformes / c.kgAchetes : 0;
+    const stockActuel = c.stockPF.reduce((a, s) => a + s.stock, 0);
+    const valeurStockFinis = c.stockPF.reduce((a, s) => a + s.valeur, 0);
+    const tauxVenteStock = c.bouteillesProduites ? c.bouteillesVendues / c.bouteillesProduites : 0;
+    blocks.push({
+      title: "Parcours production",
+      headers: ["Étape", "Indicateur", "Valeur"],
+      rows: [
+        ["01 Approvisionnement", "Ananas reçu", `${n(c.kgAchetes)} kg`],
+        ["02 Production", "Taux de transformation", pctFormat(tauxTransformation)],
+        ["02 Production", "Bouteilles produites", c.bouteillesProduites],
+        ["03 Stock", "Stock actuel", `${stockActuel} bt`],
+        ["03 Stock", "Valeur stock produits finis", fcFormat(valeurStockFinis)],
+        ["04 Commercialisation", "Bouteilles vendues", c.bouteillesVendues],
+        ["04 Commercialisation", "Taux vendu sur produit", pctFormat(tauxVenteStock)],
+        ["04 Commercialisation", "Chiffre d'affaires", fcFormat(c.ca)],
       ],
     });
   }

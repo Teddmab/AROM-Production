@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
   collection,
   deleteDoc,
@@ -15,7 +15,9 @@ import {
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
+import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
 import { ErpProvider, useErp, newId } from "@/lib/erp/store";
+import type { ErpComputed } from "@/lib/erp/engine";
 import { db, storage } from "@/lib/firebase/config";
 import {
   CANAUX,
@@ -25,13 +27,22 @@ import {
   formatDateOnly,
   pctFormat,
   prixFormat,
+  usdFormat,
   type Canal,
   type Format,
   type Qualite,
 } from "@/lib/erp/model";
 import { ExportBar } from "@/components/erp/ExportBar";
+import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -61,6 +72,8 @@ type SectionId =
   | "production"
   | "stock"
   | "commercialisation"
+  | "promotion"
+  | "parcours"
   | "marketing"
   | "finances"
   | "personnel"
@@ -68,19 +81,60 @@ type SectionId =
   | "parametres"
   | "roadmap";
 
-const SECTIONS: { id: SectionId; label: string; num: string }[] = [
+const SECTIONS: {
+  id: SectionId;
+  label: string;
+  num: string;
+  subItems?: { id: string; label: string; isSection?: boolean }[];
+  /** Sub-items always show (not just while this section is active) — for
+   * groups where the members are full independent pages people need to
+   * reach directly, not in-page tabs reached by visiting the parent first. */
+  alwaysExpanded?: boolean;
+}[] = [
   { id: "executif", label: "Exécutif", num: "00" },
-  { id: "appro", label: "Approvisionnement", num: "01" },
-  { id: "production", label: "Production", num: "02" },
-  { id: "stock", label: "Stock", num: "03" },
-  { id: "commercialisation", label: "Commercialisation", num: "04" },
-  { id: "marketing", label: "Marketing", num: "05" },
-  { id: "finances", label: "Finances", num: "06" },
-  { id: "personnel", label: "Primes & personnel", num: "07" },
-  { id: "kpi", label: "KPI stratégiques", num: "08" },
-  { id: "parametres", label: "Paramètres ERP", num: "09" },
-  { id: "roadmap", label: "Feuille de route", num: "10" },
+  {
+    id: "parcours",
+    label: "Parcours production",
+    num: "01",
+    alwaysExpanded: true,
+    subItems: [
+      { id: "appro", label: "Approvisionnement", isSection: true },
+      { id: "production", label: "Production", isSection: true },
+      { id: "stock", label: "Stock", isSection: true },
+      { id: "commercialisation", label: "Commercialisation", isSection: true },
+      { id: "promotion", label: "Promotion", isSection: true },
+    ],
+  },
+  { id: "marketing", label: "Marketing", num: "02" },
+  { id: "finances", label: "Finances", num: "03" },
+  {
+    id: "personnel",
+    label: "Primes & personnel",
+    num: "04",
+    subItems: [
+      { id: "invitations", label: "Invitations" },
+      { id: "equipe", label: "Équipe" },
+      { id: "boutiques", label: "Boutiques partenaires" },
+      { id: "primes-production", label: "Primes production" },
+      { id: "primes-commercial", label: "Primes commercial" },
+    ],
+  },
+  { id: "kpi", label: "KPI stratégiques", num: "05" },
+  { id: "parametres", label: "Paramètres ERP", num: "06" },
+  { id: "roadmap", label: "Feuille de route", num: "07" },
 ];
+
+/**
+ * Flat list of every real section, including ones nested as a group's
+ * `subItems` (Parcours production's Approvisionnement/Production/Stock/
+ * Commercialisation) — the sidebar groups them, but a manual "menus"
+ * picker (InviteCard's "Personnalisé" poste) still needs to offer every
+ * section individually, not just the top-level groups.
+ */
+const ALL_MENU_OPTIONS: { id: string; label: string }[] = SECTIONS.flatMap((s) => [
+  { id: s.id, label: s.label },
+  ...(s.subItems?.filter((si) => si.isSection).map((si) => ({ id: si.id, label: si.label })) ?? []),
+]);
 
 function DashboardRoute() {
   return (
@@ -93,10 +147,26 @@ function DashboardRoute() {
 }
 
 function Dashboard() {
-  const { profile, signOutUser } = useAuth();
-  const visibleSections = SECTIONS.filter((s) => canAccessMenu(profile, s.id));
+  const { profile, signOutUser, updateOwnProfile, resetPassword } = useAuth();
+  const [showProfile, setShowProfile] = useState(false);
+  // A group (e.g. Parcours production) stays visible if the account can open
+  // the group page itself OR at least one of its member sections — a
+  // poste-scoped "Directeur de Production" account has appro/production/stock
+  // in `menus` but not "parcours" itself, and still needs to reach them.
+  const visibleSections = SECTIONS.filter(
+    (s) =>
+      canAccessMenu(profile, s.id) ||
+      s.subItems?.some((si) => si.isSection && canAccessMenu(profile, si.id)),
+  );
   const [active, setActive] = useState<SectionId>(visibleSections[0]?.id ?? "executif");
-  const { computed } = useErp();
+  // Keyed by section id, one entry per tabbed section — defaults to that
+  // section's first tab the first time it's visited.
+  const [activeSubTab, setActiveSubTab] = useState<Record<string, string>>({});
+  const goTo = (sectionId: SectionId, subTabId?: string) => {
+    setActive(sectionId);
+    if (subTabId) setActiveSubTab((s) => ({ ...s, [sectionId]: subTabId }));
+  };
+  const { computed, fcPerUsd } = useErp();
 
   return (
     <div className="min-h-screen">
@@ -132,6 +202,11 @@ function Dashboard() {
               <p className="text-sm font-semibold text-primary">
                 {fcFormat(computed.encaissements)}
               </p>
+              {usdFormat(computed.encaissements, fcPerUsd) && (
+                <p className="text-[10px] text-muted-foreground">
+                  {usdFormat(computed.encaissements, fcPerUsd)}
+                </p>
+              )}
             </div>
             <Divider />
             <div>
@@ -147,14 +222,17 @@ function Dashboard() {
           </span>
 
           <div className="hidden items-center gap-3 sm:flex">
-            <div className="text-right leading-tight">
+            <button
+              onClick={() => setShowProfile(true)}
+              className="text-right leading-tight transition hover:opacity-70"
+            >
               <p className="text-xs font-semibold text-primary">
                 {profile?.displayName || profile?.email}
               </p>
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
                 {profile?.role}
               </p>
-            </div>
+            </button>
             <button
               onClick={() => signOutUser()}
               className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:text-primary"
@@ -165,28 +243,136 @@ function Dashboard() {
         </div>
       </header>
 
+      {showProfile && profile && (
+        <RecordDetailModal
+          title="Mon profil"
+          subtitle={profile.displayName || profile.email}
+          onClose={() => setShowProfile(false)}
+          onSave={(patch) =>
+            updateOwnProfile({ displayName: String(patch.displayName) }).catch((err) =>
+              toast.error(
+                err instanceof Error
+                  ? `Mise à jour impossible : ${err.message}`
+                  : "Mise à jour impossible.",
+              ),
+            )
+          }
+          fields={[
+            {
+              label: "Nom affiché",
+              value: profile.displayName || "—",
+              description: "Visible par les autres comptes admin/staff.",
+              edit: { key: "displayName", type: "text", value: profile.displayName ?? "" },
+            },
+            {
+              label: "Email",
+              value: profile.email,
+              description: "Adresse de connexion — non modifiable ici.",
+            },
+            {
+              label: "Rôle",
+              value: profile.role === "admin" ? "Admin" : "Staff",
+              description: "Défini à la création du compte — non modifiable ici.",
+            },
+            ...(profile.poste
+              ? [
+                  {
+                    label: "Poste",
+                    value: profile.poste,
+                    description:
+                      "Détermine les sections accessibles — modifiable par un admin depuis Primes & personnel.",
+                  },
+                ]
+              : []),
+            {
+              label: "Mot de passe",
+              value: (
+                <button
+                  onClick={() =>
+                    resetPassword(profile.email)
+                      .then(() => toast.success("Email de réinitialisation envoyé."))
+                      .catch((err) =>
+                        toast.error(
+                          err instanceof Error
+                            ? `Envoi impossible : ${err.message}`
+                            : "Envoi impossible.",
+                        ),
+                      )
+                  }
+                  className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary"
+                >
+                  Recevoir un lien de réinitialisation
+                </button>
+              ),
+              description: "Un email de réinitialisation sera envoyé à votre adresse.",
+            },
+          ]}
+        />
+      )}
+
       <div className="mx-auto flex max-w-[1400px] flex-col gap-8 px-6 py-8 lg:flex-row">
         <aside className="sticky top-24 hidden h-fit w-56 shrink-0 flex-col gap-1 lg:flex">
-          {visibleSections.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setActive(s.id)}
-              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                active === s.id
-                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/15"
-                  : "text-foreground/70 hover:bg-primary/5 hover:text-primary"
-              }`}
-            >
-              <span
-                className={`grid h-7 w-7 place-items-center rounded-lg font-display text-[11px] font-bold ${
-                  active === s.id ? "bg-gold text-primary" : "bg-primary/5 text-primary"
-                }`}
-              >
-                {s.num}
-              </span>
-              <span className="font-medium">{s.label}</span>
-            </button>
-          ))}
+          {visibleSections.map((s) => {
+            const canOpen = canAccessMenu(profile, s.id);
+            const visibleSubItems = s.subItems?.filter(
+              (si) => !si.isSection || canAccessMenu(profile, si.id),
+            );
+            return (
+              <div key={s.id}>
+                <button
+                  onClick={canOpen ? () => setActive(s.id) : undefined}
+                  className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+                    active === s.id
+                      ? "bg-primary text-primary-foreground shadow-lg shadow-primary/15"
+                      : canOpen
+                        ? "text-foreground/70 hover:bg-primary/5 hover:text-primary"
+                        : "cursor-default text-foreground/50"
+                  }`}
+                >
+                  <span
+                    className={`grid h-7 w-7 place-items-center rounded-lg font-display text-[11px] font-bold ${
+                      active === s.id ? "bg-gold text-primary" : "bg-primary/5 text-primary"
+                    }`}
+                  >
+                    {s.num}
+                  </span>
+                  <span className="font-medium">{s.label}</span>
+                </button>
+                {/* Shortcut access to this section's members. In-page-tab
+                    groups (Personnel) only expand once active, keeping the
+                    sidebar compact; `alwaysExpanded` groups (Parcours
+                    production) list their member pages permanently, since
+                    those are full pages people need to reach directly, not
+                    tabs reached by visiting the parent first. */}
+                {visibleSubItems &&
+                  visibleSubItems.length > 0 &&
+                  (s.alwaysExpanded || active === s.id) && (
+                    <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border pl-3">
+                      {visibleSubItems.map((sub) => {
+                        const isActiveSub = sub.isSection
+                          ? active === sub.id
+                          : (activeSubTab[s.id] ?? s.subItems![0].id) === sub.id;
+                        return (
+                          <button
+                            key={sub.id}
+                            onClick={() =>
+                              sub.isSection ? setActive(sub.id as SectionId) : goTo(s.id, sub.id)
+                            }
+                            className={`rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                              isActiveSub
+                                ? "font-semibold text-primary"
+                                : "text-muted-foreground hover:text-primary"
+                            }`}
+                          >
+                            {sub.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+              </div>
+            );
+          })}
         </aside>
 
         <div className="lg:hidden">
@@ -195,11 +381,23 @@ function Dashboard() {
             onChange={(e) => setActive(e.target.value as SectionId)}
             className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-primary"
           >
-            {visibleSections.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.num} · {s.label}
-              </option>
-            ))}
+            {visibleSections.flatMap((s) => [
+              ...(canAccessMenu(profile, s.id)
+                ? [
+                    <option key={s.id} value={s.id}>
+                      {s.num} · {s.label}
+                    </option>,
+                  ]
+                : []),
+              ...(s.subItems
+                ?.filter((si) => si.isSection && canAccessMenu(profile, si.id))
+                .map((si) => (
+                  <option key={si.id} value={si.id}>
+                    {"　"}
+                    {si.label}
+                  </option>
+                )) ?? []),
+            ])}
           </select>
         </div>
 
@@ -208,10 +406,22 @@ function Dashboard() {
           {active === "appro" && <ApproSection />}
           {active === "production" && <ProductionSection />}
           {active === "stock" && <StockSection />}
-          {active === "commercialisation" && <CommercialisationSection />}
+          {active === "commercialisation" && (
+            <CommercialisationSection
+              activeTab={activeSubTab.commercialisation ?? "catalogue"}
+              onTabChange={(v) => setActiveSubTab((s) => ({ ...s, commercialisation: v }))}
+            />
+          )}
+          {active === "promotion" && <PromotionSection />}
+          {active === "parcours" && <ParcoursSection onNavigate={setActive} />}
           {active === "marketing" && <MarketingSection />}
           {active === "finances" && <FinancesSection />}
-          {active === "personnel" && <PersonnelSection />}
+          {active === "personnel" && (
+            <PersonnelSection
+              activeTab={activeSubTab.personnel ?? "invitations"}
+              onTabChange={(v) => setActiveSubTab((s) => ({ ...s, personnel: v }))}
+            />
+          )}
           {active === "kpi" && <KpiSection />}
           {active === "parametres" && <ParametresSection />}
           {active === "roadmap" && <RoadmapSection />}
@@ -285,44 +495,87 @@ function KpiTile({
   realise,
   unit,
   taux,
+  description,
+  breakdown,
+  secondary,
 }: {
   label: string;
   objectif?: string | number;
   realise?: string | number;
   unit?: string;
   taux?: number;
+  /** When set, the tile is clickable and opens an explanation modal — what this figure is and where it comes from. */
+  description?: string;
+  /** The real calculation behind this figure, step by step — see DetailField. */
+  breakdown?: DetailField["breakdown"];
+  /** Small muted line under the value — the USD-equivalent for monetary summary tiles. */
+  secondary?: string | null;
 }) {
+  const [showDetail, setShowDetail] = useState(false);
   const pct = typeof taux === "number" ? Math.max(0, Math.min(100, Math.round(taux * 100))) : null;
   return (
-    <div className="rounded-2xl border border-border bg-card p-5">
-      <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
-      <div className="mt-3 flex items-end justify-between gap-2">
-        <p className="font-display text-2xl font-bold text-primary md:text-3xl">
-          {realise ?? "-"}
-          {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
+    <>
+      <div
+        onClick={description ? () => setShowDetail(true) : undefined}
+        className={`rounded-2xl border border-border bg-card p-5 ${description ? "cursor-pointer transition hover:border-primary/40" : ""}`}
+      >
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {label}
         </p>
-        {objectif !== undefined && (
-          <p className="text-[11px] text-muted-foreground">
-            Obj.{" "}
-            <span className="font-semibold text-foreground">
-              {objectif}
-              {unit ? ` ${unit}` : ""}
-            </span>
+        <div className="mt-3 flex items-end justify-between gap-2">
+          <p className="font-display text-2xl font-bold text-primary md:text-3xl">
+            {realise ?? "-"}
+            {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
           </p>
+          {objectif !== undefined && (
+            <p className="text-[11px] text-muted-foreground">
+              Obj.{" "}
+              <span className="font-semibold text-foreground">
+                {objectif}
+                {unit ? ` ${unit}` : ""}
+              </span>
+            </p>
+          )}
+        </div>
+        {secondary && <p className="mt-0.5 text-xs text-muted-foreground">{secondary}</p>}
+        {pct !== null && (
+          <div className="mt-3">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-primary to-leaf"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <p className="mt-1 text-right text-[10px] font-semibold text-muted-foreground">
+              {pct}%
+            </p>
+          </div>
         )}
       </div>
-      {pct !== null && (
-        <div className="mt-3">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-primary to-leaf"
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-          <p className="mt-1 text-right text-[10px] font-semibold text-muted-foreground">{pct}%</p>
-        </div>
+      {showDetail && description && (
+        <RecordDetailModal
+          title={label}
+          onClose={() => setShowDetail(false)}
+          fields={[
+            {
+              label: "Valeur",
+              value: `${realise ?? "-"}${unit ? ` ${unit}` : ""}`,
+              description,
+              breakdown,
+            },
+            ...(objectif !== undefined
+              ? [
+                  {
+                    label: "Objectif",
+                    value: `${objectif}${unit ? ` ${unit}` : ""}`,
+                    description: "Cible définie dans Paramètres ERP pour la campagne en cours.",
+                  },
+                ]
+              : []),
+          ]}
+        />
       )}
-    </div>
+    </>
   );
 }
 
@@ -330,10 +583,13 @@ function Table({
   headers,
   rows,
   empty = "Aucune saisie enregistrée",
+  onRowClick,
 }: {
   headers: string[];
   rows: (string | number | ReactNode)[][];
   empty?: string;
+  /** When set, every row opens a detail modal — see RecordDetailModal. */
+  onRowClick?: (index: number) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-xl border border-border">
@@ -356,7 +612,11 @@ function Table({
             </tr>
           ) : (
             rows.map((r, i) => (
-              <tr key={i} className="hover:bg-primary/5">
+              <tr
+                key={i}
+                onClick={onRowClick ? () => onRowClick(i) : undefined}
+                className={`hover:bg-primary/5 ${onRowClick ? "cursor-pointer" : ""}`}
+              >
                 {r.map((c, j) => (
                   <td key={j} className="whitespace-nowrap px-3 py-2.5 align-middle">
                     {c === "" || c === null || c === undefined ? (
@@ -480,7 +740,7 @@ function EntryForm({
 
 const n = (v: string | undefined) => Number(v ?? 0) || 0;
 
-function DeleteButton({ onClick }: { onClick: () => void }) {
+function DeleteButton({ onClick }: { onClick: (e: MouseEvent) => void }) {
   return (
     <button
       onClick={onClick}
@@ -492,11 +752,274 @@ function DeleteButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * Real, current-number calculation trails for every aggregated figure
+ * shown across the dashboard — not just the abstract formula, the actual
+ * chain from Approvisionnement/Production/Commercialisation down to the
+ * final value. Built once per render from `computed` (already the single
+ * source every KPI/table already reads from) and reused everywhere that
+ * figure appears, so Exécutif, Finances, KPI stratégiques, and the
+ * per-section KPI tiles never show a different breakdown for the same
+ * number.
+ */
+function buildBreakdowns(computed: ErpComputed) {
+  const totalCouts: DetailField["breakdown"] = [
+    { label: "Achats ananas (Approvisionnement)", value: fcFormat(computed.coutAchats) },
+    { label: "Transport et frais (Approvisionnement)", value: fcFormat(computed.coutTransport) },
+    { label: "Autres charges d'exploitation (Finances)", value: fcFormat(computed.autresCharges) },
+    { label: "Marketing (Marketing)", value: fcFormat(computed.coutMarketing) },
+    { label: "= Total coûts", value: fcFormat(computed.totalCouts) },
+  ];
+  const resultatBrut: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires (Commercialisation)", value: fcFormat(computed.ca) },
+    { label: "− Total coûts", value: `− ${fcFormat(computed.totalCouts)}` },
+    { label: "= Résultat brut", value: fcFormat(computed.resultatBrut) },
+  ];
+  const margeBrute: DetailField["breakdown"] = [
+    { label: "Résultat brut", value: fcFormat(computed.resultatBrut) },
+    { label: "÷ Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "= Marge brute", value: pctFormat(computed.margeBrute) },
+  ];
+  const rendementSurCouts: DetailField["breakdown"] = [
+    { label: "Résultat brut", value: fcFormat(computed.resultatBrut) },
+    { label: "÷ Total coûts", value: fcFormat(computed.totalCouts) },
+    { label: "= Rendement sur coûts", value: pctFormat(computed.rendementSurCouts) },
+  ];
+  const coutMoyenBouteille: DetailField["breakdown"] = [
+    { label: "Total coûts", value: fcFormat(computed.totalCouts) },
+    { label: "÷ Bouteilles produites (Production)", value: String(computed.bouteillesProduites) },
+    { label: "= Coût moyen / bouteille", value: fcFormat(computed.coutMoyenBouteille) },
+  ];
+  const prixMoyenVendu: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires", value: fcFormat(computed.ca) },
+    {
+      label: "÷ Bouteilles vendues (Commercialisation)",
+      value: String(computed.bouteillesVendues),
+    },
+    { label: "= Prix moyen vendu", value: fcFormat(computed.prixMoyenVendu) },
+  ];
+  const margeUnitaire: DetailField["breakdown"] = [
+    { label: "Prix moyen vendu", value: fcFormat(computed.prixMoyenVendu) },
+    { label: "− Coût moyen / bouteille", value: `− ${fcFormat(computed.coutMoyenBouteille)}` },
+    { label: "= Marge unitaire", value: fcFormat(computed.margeUnitaire) },
+  ];
+  const tauxEncaissement: DetailField["breakdown"] = [
+    { label: "Encaissements (Commercialisation)", value: fcFormat(computed.encaissements) },
+    { label: "÷ Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "= Taux d'encaissement", value: pctFormat(computed.tauxEncaissement) },
+  ];
+  const creances: DetailField["breakdown"] = [
+    { label: "Chiffre d'affaires", value: fcFormat(computed.ca) },
+    { label: "− Encaissements", value: `− ${fcFormat(computed.encaissements)}` },
+    { label: "= Créances clients", value: fcFormat(computed.creances) },
+  ];
+  const rendementMoyen: DetailField["breakdown"] = [
+    {
+      label: "Volume conditionné (Production, tous lots)",
+      value: `${(computed.volumeJus - computed.pertesL).toFixed(2)} L`,
+    },
+    { label: "÷ Volume de jus (Production)", value: `${computed.volumeJus.toFixed(2)} L` },
+    { label: "= Rendement volume", value: pctFormat(computed.rendementMoyen) },
+  ];
+  const tauxPertes: DetailField["breakdown"] = [
+    { label: "Pertes (Production)", value: `${computed.pertesL.toFixed(2)} L` },
+    { label: "÷ Volume de jus (Production)", value: `${computed.volumeJus.toFixed(2)} L` },
+    { label: "= Taux de pertes", value: pctFormat(computed.tauxPertes) },
+  ];
+  const tauxTransformation: DetailField["breakdown"] = computed.kgAchetes
+    ? [
+        { label: "Kg transformés (Production)", value: `${Math.round(computed.kgTransformes)} kg` },
+        {
+          label: "÷ Kg achetés (Approvisionnement)",
+          value: `${Math.round(computed.kgAchetes)} kg`,
+        },
+        {
+          label: "= Taux de transformation",
+          value: pctFormat(computed.kgTransformes / computed.kgAchetes),
+        },
+      ]
+    : [];
+  const tauxVente: DetailField["breakdown"] = computed.bouteillesProduites
+    ? [
+        {
+          label: "Bouteilles vendues (Commercialisation)",
+          value: String(computed.bouteillesVendues),
+        },
+        {
+          label: "÷ Bouteilles produites (Production)",
+          value: String(computed.bouteillesProduites),
+        },
+        {
+          label: "= Taux de vente",
+          value: pctFormat(computed.bouteillesVendues / computed.bouteillesProduites),
+        },
+      ]
+    : [];
+  const stockActuel: DetailField["breakdown"] = [
+    {
+      label: "Bouteilles produites (Production)",
+      value: String(computed.stockPF.reduce((a, s) => a + s.produites, 0)),
+    },
+    {
+      label: "− Bouteilles vendues (Commercialisation)",
+      value: `− ${computed.stockPF.reduce((a, s) => a + s.vendues, 0)}`,
+    },
+    {
+      label: "= Stock actuel",
+      value: String(computed.stockPF.reduce((a, s) => a + s.stock, 0)),
+    },
+  ];
+  return {
+    totalCouts,
+    resultatBrut,
+    margeBrute,
+    rendementSurCouts,
+    coutMoyenBouteille,
+    prixMoyenVendu,
+    margeUnitaire,
+    tauxEncaissement,
+    creances,
+    rendementMoyen,
+    tauxPertes,
+    tauxTransformation,
+    tauxVente,
+    stockActuel,
+  };
+}
+
 /* ---------- Sections ---------- */
 
+const trendChartConfig = {
+  bouteilles: { label: "Bouteilles produites", color: "var(--primary)" },
+  ca: { label: "Chiffre d'affaires (FC)", color: "var(--gold)" },
+} satisfies ChartConfig;
+
+/**
+ * The one real chart in the dashboard (recharts was installed but never
+ * rendered anywhere) — production volume and sales revenue by date, so
+ * the Exécutif page (every role's landing view) has an actual trend to
+ * look at instead of only number tiles.
+ */
+function TrendChart({
+  production,
+  ventes,
+}: {
+  production: { date: string; totalBouteilles: number }[];
+  ventes: { date: string; montantBrut: number }[];
+}) {
+  const byDate = new Map<string, { date: string; bouteilles: number; ca: number }>();
+  const bucket = (date: string) => {
+    if (!byDate.has(date)) byDate.set(date, { date, bouteilles: 0, ca: 0 });
+    return byDate.get(date)!;
+  };
+  production.forEach((r) => {
+    bucket(r.date).bouteilles += r.totalBouteilles;
+  });
+  ventes.forEach((r) => {
+    bucket(r.date).ca += r.montantBrut;
+  });
+  const data = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+  if (data.length === 0) {
+    return (
+      <p className="py-10 text-center text-sm text-muted-foreground">
+        Pas encore de production ou de ventes à afficher.
+      </p>
+    );
+  }
+
+  return (
+    <ChartContainer config={trendChartConfig} className="aspect-auto h-72 w-full">
+      <AreaChart data={data} margin={{ left: 4, right: 4 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis
+          dataKey="date"
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(v) => formatDateOnly(v)}
+        />
+        <ChartTooltip
+          content={<ChartTooltipContent labelFormatter={(v) => formatDateOnly(String(v))} />}
+        />
+        <Area
+          dataKey="bouteilles"
+          type="monotone"
+          fill="var(--color-bouteilles)"
+          fillOpacity={0.15}
+          stroke="var(--color-bouteilles)"
+        />
+        <Area
+          dataKey="ca"
+          type="monotone"
+          fill="var(--color-ca)"
+          fillOpacity={0.15}
+          stroke="var(--color-ca)"
+        />
+      </AreaChart>
+    </ChartContainer>
+  );
+}
+
 function ExecutiveSection() {
-  const { computed, state } = useErp();
+  const { computed, state, fcPerUsd } = useErp();
   const p = state.parametres;
+  const [selectedObjectif, setSelectedObjectif] = useState<
+    (typeof computed.objectifs)[number] | null
+  >(null);
+  const [selectedFinRow, setSelectedFinRow] = useState<{
+    label: string;
+    value: string;
+    lecture: string;
+    breakdown?: DetailField["breakdown"];
+  } | null>(null);
+  const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
+  const finRows = [
+    {
+      label: "Chiffre d'affaires",
+      value: fcWithUsd(computed.ca),
+      lecture: "Brut — calculé automatiquement, somme des ventes.",
+    },
+    {
+      label: "Encaissements",
+      value: fcWithUsd(computed.encaissements),
+      lecture: "Trésorerie reçue — calculé automatiquement.",
+    },
+    {
+      label: "Créances clients",
+      value: fcWithUsd(computed.creances),
+      lecture: "À recouvrer — calculé automatiquement : CA − encaissements.",
+      breakdown: breakdowns.creances,
+    },
+    {
+      label: "Total coûts",
+      value: fcWithUsd(computed.totalCouts),
+      lecture: "Exploitation — calculé automatiquement, voir le détail dans Finances.",
+      breakdown: breakdowns.totalCouts,
+    },
+    {
+      label: "Résultat brut",
+      value: fcWithUsd(computed.resultatBrut),
+      lecture: "Avant impôt et amortissement — calculé automatiquement : CA − coûts.",
+      breakdown: breakdowns.resultatBrut,
+    },
+    {
+      label: "Marge brute",
+      value: pctFormat(computed.margeBrute),
+      lecture: "Résultat / CA — calculé automatiquement.",
+      breakdown: breakdowns.margeBrute,
+    },
+    {
+      label: "Rendement sur coûts",
+      value: pctFormat(computed.rendementSurCouts),
+      lecture: "Résultat / coûts — calculé automatiquement.",
+      breakdown: breakdowns.rendementSurCouts,
+    },
+  ];
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -504,7 +1027,6 @@ function ExecutiveSection() {
         title="Vue générale de la campagne"
         subtitle="Direction Générale, données consolidées depuis l'ERP"
       />
-      <ExportBar section="executif" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -513,6 +1035,7 @@ function ExecutiveSection() {
           realise={Math.round(computed.kgAchetes)}
           unit="kg"
           taux={computed.kgAchetes / p.objectifAnanasKg}
+          description="Calculé automatiquement : somme des quantités reçues (Approvisionnement)."
         />
         <KpiTile
           label="Ananas transformés"
@@ -520,37 +1043,59 @@ function ExecutiveSection() {
           realise={Math.round(computed.kgTransformes)}
           unit="kg"
           taux={computed.kgTransformes / p.objectifAnanasKg}
+          description="Calculé automatiquement : somme des kg utilisés sur tous les lots (Production)."
         />
         <KpiTile
           label="Bouteilles produites"
           objectif={p.objectifBouteilles}
           realise={computed.bouteillesProduites}
           taux={computed.bouteillesProduites / p.objectifBouteilles}
+          description="Calculé automatiquement : somme des bouteilles conditionnées (500/330/300 ml) sur tous les lots (Production)."
         />
         <KpiTile
           label="Bouteilles vendues"
           objectif={p.objectifBouteilles}
           realise={computed.bouteillesVendues}
           taux={computed.bouteillesVendues / p.objectifBouteilles}
+          description="Calculé automatiquement : somme des quantités du Journal des ventes (Commercialisation)."
         />
-        <KpiTile label="Chiffre d'affaires" realise={fcFormat(computed.ca)} />
-        <KpiTile label="Résultat brut" realise={fcFormat(computed.resultatBrut)} />
+        <KpiTile
+          label="Chiffre d'affaires"
+          realise={fcFormat(computed.ca)}
+          secondary={usdFormat(computed.ca, fcPerUsd)}
+          description="Calculé automatiquement : somme des montants bruts de toutes les ventes."
+        />
+        <KpiTile
+          label="Résultat brut"
+          realise={fcFormat(computed.resultatBrut)}
+          secondary={usdFormat(computed.resultatBrut, fcPerUsd)}
+          description="Calculé automatiquement : chiffre d'affaires − total des coûts d'exploitation (voir Finances)."
+          breakdown={breakdowns.resultatBrut}
+        />
         <KpiTile
           label="Clients actifs"
           objectif={p.objectifClients}
           realise={computed.clientsActifs}
           taux={computed.clientsActifs / p.objectifClients}
+          description="Calculé automatiquement : nombre de clients distincts ayant au moins une vente enregistrée."
         />
         <KpiTile
           label="Marge brute"
           objectif={pctFormat(p.objectifMargeBrute)}
           realise={pctFormat(computed.margeBrute)}
           taux={computed.margeBrute / p.objectifMargeBrute}
+          description="Calculé automatiquement : résultat brut / chiffre d'affaires."
+          breakdown={breakdowns.margeBrute}
         />
       </div>
 
+      <Card title="Évolution de la campagne">
+        <TrendChart production={computed.production} ventes={computed.ventes} />
+      </Card>
+
       <Card title="Synthèse par domaine (objectifs ERP)">
         <Table
+          onRowClick={(i) => setSelectedObjectif(computed.objectifs[i])}
           headers={["Indicateur", "Objectif", "Réalisé", "Taux", "Responsable", "Statut"]}
           rows={computed.objectifs.map((o) => [
             o.label,
@@ -565,27 +1110,79 @@ function ExecutiveSection() {
         />
       </Card>
 
-      <Card title="Synthèse financière (hors amortissement)">
-        <Table
-          headers={["Indicateur", "Valeur", "Lecture"]}
-          rows={[
-            ["Chiffre d'affaires", fcFormat(computed.ca), "Brut"],
-            ["Encaissements", fcFormat(computed.encaissements), "Trésorerie reçue"],
-            ["Créances clients", fcFormat(computed.creances), "À recouvrer"],
-            ["Total coûts", fcFormat(computed.totalCouts), "Exploitation"],
-            ["Résultat brut", fcFormat(computed.resultatBrut), "Avant impôt et amortissement"],
-            ["Marge brute", pctFormat(computed.margeBrute), "Résultat / CA"],
-            ["Rendement sur coûts", pctFormat(computed.rendementSurCouts), "Résultat / coûts"],
+      {selectedObjectif && (
+        <RecordDetailModal
+          title={selectedObjectif.label}
+          subtitle={`Responsable · ${selectedObjectif.responsable}`}
+          onClose={() => setSelectedObjectif(null)}
+          fields={[
+            {
+              label: "Objectif",
+              value:
+                selectedObjectif.unite === "%"
+                  ? pctFormat(selectedObjectif.objectif)
+                  : `${selectedObjectif.objectif} ${selectedObjectif.unite === "kg" ? "kg" : ""}`.trim(),
+              description: "Cible définie dans Paramètres ERP pour la campagne en cours.",
+            },
+            {
+              label: "Réalisé",
+              value:
+                selectedObjectif.unite === "%"
+                  ? pctFormat(selectedObjectif.realise)
+                  : Math.round(selectedObjectif.realise * 100) / 100,
+              description:
+                "Calculé automatiquement à partir des collections du module concerné (Approvisionnement, Production, Ventes, etc.).",
+            },
+            {
+              label: "Taux",
+              value: pctFormat(selectedObjectif.taux),
+              description: "Calculé automatiquement : réalisé / objectif.",
+            },
+            {
+              label: "Statut",
+              value: selectedObjectif.statut,
+              description:
+                "Dérivé automatiquement du taux — aucune ligne Firestore unique, rien à modifier ici.",
+            },
           ]}
         />
+      )}
+
+      <Card title="Synthèse financière (hors amortissement)">
+        <Table
+          onRowClick={(i) => setSelectedFinRow(finRows[i])}
+          headers={["Indicateur", "Valeur", "Lecture"]}
+          rows={finRows.map((r) => [r.label, r.value, r.lecture])}
+        />
       </Card>
+
+      {selectedFinRow && (
+        <RecordDetailModal
+          title={selectedFinRow.label}
+          onClose={() => setSelectedFinRow(null)}
+          fields={[
+            {
+              label: "Valeur",
+              value: selectedFinRow.value,
+              description: selectedFinRow.lecture,
+              breakdown: selectedFinRow.breakdown,
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="executif" />
     </div>
   );
 }
 
 function ApproSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const p = state.parametres;
+  const [selectedAppro, setSelectedAppro] = useState<(typeof computed.appro)[number] | null>(null);
+  const [selectedProducteur, setSelectedProducteur] = useState<
+    (typeof state.producteurs)[number] | null
+  >(null);
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -593,7 +1190,6 @@ function ApproSection() {
         title="Approvisionnement"
         responsable="Directeur de Production"
       />
-      <ExportBar section="appro" />
 
       <Card
         title="Réceptions fournisseurs"
@@ -640,6 +1236,7 @@ function ApproSection() {
         }
       >
         <Table
+          onRowClick={(i) => setSelectedAppro(computed.appro[i])}
           headers={[
             "N°",
             "Date",
@@ -666,10 +1263,125 @@ function ApproSection() {
             fcFormat(r.transport + r.autresFrais),
             fcFormat(r.coutTotal),
             r.qualite,
-            <DeleteButton onClick={() => removeRow("approvisionnements", r.id)} />,
+            <DeleteButton
+              onClick={(e) => {
+                e.stopPropagation();
+                removeRow("approvisionnements", r.id);
+              }}
+            />,
           ])}
         />
       </Card>
+
+      {selectedAppro && (
+        <RecordDetailModal
+          title={`Réception ${selectedAppro.numero}`}
+          subtitle={selectedAppro.date}
+          onClose={() => setSelectedAppro(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "approvisionnements", selectedAppro.id), patch);
+            setSelectedAppro(null);
+          }}
+          onDelete={() => {
+            removeRow("approvisionnements", selectedAppro.id);
+            setSelectedAppro(null);
+          }}
+          fields={[
+            {
+              label: "N° réception",
+              value: selectedAppro.numero,
+              description: "Identifiant attribué à cette réception de marchandise.",
+              edit: { key: "numero", type: "text", value: selectedAppro.numero },
+            },
+            {
+              label: "Date",
+              value: selectedAppro.date,
+              description:
+                "Date de la réception, saisie dans le formulaire « Nouvelle réception ».",
+              edit: { key: "date", type: "date", value: selectedAppro.date },
+            },
+            {
+              label: "ID producteur",
+              value: selectedAppro.idProducteur,
+              description:
+                "Identifiant du producteur fournisseur, lié au Registre des producteurs.",
+              edit: { key: "idProducteur", type: "text", value: selectedAppro.idProducteur },
+            },
+            {
+              label: "Fournisseur",
+              value: selectedAppro.fournisseur,
+              description: "Nom du fournisseur ayant livré cette réception.",
+              edit: { key: "fournisseur", type: "text", value: selectedAppro.fournisseur },
+            },
+            {
+              label: "Village",
+              value: selectedAppro.village,
+              description: "Village d'origine de la livraison.",
+              edit: { key: "village", type: "text", value: selectedAppro.village },
+            },
+            {
+              label: "Quantité commandée",
+              value: `${selectedAppro.qteCommandeeKg} kg`,
+              description: "Quantité commandée auprès du producteur, en kilogrammes.",
+              edit: {
+                key: "qteCommandeeKg",
+                type: "number",
+                value: String(selectedAppro.qteCommandeeKg),
+              },
+            },
+            {
+              label: "Quantité reçue",
+              value: `${selectedAppro.qteRecueKg} kg`,
+              description: "Quantité effectivement reçue et pesée à la livraison, en kilogrammes.",
+              edit: { key: "qteRecueKg", type: "number", value: String(selectedAppro.qteRecueKg) },
+            },
+            {
+              label: "Prix / kg",
+              value: fcFormat(selectedAppro.prixKg),
+              description: "Prix négocié par kilogramme, en FC.",
+              edit: { key: "prixKg", type: "number", value: String(selectedAppro.prixKg) },
+            },
+            {
+              label: "Transport",
+              value: fcFormat(selectedAppro.transport),
+              description: "Coût du transport de la marchandise jusqu'au site, en FC.",
+              edit: { key: "transport", type: "number", value: String(selectedAppro.transport) },
+            },
+            {
+              label: "Autres frais",
+              value: fcFormat(selectedAppro.autresFrais),
+              description: "Autres frais liés à la réception (manutention, etc.), en FC.",
+              edit: {
+                key: "autresFrais",
+                type: "number",
+                value: String(selectedAppro.autresFrais),
+              },
+            },
+            {
+              label: "Qualité",
+              value: selectedAppro.qualite,
+              description: "Résultat du contrôle qualité effectué à la réception.",
+              edit: {
+                key: "qualite",
+                type: "select",
+                options: QUALITES,
+                value: selectedAppro.qualite,
+              },
+            },
+            {
+              label: "Valeur achat",
+              value: fcFormat(selectedAppro.valeurAchat),
+              description: "Calculé automatiquement : quantité reçue × prix/kg.",
+            },
+            {
+              label: "Coût total",
+              value: fcFormat(selectedAppro.coutTotal),
+              description:
+                "Calculé automatiquement : valeur d'achat + transport + autres frais — ce montant alimente les coûts d'exploitation en Finances.",
+            },
+          ]}
+        />
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -677,6 +1389,7 @@ function ApproSection() {
           objectif={1}
           realise={state.producteurs.length}
           taux={state.producteurs.length / 1}
+          description="Calculé automatiquement : nombre de fiches dans le Registre des producteurs."
         />
         <KpiTile
           label="Quantité reçue"
@@ -684,13 +1397,25 @@ function ApproSection() {
           realise={Math.round(computed.kgAchetes)}
           unit="kg"
           taux={computed.kgAchetes / p.objectifAnanasKg}
+          description="Calculé automatiquement : somme des quantités reçues sur toutes les réceptions."
         />
-        <KpiTile label="Coût matière" realise={fcFormat(computed.coutAchats)} />
-        <KpiTile label="Transport & frais" realise={fcFormat(computed.coutTransport)} />
+        <KpiTile
+          label="Coût matière"
+          realise={fcFormat(computed.coutAchats)}
+          secondary={usdFormat(computed.coutAchats, fcPerUsd)}
+          description="Calculé automatiquement : somme des valeurs d'achat (quantité reçue × prix/kg) sur toutes les réceptions."
+        />
+        <KpiTile
+          label="Transport & frais"
+          realise={fcFormat(computed.coutTransport)}
+          secondary={usdFormat(computed.coutTransport, fcPerUsd)}
+          description="Calculé automatiquement : somme du transport et autres frais sur toutes les réceptions."
+        />
       </div>
 
       <Card title="Registre des producteurs">
         <Table
+          onRowClick={(i) => setSelectedProducteur(state.producteurs[i])}
           headers={[
             "ID",
             "Nom / Association",
@@ -713,14 +1438,86 @@ function ApproSection() {
           ])}
         />
       </Card>
+
+      {selectedProducteur && (
+        <RecordDetailModal
+          title={selectedProducteur.nom}
+          subtitle={`Producteur ${selectedProducteur.id}`}
+          onClose={() => setSelectedProducteur(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "producteurs", selectedProducteur.id), patch);
+            setSelectedProducteur(null);
+          }}
+          onDelete={() => {
+            removeRow("producteurs", selectedProducteur.id);
+            setSelectedProducteur(null);
+          }}
+          fields={[
+            {
+              label: "Nom / Association",
+              value: selectedProducteur.nom,
+              description: "Nom du producteur ou de l'association fournisseur, saisi au Registre.",
+              edit: { key: "nom", type: "text", value: selectedProducteur.nom },
+            },
+            {
+              label: "Village",
+              value: selectedProducteur.village,
+              description: "Village où se trouve l'exploitation.",
+              edit: { key: "village", type: "text", value: selectedProducteur.village },
+            },
+            {
+              label: "Territoire",
+              value: selectedProducteur.territoire,
+              description: "Territoire administratif de rattachement.",
+              edit: { key: "territoire", type: "text", value: selectedProducteur.territoire },
+            },
+            {
+              label: "Téléphone",
+              value: selectedProducteur.telephone,
+              description: "Numéro de contact du producteur.",
+              edit: { key: "telephone", type: "text", value: selectedProducteur.telephone },
+            },
+            {
+              label: "Capacité (kg/mois)",
+              value: selectedProducteur.capaciteKgMois,
+              description: "Capacité de production mensuelle déclarée, en kilogrammes.",
+              edit: {
+                key: "capaciteKgMois",
+                type: "number",
+                value: String(selectedProducteur.capaciteKgMois),
+              },
+            },
+            {
+              label: "Prix convenu",
+              value: fcFormat(selectedProducteur.prixConvenu),
+              description: "Prix par kilogramme convenu avec ce producteur, en FC.",
+              edit: {
+                key: "prixConvenu",
+                type: "number",
+                value: String(selectedProducteur.prixConvenu),
+              },
+            },
+            {
+              label: "Statut",
+              value: selectedProducteur.statut,
+              description: "Statut de la relation avec ce producteur.",
+              edit: { key: "statut", type: "text", value: selectedProducteur.statut },
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="appro" />
     </div>
   );
 }
 
 function ProductionSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const { profile } = useAuth();
   const p = state.parametres;
+  const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -728,7 +1525,6 @@ function ProductionSection() {
         title="Production & transformation"
         responsable="Directeur de Production"
       />
-      <ExportBar section="production" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -736,19 +1532,29 @@ function ProductionSection() {
           objectif={p.objectifBouteilles}
           realise={computed.bouteillesProduites}
           taux={computed.bouteillesProduites / p.objectifBouteilles}
+          description="Calculé automatiquement : somme des bouteilles conditionnées (500/330/300 ml) sur tous les lots."
         />
         <KpiTile
           label="Rendement volume"
           objectif="95 %"
           realise={pctFormat(computed.rendementMoyen)}
           taux={computed.rendementMoyen / 0.95}
+          description="Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots."
+          breakdown={breakdowns.rendementMoyen}
         />
         <KpiTile
           label="Pertes volume"
           objectif={pctFormat(p.tauxPertesMax)}
           realise={pctFormat(computed.tauxPertes)}
+          description="Calculé automatiquement : volume perdu / volume de jus, comparé au taux maximum toléré (Paramètres ERP)."
+          breakdown={breakdowns.tauxPertes}
         />
-        <KpiTile label="Valeur production" realise={fcFormat(computed.valeurProduction)} />
+        <KpiTile
+          label="Valeur production"
+          realise={fcFormat(computed.valeurProduction)}
+          secondary={usdFormat(computed.valeurProduction, fcPerUsd)}
+          description="Calculé automatiquement : quantités par format × prix de vente définis dans Paramètres ERP, sommé sur tous les lots."
+        />
       </div>
 
       <Card
@@ -797,6 +1603,7 @@ function ProductionSection() {
         }
       >
         <Table
+          onRowClick={(i) => setSelectedLot(computed.production[i])}
           headers={[
             "Lot",
             "Date",
@@ -827,13 +1634,19 @@ function ProductionSection() {
             pctFormat(r.rendement),
             fcFormat(r.valeurProduction),
             r.statut,
-            <DeleteButton onClick={() => removeRow("productions", r.id)} />,
+            <DeleteButton
+              onClick={(e) => {
+                e.stopPropagation();
+                removeRow("productions", r.id);
+              }}
+            />,
           ])}
         />
       </Card>
 
       <Card title="Contrôle qualité par lot">
         <Table
+          onRowClick={(i) => setSelectedLot(computed.production[i])}
           headers={[
             "Lot",
             "Total bouteilles",
@@ -852,25 +1665,178 @@ function ProductionSection() {
           ])}
         />
       </Card>
+
+      {selectedLot && (
+        <RecordDetailModal
+          title={`Lot ${selectedLot.lot}`}
+          subtitle={selectedLot.date}
+          onClose={() => setSelectedLot(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "productions", selectedLot.id), patch);
+            setSelectedLot(null);
+          }}
+          onDelete={() => {
+            removeRow("productions", selectedLot.id);
+            setSelectedLot(null);
+          }}
+          fields={[
+            {
+              label: "N° lot",
+              value: selectedLot.lot,
+              description: "Identifiant du lot, saisi dans le formulaire « Nouveau lot ».",
+              edit: { key: "lot", type: "text", value: selectedLot.lot },
+            },
+            {
+              label: "Date",
+              value: selectedLot.date,
+              description: "Date de production du lot.",
+              edit: { key: "date", type: "date", value: selectedLot.date },
+            },
+            {
+              label: "Kg ananas utilisés",
+              value: selectedLot.kgUtilises,
+              description: "Quantité d'ananas transformée pour ce lot, en kilogrammes.",
+              edit: { key: "kgUtilises", type: "number", value: String(selectedLot.kgUtilises) },
+            },
+            {
+              label: "Volume jus (L)",
+              value: selectedLot.volumeJusL,
+              description: "Volume de jus extrait avant conditionnement, en litres.",
+              edit: { key: "volumeJusL", type: "number", value: String(selectedLot.volumeJusL) },
+            },
+            {
+              label: "500 ml produits",
+              value: selectedLot.q500,
+              description: "Nombre de bouteilles de 500 ml conditionnées pour ce lot.",
+              edit: { key: "q500", type: "number", value: String(selectedLot.q500) },
+            },
+            {
+              label: "330 ml produits",
+              value: selectedLot.q330,
+              description: "Nombre de bouteilles de 330 ml conditionnées pour ce lot.",
+              edit: { key: "q330", type: "number", value: String(selectedLot.q330) },
+            },
+            {
+              label: "300 ml produits",
+              value: selectedLot.q300,
+              description: "Nombre de bouteilles de 300 ml conditionnées pour ce lot.",
+              edit: { key: "q300", type: "number", value: String(selectedLot.q300) },
+            },
+            {
+              label: "Rejets",
+              value: selectedLot.rejets,
+              description: "Bouteilles rejetées au contrôle qualité de ce lot.",
+              edit: { key: "rejets", type: "number", value: String(selectedLot.rejets) },
+            },
+            {
+              label: "Statut",
+              value: selectedLot.statut,
+              description: "Avancement de ce lot de production.",
+              edit: {
+                key: "statut",
+                type: "select",
+                options: ["En cours", "Terminé"],
+                value: selectedLot.statut,
+              },
+            },
+            {
+              label: "Responsable",
+              value: selectedLot.responsable,
+              description:
+                "Auto-attribué au compte staff connecté lors de la saisie (sprint 17) — sert au calcul des primes de production par personne.",
+            },
+            {
+              label: "Total bouteilles",
+              value: selectedLot.totalBouteilles,
+              description: "Calculé automatiquement : somme des formats 500/330/300 ml.",
+            },
+            {
+              label: "Conditionné (L)",
+              value: selectedLot.volumeConditionne.toFixed(2),
+              description:
+                "Calculé automatiquement à partir des quantités par format (0,5 L / 0,33 L / 0,3 L par bouteille).",
+            },
+            {
+              label: "Pertes (L)",
+              value: selectedLot.pertesL.toFixed(2),
+              description: "Calculé automatiquement : volume de jus − volume conditionné.",
+            },
+            {
+              label: "Rendement",
+              value: pctFormat(selectedLot.rendement),
+              description: "Calculé automatiquement : volume conditionné / volume de jus.",
+            },
+            {
+              label: "Valeur production",
+              value: fcFormat(selectedLot.valeurProduction),
+              description:
+                "Calculé automatiquement à partir des prix de vente par format définis dans Paramètres ERP.",
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="production" />
     </div>
   );
 }
 
 function StockSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const [selectedMouvement, setSelectedMouvement] = useState<{
+    m: (typeof state.stockMP)[number];
+    cumul: number;
+  } | null>(null);
+  const [selectedStockPF, setSelectedStockPF] = useState<(typeof computed.stockPF)[number] | null>(
+    null,
+  );
   let cumul = 0;
+  const stockRows = state.stockMP.map((m) => {
+    cumul += m.entree - m.sortie;
+    return { m, cumul };
+  });
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader eyebrow="Module ERP 03" title="Stocks" responsable="Production / Magasin" />
-      <ExportBar section="stock" />
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <KpiTile label="Stock matières premières" realise={computed.stockMPPieces} unit="pcs" />
-        <KpiTile label="Valeur stock MP" realise={fcFormat(computed.stockMPValeur)} />
+        <KpiTile
+          label="Stock matières premières"
+          realise={computed.stockMPPieces}
+          unit="pcs"
+          description="Calculé automatiquement : cumul chronologique des entrées − sorties (Mouvements matières premières)."
+          breakdown={[
+            {
+              label: "Entrées − sorties, tous mouvements",
+              value: `${computed.stockMPPieces} pcs`,
+            },
+            { label: "= Stock matières premières", value: `${computed.stockMPPieces} pcs` },
+          ]}
+        />
+        <KpiTile
+          label="Valeur stock MP"
+          realise={fcFormat(computed.stockMPValeur)}
+          secondary={usdFormat(computed.stockMPValeur, fcPerUsd)}
+          description="Calculé automatiquement : stock cumulé × coût unitaire du dernier mouvement."
+          breakdown={[
+            { label: "Stock matières premières", value: `${computed.stockMPPieces} pcs` },
+            {
+              label: "× Coût unitaire (dernier mouvement)",
+              value:
+                computed.stockMPPieces !== 0
+                  ? fcFormat(computed.stockMPValeur / computed.stockMPPieces)
+                  : "—",
+            },
+            { label: "= Valeur stock MP", value: fcFormat(computed.stockMPValeur) },
+          ]}
+        />
         <KpiTile
           label="Stock produits finis"
           realise={computed.stockPF.reduce((a, s) => a + s.stock, 0)}
           unit="bt"
+          description="Calculé automatiquement : bouteilles produites − vendues, tous formats confondus."
+          breakdown={breakdowns.stockActuel}
         />
       </div>
 
@@ -912,6 +1878,7 @@ function StockSection() {
         }
       >
         <Table
+          onRowClick={(i) => setSelectedMouvement(stockRows[i])}
           headers={[
             "Date",
             "Produit",
@@ -924,26 +1891,109 @@ function StockSection() {
             "Observation",
             "",
           ]}
-          rows={state.stockMP.map((m) => {
-            cumul += m.entree - m.sortie;
-            return [
-              m.date,
-              m.produit,
-              m.type,
-              m.entree || "",
-              m.sortie || "",
-              cumul,
-              fcFormat(m.coutUnitaire),
-              fcFormat(cumul * m.coutUnitaire),
-              m.observation,
-              <DeleteButton onClick={() => removeRow("stockMP", m.id)} />,
-            ];
-          })}
+          rows={stockRows.map(({ m, cumul: c }) => [
+            m.date,
+            m.produit,
+            m.type,
+            m.entree || "",
+            m.sortie || "",
+            c,
+            fcFormat(m.coutUnitaire),
+            fcFormat(c * m.coutUnitaire),
+            m.observation,
+            <DeleteButton
+              onClick={(e) => {
+                e.stopPropagation();
+                removeRow("stockMP", m.id);
+              }}
+            />,
+          ])}
         />
       </Card>
 
+      {selectedMouvement && (
+        <RecordDetailModal
+          title={`${selectedMouvement.m.type} — ${selectedMouvement.m.produit}`}
+          subtitle={selectedMouvement.m.date}
+          onClose={() => setSelectedMouvement(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "stockMP", selectedMouvement.m.id), patch);
+            setSelectedMouvement(null);
+          }}
+          onDelete={() => {
+            removeRow("stockMP", selectedMouvement.m.id);
+            setSelectedMouvement(null);
+          }}
+          fields={[
+            {
+              label: "Date",
+              value: selectedMouvement.m.date,
+              description:
+                "Date du mouvement — trie le tableau chronologiquement (sprint 18), d'où dépend le stock cumulé.",
+              edit: { key: "date", type: "date", value: selectedMouvement.m.date },
+            },
+            {
+              label: "Produit",
+              value: selectedMouvement.m.produit,
+              description: "Produit concerné par ce mouvement de stock.",
+              edit: { key: "produit", type: "text", value: selectedMouvement.m.produit },
+            },
+            {
+              label: "Type",
+              value: selectedMouvement.m.type,
+              description: "Nature du mouvement : entrée, sortie ou ajustement d'inventaire.",
+              edit: {
+                key: "type",
+                type: "select",
+                options: ["Entrée", "Sortie", "Ajustement"],
+                value: selectedMouvement.m.type,
+              },
+            },
+            {
+              label: "Quantité entrée",
+              value: selectedMouvement.m.entree,
+              description: "Quantité ajoutée au stock par ce mouvement.",
+              edit: { key: "entree", type: "number", value: String(selectedMouvement.m.entree) },
+            },
+            {
+              label: "Quantité sortie",
+              value: selectedMouvement.m.sortie,
+              description: "Quantité retirée du stock par ce mouvement.",
+              edit: { key: "sortie", type: "number", value: String(selectedMouvement.m.sortie) },
+            },
+            {
+              label: "Coût unitaire",
+              value: fcFormat(selectedMouvement.m.coutUnitaire),
+              description: "Coût unitaire retenu pour valoriser ce mouvement, en FC.",
+              edit: {
+                key: "coutUnitaire",
+                type: "number",
+                value: String(selectedMouvement.m.coutUnitaire),
+              },
+            },
+            {
+              label: "Observation",
+              value: selectedMouvement.m.observation || "—",
+              description: "Note libre saisie avec ce mouvement.",
+              edit: {
+                key: "observation",
+                type: "text",
+                value: selectedMouvement.m.observation ?? "",
+              },
+            },
+            {
+              label: "Stock cumulé",
+              value: selectedMouvement.cumul,
+              description:
+                "Calculé automatiquement : somme des entrées − sorties de tous les mouvements jusqu'à celui-ci, par ordre chronologique.",
+            },
+          ]}
+        />
+      )}
+
       <Card title="Stock produits finis (production − ventes)">
         <Table
+          onRowClick={(i) => setSelectedStockPF(computed.stockPF[i])}
           headers={["Format", "Produites", "Vendues", "Stock", "Valeur stock"]}
           rows={computed.stockPF.map((s) => [
             s.format,
@@ -954,6 +2004,62 @@ function StockSection() {
           ])}
         />
       </Card>
+
+      {selectedStockPF && (
+        <RecordDetailModal
+          title={`Stock produits finis — ${selectedStockPF.format}`}
+          onClose={() => setSelectedStockPF(null)}
+          fields={[
+            {
+              label: "Format",
+              value: selectedStockPF.format,
+              description: "Format de bouteille (500 ml / 330 ml / 300 ml).",
+            },
+            {
+              label: "Produites",
+              value: selectedStockPF.produites,
+              description:
+                "Calculé automatiquement : somme des quantités de ce format sur tous les lots de Production.",
+            },
+            {
+              label: "Vendues",
+              value: selectedStockPF.vendues,
+              description:
+                "Calculé automatiquement : somme des quantités de ce format dans le Journal des ventes.",
+            },
+            {
+              label: "Stock",
+              value: selectedStockPF.stock,
+              description:
+                "Calculé automatiquement : produites − vendues. Aucune ligne Firestore unique ne correspond à ce chiffre — rien à modifier ou supprimer ici directement.",
+              breakdown: [
+                { label: "Produites (Production)", value: String(selectedStockPF.produites) },
+                { label: "− Vendues (Commercialisation)", value: `− ${selectedStockPF.vendues}` },
+                { label: "= Stock", value: String(selectedStockPF.stock) },
+              ],
+            },
+            {
+              label: "Valeur stock",
+              value: fcFormat(selectedStockPF.valeur),
+              description:
+                "Calculé automatiquement : stock × prix de vente de ce format (Paramètres ERP).",
+              breakdown: [
+                { label: "Stock", value: String(selectedStockPF.stock) },
+                {
+                  label: "× Prix de vente (Paramètres ERP)",
+                  value:
+                    selectedStockPF.stock !== 0
+                      ? fcFormat(selectedStockPF.valeur / selectedStockPF.stock)
+                      : "—",
+                },
+                { label: "= Valeur stock", value: fcFormat(selectedStockPF.valeur) },
+              ],
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="stock" />
     </div>
   );
 }
@@ -1357,6 +2463,7 @@ function PromoCard() {
 function OrdersCard() {
   const [orders, setOrders] = useState<StorefrontOrder[]>([]);
   const [confirmDates, setConfirmDates] = useState<Record<string, string>>({});
+  const [selectedOrder, setSelectedOrder] = useState<StorefrontOrder | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
@@ -1423,6 +2530,7 @@ function OrdersCard() {
   return (
     <Card title="Commandes boutique partenaires">
       <Table
+        onRowClick={(i) => setSelectedOrder(orders[i])}
         headers={[
           "Date",
           "Partenaire",
@@ -1455,7 +2563,7 @@ function OrdersCard() {
                 : "Mobile money"}
           </span>,
           <span>{ORDER_STATUS_LABELS[o.status]}</span>,
-          <div className="flex flex-col items-start gap-1.5">
+          <div className="flex flex-col items-start gap-1.5" onClick={(e) => e.stopPropagation()}>
             {o.status === "pending" && (
               <>
                 <input
@@ -1500,14 +2608,91 @@ function OrdersCard() {
           </div>,
         ])}
       />
+
+      {selectedOrder && (
+        <RecordDetailModal
+          title={`Commande de ${selectedOrder.partnerName}`}
+          subtitle={new Date(selectedOrder.createdAt).toLocaleDateString("fr-FR")}
+          onClose={() => setSelectedOrder(null)}
+          fields={[
+            {
+              label: "Partenaire",
+              value: selectedOrder.partnerName,
+              description: "Boutique partenaire ayant passé la commande depuis /storefront.",
+            },
+            {
+              label: "Contact",
+              value: `${selectedOrder.partnerPhone ? `+${selectedOrder.partnerPhone}` : "—"}`,
+              description:
+                "Téléphone du partenaire au moment de la commande — figé (snapshot), ne change pas si le profil du partenaire est modifié ensuite.",
+            },
+            {
+              label: "Adresse de livraison",
+              value: selectedOrder.partnerAddress || "—",
+              description: "Adresse du partenaire au moment de la commande, également figée.",
+            },
+            {
+              label: "Articles",
+              value: (
+                <ul className="space-y-1">
+                  {selectedOrder.items.map((i) => (
+                    <li key={i.productId}>
+                      {i.quantity} × {i.name} ({i.format}) — {fcFormat(i.quantity * i.unitPrice)}
+                    </li>
+                  ))}
+                </ul>
+              ),
+              description: "Nom, format et prix unitaire figés au moment de la commande.",
+            },
+            {
+              label: "Total",
+              value: fcFormat(selectedOrder.total),
+              description: "Montant total de la commande.",
+            },
+            {
+              label: "Paiement",
+              value: !selectedOrder.payment
+                ? "—"
+                : selectedOrder.payment.method === "cash_on_delivery"
+                  ? "Paiement à la livraison"
+                  : `Mobile money (${selectedOrder.payment.status === "completed" ? "réglé" : "en attente"})`,
+              description: "Méthode choisie par le partenaire au moment du paiement.",
+            },
+            {
+              label: "Statut",
+              value: ORDER_STATUS_LABELS[selectedOrder.status],
+              description:
+                "Modifiable uniquement via les actions Confirmer / Marquer livrée / Annuler du tableau — la conversion en ventes à la livraison dépend de cette transition, donc pas d'édition libre ici.",
+            },
+            ...(selectedOrder.deliveryDate
+              ? [
+                  {
+                    label: "Date de livraison prévue",
+                    value: formatDateOnly(selectedOrder.deliveryDate),
+                    description: "Fixée à la main par l'admin lors de la confirmation.",
+                  },
+                ]
+              : []),
+          ]}
+        />
+      )}
     </Card>
   );
 }
 
-function CommercialisationSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+function CommercialisationSection({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: string;
+  onTabChange: (tab: string) => void;
+}) {
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
   const { profile } = useAuth();
   const p = state.parametres;
+  const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
+  const [selectedCanal, setSelectedCanal] = useState<Canal | null>(null);
+  const breakdowns = buildBreakdowns(computed);
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -1515,13 +2700,6 @@ function CommercialisationSection() {
         title="Ventes & encaissements"
         responsable="Chargée de Commercialisation"
       />
-      <ExportBar section="commercialisation" />
-
-      <CatalogueCard />
-
-      <PromoCard />
-
-      <OrdersCard />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -1529,140 +2707,627 @@ function CommercialisationSection() {
           objectif={p.objectifBouteilles}
           realise={computed.bouteillesVendues}
           taux={computed.bouteillesVendues / p.objectifBouteilles}
+          description="Calculé automatiquement : somme des quantités du Journal des ventes."
         />
-        <KpiTile label="Chiffre d'affaires" realise={fcFormat(computed.ca)} />
+        <KpiTile
+          label="Chiffre d'affaires"
+          realise={fcFormat(computed.ca)}
+          secondary={usdFormat(computed.ca, fcPerUsd)}
+          description="Calculé automatiquement : somme des montants bruts de toutes les ventes."
+        />
         <KpiTile
           label="Taux d'encaissement"
           objectif="100 %"
           realise={pctFormat(computed.tauxEncaissement)}
           taux={computed.tauxEncaissement}
+          description="Calculé automatiquement : encaissements / chiffre d'affaires brut."
+          breakdown={breakdowns.tauxEncaissement}
         />
-        <KpiTile label="Créances clients" realise={fcFormat(computed.creances)} />
+        <KpiTile
+          label="Créances clients"
+          realise={fcFormat(computed.creances)}
+          secondary={usdFormat(computed.creances, fcPerUsd)}
+          description="Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients."
+          breakdown={breakdowns.creances}
+        />
       </div>
 
-      <Card
-        title="Journal des ventes"
-        action={
-          <EntryForm
-            submitLabel="Nouvelle vente"
-            fields={[
-              { name: "numero", label: "N° vente", default: "V-001" },
-              { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-              { name: "client", label: "Client" },
-              {
-                name: "canal",
-                label: "Canal",
-                type: "select",
-                options: CANAUX,
-                default: "Restaurant",
-              },
-              {
-                name: "format",
-                label: "Format",
-                type: "select",
-                options: FORMATS,
-                default: "500 ml",
-              },
-              { name: "quantite", label: "Quantité", type: "number", default: 0 },
-              {
-                name: "prixUnitaire",
-                label: "Prix unitaire FC",
-                type: "number",
-                default: p.prix500,
-              },
-              { name: "remise", label: "Remise FC", type: "number", default: 0 },
-              { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-            ]}
-            onSubmit={(v) =>
-              addRow("ventes", {
-                id: newId("VTE"),
-                numero: v.numero,
-                date: v.date,
-                idClient: v.client,
-                client: v.client,
-                canal: v.canal as Canal,
-                format: v.format as Format,
-                quantite: n(v.quantite),
-                prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
-                remise: n(v.remise),
-                encaisse: n(v.encaisse),
-                // Auto-filled from the logged-in staff member — see the
-                // matching note in ProductionSection.
-                commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
-                ...(profile?.uid ? { staffUid: profile.uid } : {}),
-              })
+      <Tabs value={activeTab} onValueChange={onTabChange}>
+        <TabsList>
+          <TabsTrigger value="catalogue">Catalogue</TabsTrigger>
+          <TabsTrigger value="commandes">Commandes</TabsTrigger>
+          <TabsTrigger value="ventes">Ventes & clients</TabsTrigger>
+        </TabsList>
+        <TabsContent value="catalogue">
+          <CatalogueCard />
+        </TabsContent>
+        <TabsContent value="commandes">
+          <OrdersCard />
+        </TabsContent>
+        <TabsContent value="ventes" className="space-y-6">
+          <Card
+            title="Journal des ventes"
+            action={
+              <EntryForm
+                submitLabel="Nouvelle vente"
+                fields={[
+                  { name: "numero", label: "N° vente", default: "V-001" },
+                  { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                  { name: "client", label: "Client" },
+                  {
+                    name: "canal",
+                    label: "Canal",
+                    type: "select",
+                    options: CANAUX,
+                    default: "Restaurant",
+                  },
+                  {
+                    name: "format",
+                    label: "Format",
+                    type: "select",
+                    options: FORMATS,
+                    default: "500 ml",
+                  },
+                  { name: "quantite", label: "Quantité", type: "number", default: 0 },
+                  {
+                    name: "prixUnitaire",
+                    label: "Prix unitaire FC",
+                    type: "number",
+                    default: p.prix500,
+                  },
+                  { name: "remise", label: "Remise FC", type: "number", default: 0 },
+                  { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+                ]}
+                onSubmit={(v) =>
+                  addRow("ventes", {
+                    id: newId("VTE"),
+                    numero: v.numero,
+                    date: v.date,
+                    idClient: v.client,
+                    client: v.client,
+                    canal: v.canal as Canal,
+                    format: v.format as Format,
+                    quantite: n(v.quantite),
+                    prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
+                    remise: n(v.remise),
+                    encaisse: n(v.encaisse),
+                    // Auto-filled from the logged-in staff member — see the
+                    // matching note in ProductionSection.
+                    commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
+                    ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                  })
+                }
+              />
             }
-          />
-        }
-      >
-        <Table
-          headers={[
-            "N°",
-            "Date",
-            "Client",
-            "Canal",
-            "Format",
-            "Qté",
-            "PU",
-            "Brut",
-            "Encaissé",
-            "Solde dû",
-            "Statut",
-            "",
-          ]}
-          rows={computed.ventes.map((v) => [
-            v.numero,
-            v.date,
-            v.client,
-            v.canal,
-            v.format,
-            v.quantite,
-            fcFormat(v.prixUnitaire),
-            fcFormat(v.montantBrut),
-            fcFormat(v.encaisse),
-            fcFormat(v.soldeDu),
-            v.statutPaiement,
-            <DeleteButton onClick={() => removeRow("ventes", v.id)} />,
-          ])}
-        />
-      </Card>
+          >
+            <Table
+              onRowClick={(i) => setSelectedVente(computed.ventes[i])}
+              headers={[
+                "N°",
+                "Date",
+                "Client",
+                "Canal",
+                "Format",
+                "Qté",
+                "PU",
+                "Brut",
+                "Encaissé",
+                "Solde dû",
+                "Statut",
+                "",
+              ]}
+              rows={computed.ventes.map((v) => [
+                v.numero,
+                v.date,
+                v.client,
+                v.canal,
+                v.format,
+                v.quantite,
+                fcFormat(v.prixUnitaire),
+                fcFormat(v.montantBrut),
+                fcFormat(v.encaisse),
+                fcFormat(v.soldeDu),
+                v.statutPaiement,
+                <DeleteButton
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeRow("ventes", v.id);
+                  }}
+                />,
+              ])}
+            />
+          </Card>
 
-      <Card title="Portefeuille clients par canal">
-        <Table
-          headers={["Canal", "Clients", "Bouteilles", "CA", "Encaissé", "Solde dû"]}
-          rows={CANAUX.map((c) => {
-            const rows = computed.ventes.filter((v) => v.canal === c);
-            return [
-              c,
-              new Set(rows.map((r) => r.client)).size,
-              rows.reduce((a, r) => a + r.quantite, 0),
-              fcFormat(rows.reduce((a, r) => a + r.montantBrut, 0)),
-              fcFormat(rows.reduce((a, r) => a + r.encaisse, 0)),
-              fcFormat(rows.reduce((a, r) => a + r.soldeDu, 0)),
-            ];
-          })}
+          {selectedVente && (
+            <RecordDetailModal
+              title={`Vente ${selectedVente.numero}`}
+              subtitle={selectedVente.date}
+              onClose={() => setSelectedVente(null)}
+              onSave={(patch) => {
+                updateDoc(doc(db, "ventes", selectedVente.id), patch);
+                setSelectedVente(null);
+              }}
+              onDelete={() => {
+                removeRow("ventes", selectedVente.id);
+                setSelectedVente(null);
+              }}
+              fields={[
+                {
+                  label: "N° vente",
+                  value: selectedVente.numero,
+                  description:
+                    "Identifiant de la vente, saisi dans le formulaire « Nouvelle vente ».",
+                  edit: { key: "numero", type: "text", value: selectedVente.numero },
+                },
+                {
+                  label: "Date",
+                  value: selectedVente.date,
+                  description: "Date de la vente.",
+                  edit: { key: "date", type: "date", value: selectedVente.date },
+                },
+                {
+                  label: "Client",
+                  value: selectedVente.client,
+                  description:
+                    "Nom du client — texte libre, non relié au Registre clients interne.",
+                  edit: { key: "client", type: "text", value: selectedVente.client },
+                },
+                {
+                  label: "Canal",
+                  value: selectedVente.canal,
+                  description: "Circuit de vente utilisé pour cette transaction.",
+                  edit: {
+                    key: "canal",
+                    type: "select",
+                    options: CANAUX,
+                    value: selectedVente.canal,
+                  },
+                },
+                {
+                  label: "Format",
+                  value: selectedVente.format,
+                  description: "Format de bouteille vendu.",
+                  edit: {
+                    key: "format",
+                    type: "select",
+                    options: FORMATS,
+                    value: selectedVente.format,
+                  },
+                },
+                {
+                  label: "Quantité",
+                  value: selectedVente.quantite,
+                  description: "Nombre de bouteilles vendues.",
+                  edit: { key: "quantite", type: "number", value: String(selectedVente.quantite) },
+                },
+                {
+                  label: "Prix unitaire",
+                  value: fcFormat(selectedVente.prixUnitaire),
+                  description: "Prix unitaire appliqué à cette vente, en FC.",
+                  edit: {
+                    key: "prixUnitaire",
+                    type: "number",
+                    value: String(selectedVente.prixUnitaire),
+                  },
+                },
+                {
+                  label: "Remise",
+                  value: fcFormat(selectedVente.remise),
+                  description: "Remise accordée sur cette vente, en FC.",
+                  edit: { key: "remise", type: "number", value: String(selectedVente.remise) },
+                },
+                {
+                  label: "Encaissé",
+                  value: fcFormat(selectedVente.encaisse),
+                  description:
+                    "Montant réellement encaissé — s'il est inférieur au montant brut, la différence reste en créance client.",
+                  edit: { key: "encaisse", type: "number", value: String(selectedVente.encaisse) },
+                },
+                {
+                  label: "Commerciale",
+                  value: selectedVente.commerciale,
+                  description:
+                    "Auto-attribué au compte staff connecté lors de la saisie (sprint 17) — sert au calcul des commissions par personne.",
+                },
+                {
+                  label: "Montant brut",
+                  value: fcFormat(selectedVente.montantBrut),
+                  description: "Calculé automatiquement : quantité × prix unitaire − remise.",
+                },
+                {
+                  label: "Solde dû",
+                  value: fcFormat(selectedVente.soldeDu),
+                  description: "Calculé automatiquement : montant brut − encaissé.",
+                },
+                {
+                  label: "Statut paiement",
+                  value: selectedVente.statutPaiement,
+                  description: "Calculé automatiquement à partir du solde dû.",
+                },
+              ]}
+            />
+          )}
+
+          <Card title="Portefeuille clients par canal">
+            <Table
+              onRowClick={(i) => setSelectedCanal(CANAUX[i])}
+              headers={["Canal", "Clients", "Bouteilles", "CA", "Encaissé", "Solde dû"]}
+              rows={CANAUX.map((c) => {
+                const rows = computed.ventes.filter((v) => v.canal === c);
+                return [
+                  c,
+                  new Set(rows.map((r) => r.client)).size,
+                  rows.reduce((a, r) => a + r.quantite, 0),
+                  fcFormat(rows.reduce((a, r) => a + r.montantBrut, 0)),
+                  fcFormat(rows.reduce((a, r) => a + r.encaisse, 0)),
+                  fcFormat(rows.reduce((a, r) => a + r.soldeDu, 0)),
+                ];
+              })}
+            />
+          </Card>
+
+          {selectedCanal &&
+            (() => {
+              const rows = computed.ventes.filter((v) => v.canal === selectedCanal);
+              return (
+                <RecordDetailModal
+                  title={`Portefeuille — ${selectedCanal}`}
+                  onClose={() => setSelectedCanal(null)}
+                  fields={[
+                    {
+                      label: "Canal",
+                      value: selectedCanal,
+                      description: "Un des circuits de vente définis dans le modèle ERP.",
+                    },
+                    {
+                      label: "Clients",
+                      value: new Set(rows.map((r) => r.client)).size,
+                      description:
+                        "Calculé automatiquement : nombre de clients distincts ayant acheté sur ce canal.",
+                    },
+                    {
+                      label: "Bouteilles",
+                      value: rows.reduce((a, r) => a + r.quantite, 0),
+                      description:
+                        "Calculé automatiquement : somme des quantités vendues sur ce canal (Journal des ventes).",
+                    },
+                    {
+                      label: "Chiffre d'affaires",
+                      value: fcFormat(rows.reduce((a, r) => a + r.montantBrut, 0)),
+                      description:
+                        "Calculé automatiquement : somme des montants bruts sur ce canal.",
+                    },
+                    {
+                      label: "Encaissé",
+                      value: fcFormat(rows.reduce((a, r) => a + r.encaisse, 0)),
+                      description:
+                        "Calculé automatiquement : somme des montants encaissés sur ce canal.",
+                    },
+                    {
+                      label: "Solde dû",
+                      value: fcFormat(rows.reduce((a, r) => a + r.soldeDu, 0)),
+                      description:
+                        "Calculé automatiquement : créances restantes sur ce canal. Aucune ligne unique — rien à modifier ici ; corrigez la vente concernée dans le Journal des ventes.",
+                    },
+                  ]}
+                />
+              );
+            })()}
+        </TabsContent>
+      </Tabs>
+
+      <ExportBar section="commercialisation" />
+    </div>
+  );
+}
+
+function PromotionSection() {
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        eyebrow="Module ERP 04"
+        title="Promotion"
+        responsable="Chargée de Commercialisation"
+        subtitle="Bandeau promo affiché sur la boutique partenaire."
+      />
+      <PromoCard />
+    </div>
+  );
+}
+
+/**
+ * One stage of the Parcours production funnel (sprint 20). Purely a new
+ * way of looking at numbers `useErp()` already computes — no new
+ * Firestore fields, no new writes. `pct` is the completion ratio versus
+ * the previous stage; `null` renders as "—" (an honest "not started yet"
+ * for an early campaign) instead of a misleading 0%/NaN%.
+ */
+function FunnelStage({
+  num,
+  title,
+  headline,
+  unit,
+  secondary,
+  pct,
+  description,
+  breakdown,
+  expanded,
+  onToggle,
+}: {
+  num: string;
+  title: string;
+  headline: string | number;
+  unit?: string;
+  secondary: string;
+  pct: number | null;
+  description: string;
+  breakdown?: DetailField["breakdown"];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const [showDetail, setShowDetail] = useState(false);
+  const clampedPct = pct === null ? null : Math.max(0, Math.min(100, Math.round(pct * 100)));
+  return (
+    <div
+      className={`flex-1 rounded-2xl border bg-card p-5 transition ${
+        expanded ? "border-primary ring-2 ring-primary/30" : "border-border"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="grid h-6 w-6 place-items-center rounded-lg bg-primary/5 text-[10px] font-bold text-primary">
+          {num}
+        </span>
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {title}
+        </p>
+      </div>
+      <button
+        onClick={() => setShowDetail(true)}
+        className="mt-3 block text-left transition hover:opacity-80"
+      >
+        <p className="font-display text-2xl font-bold text-primary">
+          {headline}
+          {unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{unit}</span>}
+        </p>
+      </button>
+      <p className="mt-1 text-xs text-muted-foreground">{secondary}</p>
+      <div className="mt-3">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
+          {clampedPct !== null && (
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-primary to-leaf"
+              style={{ width: `${clampedPct}%` }}
+            />
+          )}
+        </div>
+        <p className="mt-1 text-right text-[10px] font-semibold text-muted-foreground">
+          {pct === null ? "—" : pctFormat(pct)}
+        </p>
+      </div>
+      <p className="mt-3 text-[11px] text-muted-foreground/80">{description}</p>
+      <button
+        onClick={onToggle}
+        className="mt-3 text-xs font-semibold text-primary hover:underline"
+      >
+        {expanded ? "Masquer les détails ↑" : "Voir le détail ↓"}
+      </button>
+
+      {showDetail && (
+        <RecordDetailModal
+          title={title}
+          onClose={() => setShowDetail(false)}
+          fields={[
+            {
+              label: "Valeur",
+              value: `${headline}${unit ? ` ${unit}` : ""}`,
+              description,
+              breakdown,
+            },
+          ]}
         />
-      </Card>
+      )}
+    </div>
+  );
+}
+
+function FunnelArrow() {
+  return (
+    <div className="hidden items-center justify-center px-1 text-xl text-muted-foreground/60 lg:flex">
+      →
+    </div>
+  );
+}
+
+const stageLabels: Record<string, string> = {
+  appro: "Approvisionnement",
+  production: "Production",
+  stock: "Stock",
+  commercialisation: "Commercialisation",
+};
+
+function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
+  const { state, computed, fcPerUsd } = useErp();
+  const [expandedStage, setExpandedStage] = useState<
+    "appro" | "production" | "stock" | "commercialisation" | null
+  >(null);
+  const toggle = (id: typeof expandedStage) => setExpandedStage((cur) => (cur === id ? null : id));
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
+
+  const stockActuel = computed.stockPF.reduce((a, s) => a + s.stock, 0);
+  const valeurStockFinis = computed.stockPF.reduce((a, s) => a + s.valeur, 0);
+  const tauxTransformation = computed.kgAchetes
+    ? computed.kgTransformes / computed.kgAchetes
+    : null;
+  const tauxVenteStock = computed.bouteillesProduites
+    ? computed.bouteillesVendues / computed.bouteillesProduites
+    : null;
+  const breakdowns = buildBreakdowns(computed);
+
+  const recentAppro = [...computed.appro].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const recentProduction = [...computed.production]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 5);
+  const recentVentes = [...computed.ventes]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 5);
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        eyebrow="Vue transverse"
+        title="Parcours production"
+        subtitle="Le produit, de la réception à la vente, en un coup d'œil — aucune nouvelle saisie, uniquement les chiffres déjà calculés par les autres modules"
+        responsable="Direction Générale"
+      />
+
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
+        <FunnelStage
+          num="01"
+          title="Approvisionnement"
+          headline={Math.round(computed.kgAchetes)}
+          unit="kg"
+          secondary={`${state.approvisionnements.length} réception(s)`}
+          pct={null}
+          description="Ananas reçu des producteurs, pesé à la livraison."
+          breakdown={[
+            {
+              label: "Réceptions (Approvisionnement)",
+              value: `${state.approvisionnements.length}`,
+            },
+            { label: "= Kg reçus", value: `${Math.round(computed.kgAchetes)} kg` },
+          ]}
+          expanded={expandedStage === "appro"}
+          onToggle={() => toggle("appro")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="02"
+          title="Production"
+          headline={computed.bouteillesProduites}
+          unit="bt"
+          secondary={`${state.productions.length} lot(s)`}
+          pct={tauxTransformation}
+          description="Ananas transformé en jus et conditionné en bouteilles — le taux est le kg transformé sur le kg reçu."
+          breakdown={breakdowns.tauxTransformation}
+          expanded={expandedStage === "production"}
+          onToggle={() => toggle("production")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="03"
+          title="Stock"
+          headline={stockActuel}
+          unit="bt"
+          secondary={`Valeur ${fcWithUsd(valeurStockFinis)}`}
+          pct={null}
+          description="Bouteilles produites non encore vendues (produites − vendues)."
+          breakdown={breakdowns.stockActuel}
+          expanded={expandedStage === "stock"}
+          onToggle={() => toggle("stock")}
+        />
+        <FunnelArrow />
+        <FunnelStage
+          num="04"
+          title="Commercialisation"
+          headline={computed.bouteillesVendues}
+          unit="bt"
+          secondary={fcWithUsd(computed.ca)}
+          pct={tauxVenteStock}
+          description="Bouteilles vendues, tous canaux confondus — le taux est vendu sur produit."
+          breakdown={breakdowns.tauxVente}
+          expanded={expandedStage === "commercialisation"}
+          onToggle={() => toggle("commercialisation")}
+        />
+      </div>
+
+      {expandedStage && (
+        <Card title={stageLabels[expandedStage]}>
+          {expandedStage === "appro" && (
+            <Table
+              headers={["N°", "Date", "Fournisseur", "Reçu"]}
+              empty="Aucune réception enregistrée."
+              rows={recentAppro.map((r) => [r.numero, r.date, r.fournisseur, `${r.qteRecueKg} kg`])}
+            />
+          )}
+          {expandedStage === "production" && (
+            <Table
+              headers={["Lot", "Date", "Total bouteilles", "Statut"]}
+              empty="Aucun lot de production enregistré."
+              rows={recentProduction.map((r) => [r.lot, r.date, r.totalBouteilles, r.statut])}
+            />
+          )}
+          {expandedStage === "stock" && (
+            <Table
+              headers={["Format", "Produites", "Vendues", "Stock", "Valeur"]}
+              rows={computed.stockPF.map((s) => [
+                s.format,
+                s.produites,
+                s.vendues,
+                s.stock,
+                fcFormat(s.valeur),
+              ])}
+            />
+          )}
+          {expandedStage === "commercialisation" && (
+            <Table
+              headers={["N°", "Date", "Client", "Montant"]}
+              empty="Aucune vente enregistrée."
+              rows={recentVentes.map((v) => [v.numero, v.date, v.client, fcFormat(v.montantBrut)])}
+            />
+          )}
+          <button
+            onClick={() => onNavigate(expandedStage)}
+            className="mt-4 text-sm font-semibold text-primary hover:underline"
+          >
+            Ouvrir {stageLabels[expandedStage]} en entier →
+          </button>
+        </Card>
+      )}
+
+      <ExportBar section="parcours" />
     </div>
   );
 }
 
 function MarketingSection() {
-  const { state, computed, addRow, removeRow } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const [selectedAction, setSelectedAction] = useState<(typeof state.marketing)[number] | null>(
+    null,
+  );
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 05"
+        eyebrow="Module ERP 02"
         title="Marketing & prospection"
         responsable="Chargée de Commercialisation"
       />
-      <ExportBar section="marketing" />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiTile label="Budget engagé" realise={fcFormat(computed.coutMarketing)} />
-        <KpiTile label="Contacts touchés" realise={computed.contactsTouches} />
-        <KpiTile label="Prospects générés" realise={computed.prospects} />
-        <KpiTile label="ROI marketing" realise={pctFormat(computed.roiMarketing)} />
+        <KpiTile
+          label="Budget engagé"
+          realise={fcFormat(computed.coutMarketing)}
+          secondary={usdFormat(computed.coutMarketing, fcPerUsd)}
+          description="Calculé automatiquement : somme du coût réel de toutes les actions marketing."
+        />
+        <KpiTile
+          label="Contacts touchés"
+          realise={computed.contactsTouches}
+          description="Calculé automatiquement : somme des contacts touchés sur toutes les actions marketing."
+        />
+        <KpiTile
+          label="Prospects générés"
+          realise={computed.prospects}
+          description="Calculé automatiquement : somme des prospects générés sur toutes les actions marketing."
+        />
+        <KpiTile
+          label="ROI marketing"
+          realise={pctFormat(computed.roiMarketing)}
+          description="Calculé automatiquement : (ventes générées − coût réel) / coût réel, sur l'ensemble des actions."
+        />
       </div>
 
       <Card
@@ -1717,6 +3382,7 @@ function MarketingSection() {
         }
       >
         <Table
+          onRowClick={(i) => setSelectedAction(state.marketing[i])}
           headers={[
             "ID",
             "Date",
@@ -1741,73 +3407,369 @@ function MarketingSection() {
             m.prospects,
             fcFormat(m.ventesGenerees),
             pctFormat(m.coutReel ? (m.ventesGenerees - m.coutReel) / m.coutReel : 0),
-            <DeleteButton onClick={() => removeRow("marketing", m.id)} />,
+            <DeleteButton
+              onClick={(e) => {
+                e.stopPropagation();
+                removeRow("marketing", m.id);
+              }}
+            />,
           ])}
         />
       </Card>
+
+      {selectedAction && (
+        <RecordDetailModal
+          title={selectedAction.numero}
+          subtitle={selectedAction.date}
+          onClose={() => setSelectedAction(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "marketing", selectedAction.id), patch);
+            setSelectedAction(null);
+          }}
+          onDelete={() => {
+            removeRow("marketing", selectedAction.id);
+            setSelectedAction(null);
+          }}
+          fields={[
+            {
+              label: "ID action",
+              value: selectedAction.numero,
+              description: "Identifiant de l'action marketing.",
+              edit: { key: "numero", type: "text", value: selectedAction.numero },
+            },
+            {
+              label: "Date",
+              value: selectedAction.date,
+              description: "Date de l'action.",
+              edit: { key: "date", type: "date", value: selectedAction.date },
+            },
+            {
+              label: "Campagne",
+              value: selectedAction.campagne,
+              description: "Campagne marketing à laquelle rattacher cette action.",
+              edit: { key: "campagne", type: "text", value: selectedAction.campagne },
+            },
+            {
+              label: "Canal",
+              value: selectedAction.canal,
+              description: "Canal utilisé pour cette action.",
+              edit: {
+                key: "canal",
+                type: "select",
+                options: [
+                  "Dégustation",
+                  "Facebook",
+                  "WhatsApp",
+                  "TikTok",
+                  "Instagram",
+                  "Affiches",
+                  "Prospection terrain",
+                ],
+                value: selectedAction.canal,
+              },
+            },
+            {
+              label: "Cible",
+              value: selectedAction.cible,
+              description: "Public visé par cette action.",
+              edit: { key: "cible", type: "text", value: selectedAction.cible },
+            },
+            {
+              label: "Description",
+              value: selectedAction.description || "—",
+              description: "Détail libre de l'action.",
+              edit: { key: "description", type: "text", value: selectedAction.description ?? "" },
+            },
+            {
+              label: "Budget",
+              value: fcFormat(selectedAction.budget),
+              description: "Budget alloué à cette action, en FC.",
+              edit: { key: "budget", type: "number", value: String(selectedAction.budget) },
+            },
+            {
+              label: "Coût réel",
+              value: fcFormat(selectedAction.coutReel),
+              description: "Coût réellement dépensé, en FC.",
+              edit: { key: "coutReel", type: "number", value: String(selectedAction.coutReel) },
+            },
+            {
+              label: "Contacts touchés",
+              value: selectedAction.contacts,
+              description: "Nombre de personnes touchées par cette action.",
+              edit: { key: "contacts", type: "number", value: String(selectedAction.contacts) },
+            },
+            {
+              label: "Prospects générés",
+              value: selectedAction.prospects,
+              description: "Nombre de prospects générés par cette action.",
+              edit: { key: "prospects", type: "number", value: String(selectedAction.prospects) },
+            },
+            {
+              label: "Ventes générées",
+              value: fcFormat(selectedAction.ventesGenerees),
+              description: "Chiffre d'affaires attribué à cette action, saisi manuellement.",
+              edit: {
+                key: "ventesGenerees",
+                type: "number",
+                value: String(selectedAction.ventesGenerees),
+              },
+            },
+            {
+              label: "ROI",
+              value: pctFormat(
+                selectedAction.coutReel
+                  ? (selectedAction.ventesGenerees - selectedAction.coutReel) /
+                      selectedAction.coutReel
+                  : 0,
+              ),
+              description: "Calculé automatiquement : (ventes générées − coût réel) / coût réel.",
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="marketing" />
     </div>
   );
 }
 
 function FinancesSection() {
-  const { computed } = useErp();
+  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const [selectedCharge, setSelectedCharge] = useState<(typeof state.charges)[number] | null>(null);
+  const [selectedRow, setSelectedRow] = useState<{
+    card: "revenus" | "couts" | "resultat";
+    label: string;
+    value: string;
+    lecture?: string;
+    breakdown?: DetailField["breakdown"];
+  } | null>(null);
+  const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
+  const revenusRows = [
+    {
+      label: "Chiffre d'affaires brut",
+      value: fcWithUsd(computed.ca),
+      lecture: "Calculé automatiquement : somme des montants bruts de toutes les ventes.",
+    },
+    {
+      label: "Encaissements",
+      value: fcWithUsd(computed.encaissements),
+      lecture:
+        "Calculé automatiquement : somme des montants réellement encaissés sur toutes les ventes.",
+    },
+    {
+      label: "Créances clients",
+      value: fcWithUsd(computed.creances),
+      lecture:
+        "Calculé automatiquement : chiffre d'affaires − encaissements, ce qui reste dû par les clients.",
+      breakdown: breakdowns.creances,
+    },
+  ];
+  const coutsRows = [
+    {
+      label: "Achats ananas",
+      value: fcWithUsd(computed.coutAchats),
+      lecture:
+        "Calculé automatiquement : somme des valeurs d'achat de toutes les réceptions (Approvisionnement).",
+    },
+    {
+      label: "Transport et frais",
+      value: fcWithUsd(computed.coutTransport),
+      lecture:
+        "Calculé automatiquement : somme du transport et autres frais de toutes les réceptions.",
+    },
+    {
+      label: "Autres charges d'exploitation",
+      value: fcWithUsd(computed.autresCharges),
+      lecture:
+        "Calculé automatiquement : somme des montants « Réalisé » des Charges fixes ci-dessus.",
+    },
+    {
+      label: "Marketing",
+      value: fcWithUsd(computed.coutMarketing),
+      lecture: "Calculé automatiquement : somme des coûts réels de toutes les actions marketing.",
+    },
+    {
+      label: "TOTAL COÛTS",
+      value: fcWithUsd(computed.totalCouts),
+      lecture: "Calculé automatiquement : somme de toutes les lignes ci-dessus.",
+      breakdown: breakdowns.totalCouts,
+    },
+  ];
+  const resultatRows = [
+    {
+      label: "Résultat brut hors amortissement",
+      value: fcWithUsd(computed.resultatBrut),
+      lecture: "Calculé automatiquement : chiffre d'affaires − total des coûts.",
+      breakdown: breakdowns.resultatBrut,
+    },
+    {
+      label: "Marge brute",
+      value: pctFormat(computed.margeBrute),
+      lecture: "Calculé automatiquement : résultat brut / chiffre d'affaires.",
+      breakdown: breakdowns.margeBrute,
+    },
+    {
+      label: "Rendement sur coûts",
+      value: pctFormat(computed.rendementSurCouts),
+      lecture: "Calculé automatiquement : résultat brut / total des coûts.",
+      breakdown: breakdowns.rendementSurCouts,
+    },
+    {
+      label: "Coût moyen / bouteille",
+      value: fcWithUsd(computed.coutMoyenBouteille),
+      lecture: "Calculé automatiquement : total des coûts / bouteilles produites.",
+      breakdown: breakdowns.coutMoyenBouteille,
+    },
+    {
+      label: "Prix moyen vendu",
+      value: fcWithUsd(computed.prixMoyenVendu),
+      lecture: "Calculé automatiquement : chiffre d'affaires / bouteilles vendues.",
+      breakdown: breakdowns.prixMoyenVendu,
+    },
+    {
+      label: "Marge unitaire",
+      value: fcWithUsd(computed.margeUnitaire),
+      lecture: "Calculé automatiquement : prix moyen vendu − coût moyen par bouteille.",
+      breakdown: breakdowns.margeUnitaire,
+    },
+    {
+      label: "Besoin cycle suivant",
+      value: fcWithUsd(computed.totalCouts),
+      lecture:
+        "Calculé automatiquement : total des coûts — trésorerie minimum recommandée pour financer la prochaine campagne.",
+      breakdown: breakdowns.totalCouts,
+    },
+  ];
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 06"
+        eyebrow="Module ERP 03"
         title="Finances de campagne"
         subtitle="Analyse hors amortissement"
         responsable="Direction Générale"
       />
-      <ExportBar section="finances" />
+
+      <Card
+        title="Charges fixes"
+        action={
+          <EntryForm
+            submitLabel="Nouvelle charge"
+            fields={[
+              { name: "rubrique", label: "Rubrique" },
+              { name: "budget", label: "Budget (FC)", type: "number", default: 0 },
+              { name: "realise", label: "Réalisé (FC)", type: "number", default: 0 },
+            ]}
+            onSubmit={(v) =>
+              addRow("charges", {
+                id: newId("CH"),
+                rubrique: v.rubrique,
+                budget: n(v.budget),
+                realise: n(v.realise),
+              })
+            }
+          />
+        }
+      >
+        <Table
+          onRowClick={(i) => setSelectedCharge(state.charges[i])}
+          headers={["Rubrique", "Budget", "Réalisé", ""]}
+          empty="Aucune charge fixe enregistrée."
+          rows={state.charges.map((c) => [
+            c.rubrique,
+            fcFormat(c.budget),
+            fcFormat(c.realise),
+            <DeleteButton
+              onClick={(e) => {
+                e.stopPropagation();
+                removeRow("charges", c.id);
+              }}
+            />,
+          ])}
+        />
+      </Card>
+
+      {selectedCharge && (
+        <RecordDetailModal
+          title={selectedCharge.rubrique}
+          onClose={() => setSelectedCharge(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "charges", selectedCharge.id), patch);
+            setSelectedCharge(null);
+          }}
+          onDelete={() => {
+            removeRow("charges", selectedCharge.id);
+            setSelectedCharge(null);
+          }}
+          fields={[
+            {
+              label: "Rubrique",
+              value: selectedCharge.rubrique,
+              description: "Intitulé de la charge fixe.",
+              edit: { key: "rubrique", type: "text", value: selectedCharge.rubrique },
+            },
+            {
+              label: "Budget",
+              value: fcFormat(selectedCharge.budget),
+              description: "Montant budgété pour cette charge, en FC.",
+              edit: { key: "budget", type: "number", value: String(selectedCharge.budget) },
+            },
+            {
+              label: "Réalisé",
+              value: fcFormat(selectedCharge.realise),
+              description:
+                "Montant réellement dépensé, en FC — alimente « Autres charges d'exploitation » ci-dessous.",
+              edit: { key: "realise", type: "number", value: String(selectedCharge.realise) },
+            },
+          ]}
+        />
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card title="Revenus">
           <Table
+            onRowClick={(i) => setSelectedRow({ card: "revenus", ...revenusRows[i] })}
             headers={["Rubrique", "Montant"]}
-            rows={[
-              ["Chiffre d'affaires brut", fcFormat(computed.ca)],
-              ["Encaissements", fcFormat(computed.encaissements)],
-              ["Créances clients", fcFormat(computed.creances)],
-            ]}
+            rows={revenusRows.map((r) => [r.label, r.value])}
           />
         </Card>
         <Card title="Coûts d'exploitation">
           <Table
+            onRowClick={(i) => setSelectedRow({ card: "couts", ...coutsRows[i] })}
             headers={["Rubrique", "Réalisé"]}
-            rows={[
-              ["Achats ananas", fcFormat(computed.coutAchats)],
-              ["Transport et frais", fcFormat(computed.coutTransport)],
-              ["Autres charges d'exploitation", fcFormat(computed.autresCharges)],
-              ["Marketing", fcFormat(computed.coutMarketing)],
-              ["TOTAL COÛTS", fcFormat(computed.totalCouts)],
-            ]}
+            rows={coutsRows.map((r) => [r.label, r.value])}
           />
         </Card>
       </div>
 
       <Card title="Résultat & indicateurs unitaires">
         <Table
+          onRowClick={(i) => setSelectedRow({ card: "resultat", ...resultatRows[i] })}
           headers={["Indicateur", "Valeur", "Lecture"]}
-          rows={[
-            ["Résultat brut hors amortissement", fcFormat(computed.resultatBrut), "CA − coûts"],
-            ["Marge brute", pctFormat(computed.margeBrute), "Résultat / CA"],
-            ["Rendement sur coûts", pctFormat(computed.rendementSurCouts), "Résultat / coûts"],
-            [
-              "Coût moyen / bouteille",
-              fcFormat(computed.coutMoyenBouteille),
-              "Coût d'exploitation moyen",
-            ],
-            [
-              "Prix moyen vendu",
-              fcFormat(computed.prixMoyenVendu),
-              "Recette moyenne par bouteille",
-            ],
-            ["Marge unitaire", fcFormat(computed.margeUnitaire), "Hors amortissement"],
-            ["Besoin cycle suivant", fcFormat(computed.totalCouts), "Fonds de roulement minimum"],
-          ]}
+          rows={resultatRows.map((r) => [r.label, r.value, r.lecture])}
         />
       </Card>
+
+      {selectedRow && (
+        <RecordDetailModal
+          title={selectedRow.label}
+          onClose={() => setSelectedRow(null)}
+          fields={[
+            {
+              label: selectedRow.card === "resultat" ? "Valeur" : "Montant",
+              value: selectedRow.value,
+              description: selectedRow.lecture,
+              breakdown: selectedRow.breakdown,
+            },
+          ]}
+        />
+      )}
+
+      <ExportBar section="finances" />
     </div>
   );
 }
@@ -1832,6 +3794,7 @@ interface Invite {
 function InviteCard() {
   const { profile } = useAuth();
   const [invites, setInvites] = useState<Invite[]>([]);
+  const [selectedInvite, setSelectedInvite] = useState<Invite | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"admin" | "staff">("staff");
   const [poste, setPoste] = useState<StaffPoste>("Personnalisé");
@@ -1981,7 +3944,7 @@ function InviteCard() {
               Toutes les sections
             </button>
             {!allMenus &&
-              SECTIONS.map((s) => (
+              ALL_MENU_OPTIONS.map((s) => (
                 <button
                   key={s.id}
                   type="button"
@@ -2001,6 +3964,7 @@ function InviteCard() {
 
       <div className="mt-5 overflow-hidden rounded-xl border border-border">
         <Table
+          onRowClick={(i) => setSelectedInvite(invites[i])}
           headers={["E-mail", "Rôle", "Poste", "Sections", "Statut", "Lien"]}
           rows={invites.map((inv) => [
             inv.email,
@@ -2015,7 +3979,7 @@ function InviteCard() {
             inv.used ? (
               "—"
             ) : (
-              <div className="flex gap-2">
+              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
                 <button
                   onClick={() => copyLink(inv)}
                   className="text-xs font-semibold text-primary hover:underline"
@@ -2028,6 +3992,55 @@ function InviteCard() {
           ])}
         />
       </div>
+
+      {selectedInvite && (
+        <RecordDetailModal
+          title={selectedInvite.email}
+          subtitle={`Invitation créée le ${new Date(selectedInvite.createdAt).toLocaleDateString("fr-FR")}`}
+          onClose={() => setSelectedInvite(null)}
+          onDelete={
+            selectedInvite.used
+              ? undefined
+              : () => {
+                  revoke(selectedInvite);
+                  setSelectedInvite(null);
+                }
+          }
+          fields={[
+            {
+              label: "E-mail",
+              value: selectedInvite.email,
+              description:
+                "L'adresse à laquelle le lien d'invitation doit être partagé — firestore.rules exige qu'elle corresponde exactement à l'e-mail utilisé pour créer le compte.",
+            },
+            {
+              label: "Rôle",
+              value: selectedInvite.role,
+              description: "Rôle attribué au compte une fois l'invitation acceptée.",
+            },
+            {
+              label: "Poste",
+              value: selectedInvite.poste || "—",
+              description:
+                "Poste (sprint 17) — détermine à la fois le menu affiché et, pour les postes nommés, les collections Firestore réellement accessibles.",
+            },
+            {
+              label: "Sections",
+              value:
+                selectedInvite.menus === "all" ? "Toutes" : selectedInvite.menus.join(", ") || "—",
+              description:
+                "Sections du dashboard visibles pour ce compte, dérivées du poste ou choisies à la main.",
+            },
+            {
+              label: "Statut",
+              value: selectedInvite.used ? "Utilisée" : "En attente",
+              description: selectedInvite.used
+                ? "Cette invitation a déjà été utilisée pour créer un compte — elle ne peut plus être révoquée ni réutilisée."
+                : "Pas encore utilisée — peut être révoquée (supprimée) ci-dessous si elle n'est plus nécessaire.",
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
@@ -2039,6 +4052,7 @@ interface Boutique {
   contactName?: string;
   phone?: string;
   address?: { ville: string; commune: string; quartier: string; repere?: string };
+  idNumber?: string;
   verified?: boolean;
 }
 
@@ -2046,10 +4060,14 @@ interface Boutique {
  * Boutique verification (sprint 16) — an informational "AROM called and
  * confirmed this shop is real" flag, not a checkout gate. Partner data
  * collection already happens at onboarding (sprint 13); this just gives
- * admin something to act on afterward.
+ * admin something to act on afterward. `idNumber` (the CNI/RCCM collected
+ * at signup) is now shown here too (sprint 18) — before, admin had nothing
+ * to actually look at before clicking "Vérifié".
  */
 function BoutiquesCard() {
   const [boutiques, setBoutiques] = useState<Boutique[]>([]);
+  const [unverifiedOnly, setUnverifiedOnly] = useState(false);
+  const [selectedBoutique, setSelectedBoutique] = useState<Boutique | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "partner"));
@@ -2059,7 +4077,15 @@ function BoutiquesCard() {
         setBoutiques(
           snap.docs
             .map((d) => ({ uid: d.id, ...(d.data() as Omit<Boutique, "uid">) }))
-            .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+            // Unverified first — new signups are what admin needs to find,
+            // not buried in an alphabetical list of everyone already checked.
+            .sort((a, b) =>
+              !!a.verified === !!b.verified
+                ? a.displayName.localeCompare(b.displayName)
+                : a.verified
+                  ? 1
+                  : -1,
+            ),
         ),
       (err) => toast.error(`Synchronisation "boutiques" impossible : ${err.message}`),
     );
@@ -2070,12 +4096,28 @@ function BoutiquesCard() {
       toast.error(`Mise à jour impossible : ${err.message}`),
     );
 
+  const unverifiedCount = boutiques.filter((b) => !b.verified).length;
+  const visible = unverifiedOnly ? boutiques.filter((b) => !b.verified) : boutiques;
+
   return (
-    <Card title="Boutiques partenaires">
+    <Card
+      title={`Boutiques partenaires${unverifiedCount > 0 ? ` (${unverifiedCount} à vérifier)` : ""}`}
+      action={
+        <button
+          onClick={() => setUnverifiedOnly((v) => !v)}
+          className={`rounded-lg border border-border px-3 py-2 text-xs font-semibold transition ${
+            unverifiedOnly ? "bg-primary text-primary-foreground" : "text-muted-foreground"
+          }`}
+        >
+          Non vérifiées seulement
+        </button>
+      }
+    >
       <Table
-        headers={["Boutique", "Responsable", "Contact", "Adresse", "Vérifié"]}
+        onRowClick={(i) => setSelectedBoutique(visible[i])}
+        headers={["Boutique", "Responsable", "Contact", "Adresse", "N° CNI/RCCM", "Vérifié"]}
         empty="Aucune boutique inscrite pour l'instant."
-        rows={boutiques.map((b) => [
+        rows={visible.map((b) => [
           b.displayName,
           b.contactName || "—",
           <div className="text-xs">
@@ -2083,8 +4125,12 @@ function BoutiquesCard() {
             <p className="text-muted-foreground">{b.email}</p>
           </div>,
           b.address ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}` : "—",
+          b.idNumber || "—",
           <button
-            onClick={() => toggleVerified(b)}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleVerified(b);
+            }}
             className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
               b.verified ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
             }`}
@@ -2093,6 +4139,63 @@ function BoutiquesCard() {
           </button>,
         ])}
       />
+
+      {selectedBoutique && (
+        <RecordDetailModal
+          title={selectedBoutique.displayName}
+          subtitle={selectedBoutique.email}
+          onClose={() => setSelectedBoutique(null)}
+          onSave={(patch) => {
+            updateDoc(doc(db, "users", selectedBoutique.uid), patch);
+            setSelectedBoutique(null);
+          }}
+          fields={[
+            {
+              label: "Boutique",
+              value: selectedBoutique.displayName,
+              description: "Nom de la boutique, choisi à l'inscription sur /storefront/signup.",
+            },
+            {
+              label: "Responsable",
+              value: selectedBoutique.contactName || "—",
+              description:
+                "Personne à contacter, collectée à l'étape « Contact » de l'inscription.",
+              edit: {
+                key: "contactName",
+                type: "text",
+                value: selectedBoutique.contactName ?? "",
+              },
+            },
+            {
+              label: "Téléphone",
+              value: selectedBoutique.phone ? `+${selectedBoutique.phone}` : "—",
+              description:
+                "Numéro collecté à l'inscription — sert aussi de canal de confirmation KYC par téléphone (sprint 16).",
+              edit: { key: "phone", type: "text", value: selectedBoutique.phone ?? "" },
+            },
+            {
+              label: "Adresse",
+              value: selectedBoutique.address
+                ? `${selectedBoutique.address.quartier}, ${selectedBoutique.address.commune}, ${selectedBoutique.address.ville}`
+                : "—",
+              description:
+                "Adresse structurée collectée à l'étape « Localisation » de l'inscription — modifiable uniquement par la boutique elle-même depuis /storefront/profile.",
+            },
+            {
+              label: "N° CNI/RCCM",
+              value: selectedBoutique.idNumber || "—",
+              description:
+                "Pièce d'identification optionnelle collectée à l'inscription (sprint 13), surfacée ici depuis sprint 18 pour appuyer la vérification.",
+            },
+            {
+              label: "Vérifié",
+              value: selectedBoutique.verified ? "Vérifié" : "Non vérifié",
+              description:
+                "Bascule via le bouton du tableau, pas ici — confirmation informationnelle par téléphone (sprint 16), ne bloque jamais la commande.",
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
@@ -2113,6 +4216,7 @@ interface StaffMember {
  */
 function StaffCard() {
   const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [selectedStaff, setSelectedStaff] = useState<StaffMember | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "staff"));
@@ -2144,6 +4248,7 @@ function StaffCard() {
   return (
     <Card title="Équipe (staff)">
       <Table
+        onRowClick={(i) => setSelectedStaff(staff[i])}
         headers={["Nom", "E-mail", "Poste"]}
         empty="Aucun compte staff pour l'instant."
         rows={staff.map((s) => [
@@ -2151,6 +4256,7 @@ function StaffCard() {
           s.email,
           <select
             value={s.poste ?? ""}
+            onClick={(e) => e.stopPropagation()}
             onChange={(e) => setPosteFor(s, e.target.value)}
             className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
           >
@@ -2163,6 +4269,32 @@ function StaffCard() {
           </select>,
         ])}
       />
+
+      {selectedStaff && (
+        <RecordDetailModal
+          title={selectedStaff.displayName}
+          subtitle={selectedStaff.email}
+          onClose={() => setSelectedStaff(null)}
+          fields={[
+            {
+              label: "Nom",
+              value: selectedStaff.displayName,
+              description: "Nom saisi par la personne elle-même en acceptant son invitation.",
+            },
+            {
+              label: "E-mail",
+              value: selectedStaff.email,
+              description: "Identifiant de connexion de ce compte.",
+            },
+            {
+              label: "Poste",
+              value: selectedStaff.poste ?? "Non assigné (accès complet)",
+              description:
+                "Modifiable via le sélecteur du tableau, pas ici — un poste nommé restreint réellement, au niveau firestore.rules, les collections accessibles (sprint 17). Désactiver ce compte reste réservé au CLI pour l'instant (voir la feuille de route).",
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
@@ -2180,6 +4312,7 @@ function ProductionBonusCard() {
   const { state, computed } = useErp();
   const p = state.parametres;
   const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [selectedRow, setSelectedRow] = useState<{ label: string; value: string } | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "staff"));
@@ -2205,9 +4338,31 @@ function ProductionBonusCard() {
   const attribue = rows.reduce((a, r) => a + r.valeur, 0);
   const nonAttribue = computed.valeurProduction - attribue;
 
+  const objectifDescriptions: Record<string, string> = {
+    Production:
+      "Calculé automatiquement : bouteilles produites (tous formats) vs objectif de campagne défini dans Paramètres ERP.",
+    "Rendement volume":
+      "Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots.",
+    Pertes:
+      "Calculé automatiquement : volume perdu / volume de jus, comparé au taux de pertes maximum toléré.",
+  };
+  const primeDescription =
+    "Calculé automatiquement : primes par personne = valeur produite de leurs lots (staffUid) × taux de prime (Paramètres ERP). « Non attribué » regroupe les lots sans staffUid — antérieurs au sprint 17 ou saisis par un compte non scopé.";
   return (
     <Card title="Directeur de Production">
       <Table
+        onRowClick={(i) =>
+          setSelectedRow({
+            label: ["Production", "Rendement volume", "Pertes"][i],
+            value: String(
+              [
+                computed.bouteillesProduites,
+                pctFormat(computed.rendementMoyen),
+                pctFormat(computed.tauxPertes),
+              ][i],
+            ),
+          })
+        }
         headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
         rows={[
           [
@@ -2238,6 +4393,15 @@ function ProductionBonusCard() {
         Prime par personne ({pctFormat(p.tauxPrimeProduction)} de la valeur produite)
       </p>
       <Table
+        onRowClick={(i) => {
+          const all = [
+            ...rows.map((r) => ({ label: r.displayName, value: fcFormat(r.prime) })),
+            ...(nonAttribue > 0.01
+              ? [{ label: "Non attribué", value: fcFormat(nonAttribue * p.tauxPrimeProduction) }]
+              : []),
+          ];
+          setSelectedRow(all[i]);
+        }}
         headers={["Nom", "Bouteilles", "Valeur produite", "Prime"]}
         empty="Aucun Directeur de Production assigné — voir la carte Équipe ci-dessus."
         rows={[
@@ -2254,6 +4418,20 @@ function ProductionBonusCard() {
             : []),
         ]}
       />
+
+      {selectedRow && (
+        <RecordDetailModal
+          title={selectedRow.label}
+          onClose={() => setSelectedRow(null)}
+          fields={[
+            {
+              label: "Valeur",
+              value: selectedRow.value,
+              description: objectifDescriptions[selectedRow.label] ?? primeDescription,
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
@@ -2262,6 +4440,7 @@ function CommercialBonusCard() {
   const { state, computed } = useErp();
   const p = state.parametres;
   const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [selectedRow, setSelectedRow] = useState<{ label: string; value: string } | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "staff"));
@@ -2287,9 +4466,29 @@ function CommercialBonusCard() {
   const attribue = rows.reduce((a, r) => a + r.encaisse, 0);
   const nonAttribue = computed.encaissements - attribue;
 
+  const objectifDescriptions: Record<string, string> = {
+    Ventes:
+      "Calculé automatiquement : bouteilles vendues (toutes ventes) vs objectif de campagne défini dans Paramètres ERP.",
+    Clients: "Calculé automatiquement : nombre de clients distincts ayant acheté, vs objectif.",
+    Encaissement: "Calculé automatiquement : encaissements / chiffre d'affaires brut.",
+  };
+  const commissionDescription =
+    "Calculé automatiquement : commission par personne = encaissé sur leurs ventes (staffUid) × taux de commission (Paramètres ERP). « Non attribué » regroupe les ventes sans staffUid — antérieures au sprint 17 ou saisies par un compte non scopé.";
   return (
     <Card title="Chargée de Commercialisation">
       <Table
+        onRowClick={(i) =>
+          setSelectedRow({
+            label: ["Ventes", "Clients", "Encaissement"][i],
+            value: String(
+              [
+                computed.bouteillesVendues,
+                computed.clientsActifs,
+                pctFormat(computed.tauxEncaissement),
+              ][i],
+            ),
+          })
+        }
         headers={["Indicateur", "Objectif", "Réalisé", "Statut"]}
         rows={[
           [
@@ -2322,6 +4521,15 @@ function CommercialBonusCard() {
         Commission par personne ({pctFormat(p.tauxCommission)} des encaissements)
       </p>
       <Table
+        onRowClick={(i) => {
+          const all = [
+            ...rows.map((r) => ({ label: r.displayName, value: fcFormat(r.commission) })),
+            ...(nonAttribue > 0.01
+              ? [{ label: "Non attribué", value: fcFormat(nonAttribue * p.tauxCommission) }]
+              : []),
+          ];
+          setSelectedRow(all[i]);
+        }}
         headers={["Nom", "Bouteilles vendues", "Encaissé", "Commission"]}
         empty="Aucune Chargée de Commercialisation assignée — voir la carte Équipe ci-dessus."
         rows={[
@@ -2343,33 +4551,45 @@ function CommercialBonusCard() {
             : []),
         ]}
       />
+
+      {selectedRow && (
+        <RecordDetailModal
+          title={selectedRow.label}
+          onClose={() => setSelectedRow(null)}
+          fields={[
+            {
+              label: "Valeur",
+              value: selectedRow.value,
+              description: objectifDescriptions[selectedRow.label] ?? commissionDescription,
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
 
-function PersonnelSection() {
+function PersonnelSection({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: string;
+  onTabChange: (tab: string) => void;
+}) {
   const { computed } = useErp();
+  const [showTotalDetail, setShowTotalDetail] = useState(false);
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 07"
+        eyebrow="Module ERP 04"
         title="Primes & commissions"
         subtitle="Calcul automatique sur production conforme et encaissements, par personne"
         responsable="Direction Générale"
       />
 
-      <InviteCard />
-
-      <StaffCard />
-
-      <BoutiquesCard />
-
-      <ProductionBonusCard />
-
-      <CommercialBonusCard />
-
       <Card title="Total primes campagne">
         <Table
+          onRowClick={() => setShowTotalDetail(true)}
           headers={["Période", "Base production", "Base encaissements", "Total primes"]}
           rows={[
             [
@@ -2381,18 +4601,78 @@ function PersonnelSection() {
           ]}
         />
       </Card>
+
+      {showTotalDetail && (
+        <RecordDetailModal
+          title="Total primes campagne"
+          onClose={() => setShowTotalDetail(false)}
+          fields={[
+            {
+              label: "Base production",
+              value: fcFormat(computed.valeurProduction),
+              description:
+                "Calculé automatiquement : valeur totale des lots produits (Production) — base des primes de production.",
+            },
+            {
+              label: "Base encaissements",
+              value: fcFormat(computed.encaissements),
+              description:
+                "Calculé automatiquement : total des montants encaissés (Ventes) — base des commissions commerciales.",
+            },
+            {
+              label: "Total primes",
+              value: fcFormat(computed.totalPrimes),
+              description:
+                "Calculé automatiquement : primes de production + commissions commerciales, tous détails par personne dans les onglets « Primes production » / « Primes commercial » ci-dessous.",
+            },
+          ]}
+        />
+      )}
+
+      <Tabs value={activeTab} onValueChange={onTabChange}>
+        <TabsList>
+          <TabsTrigger value="invitations">Invitations</TabsTrigger>
+          <TabsTrigger value="equipe">Équipe</TabsTrigger>
+          <TabsTrigger value="boutiques">Boutiques partenaires</TabsTrigger>
+          <TabsTrigger value="primes-production">Primes production</TabsTrigger>
+          <TabsTrigger value="primes-commercial">Primes commercial</TabsTrigger>
+        </TabsList>
+        <TabsContent value="invitations">
+          <InviteCard />
+        </TabsContent>
+        <TabsContent value="equipe">
+          <StaffCard />
+        </TabsContent>
+        <TabsContent value="boutiques">
+          <BoutiquesCard />
+        </TabsContent>
+        <TabsContent value="primes-production">
+          <ProductionBonusCard />
+        </TabsContent>
+        <TabsContent value="primes-commercial">
+          <CommercialBonusCard />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
 
 function KpiSection() {
-  const { state, computed } = useErp();
+  const { state, computed, fcPerUsd } = useErp();
   const p = state.parametres;
+  const breakdowns = buildBreakdowns(computed);
+  // Appends the USD-equivalent to a FC figure's display value, when a rate is cached.
+  const fcWithUsd = (n: number) => {
+    const usd = usdFormat(n, fcPerUsd);
+    return usd ? `${fcFormat(n)} (${usd})` : fcFormat(n);
+  };
   const items = [
     {
       k: "Taux de transformation",
       o: "100 %",
       r: pctFormat(computed.kgAchetes ? computed.kgTransformes / computed.kgAchetes : 0),
+      d: "Calculé automatiquement : kg transformés (Production) / kg achetés (Approvisionnement).",
+      b: breakdowns.tauxTransformation,
     },
     {
       k: "Taux de vente",
@@ -2402,28 +4682,79 @@ function KpiSection() {
           ? computed.bouteillesVendues / computed.bouteillesProduites
           : 0,
       ),
+      d: "Calculé automatiquement : bouteilles vendues (Commercialisation) / bouteilles produites (Production).",
+      b: breakdowns.tauxVente,
     },
-    { k: "Taux d'encaissement", o: "100 %", r: pctFormat(computed.tauxEncaissement) },
-    { k: "Rendement matière", o: "> 95 %", r: pctFormat(computed.rendementMoyen) },
-    { k: "Pertes", o: `< ${pctFormat(p.tauxPertesMax)}`, r: pctFormat(computed.tauxPertes) },
-    { k: "Clients actifs", o: String(p.objectifClients), r: String(computed.clientsActifs) },
-    { k: "Marge brute", o: pctFormat(p.objectifMargeBrute), r: pctFormat(computed.margeBrute) },
-    { k: "Coût moyen / bouteille", o: "-", r: fcFormat(computed.coutMoyenBouteille) },
-    { k: "Créances à recouvrer", o: "0 FC", r: fcFormat(computed.creances) },
+    {
+      k: "Taux d'encaissement",
+      o: "100 %",
+      r: pctFormat(computed.tauxEncaissement),
+      d: "Calculé automatiquement : encaissements / chiffre d'affaires brut.",
+      b: breakdowns.tauxEncaissement,
+    },
+    {
+      k: "Rendement matière",
+      o: "> 95 %",
+      r: pctFormat(computed.rendementMoyen),
+      d: "Calculé automatiquement : volume conditionné / volume de jus, moyenné sur tous les lots.",
+      b: breakdowns.rendementMoyen,
+    },
+    {
+      k: "Pertes",
+      o: `< ${pctFormat(p.tauxPertesMax)}`,
+      r: pctFormat(computed.tauxPertes),
+      d: "Calculé automatiquement : volume perdu / volume de jus, comparé au taux maximum toléré (Paramètres ERP).",
+      b: breakdowns.tauxPertes,
+    },
+    {
+      k: "Clients actifs",
+      o: String(p.objectifClients),
+      r: String(computed.clientsActifs),
+      d: "Calculé automatiquement : nombre de clients distincts ayant au moins une vente enregistrée.",
+    },
+    {
+      k: "Marge brute",
+      o: pctFormat(p.objectifMargeBrute),
+      r: pctFormat(computed.margeBrute),
+      d: "Calculé automatiquement : résultat brut / chiffre d'affaires.",
+      b: breakdowns.margeBrute,
+    },
+    {
+      k: "Coût moyen / bouteille",
+      o: "-",
+      r: fcWithUsd(computed.coutMoyenBouteille),
+      d: "Calculé automatiquement : total des coûts d'exploitation / bouteilles produites.",
+      b: breakdowns.coutMoyenBouteille,
+    },
+    {
+      k: "Créances à recouvrer",
+      o: "0 FC",
+      r: fcWithUsd(computed.creances),
+      d: "Calculé automatiquement : chiffre d'affaires − encaissements.",
+      b: breakdowns.creances,
+    },
   ];
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 08"
+        eyebrow="Module ERP 05"
         title="Indicateurs stratégiques"
         subtitle="Calculés en temps réel à partir des modules ERP"
       />
-      <ExportBar section="kpi" />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {items.map((i) => (
-          <KpiTile key={i.k} label={i.k} objectif={i.o} realise={i.r} />
+          <KpiTile
+            key={i.k}
+            label={i.k}
+            objectif={i.o}
+            realise={i.r}
+            description={i.d}
+            breakdown={i.b}
+          />
         ))}
       </div>
+
+      <ExportBar section="kpi" />
     </div>
   );
 }
@@ -2443,10 +4774,21 @@ function ParametresSection() {
       />
     </label>
   );
+  const dateField = (label: string, key: keyof typeof p) => (
+    <label className="text-xs font-medium text-muted-foreground">
+      {label}
+      <input
+        type="date"
+        value={String(p[key])}
+        onChange={(e) => updateParametres({ [key]: e.target.value } as never)}
+        className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+      />
+    </label>
+  );
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 09"
+        eyebrow="Module ERP 06"
         title="Paramètres de gestion"
         subtitle="Hypothèses modifiables, elles recalculent tous les tableaux de bord"
         responsable="Direction Générale"
@@ -2477,14 +4819,11 @@ function ParametresSection() {
         </div>
       </Card>
       <Card title="Calendrier de campagne">
-        <Table
-          headers={["Étape", "Date"]}
-          rows={[
-            ["Début production", p.debutProduction],
-            ["Fin production", p.finProduction],
-            ["Fin commercialisation", p.finCommercialisation],
-          ]}
-        />
+        <div className="grid gap-4 sm:grid-cols-3">
+          {dateField("Début production", "debutProduction")}
+          {dateField("Fin production", "finProduction")}
+          {dateField("Fin commercialisation", "finCommercialisation")}
+        </div>
       </Card>
     </div>
   );
@@ -2501,7 +4840,7 @@ function RoadmapSection() {
   return (
     <div className="space-y-6">
       <SectionHeader
-        eyebrow="Module ERP 10"
+        eyebrow="Module ERP 07"
         title="Feuille de route de croissance"
         subtitle="Trajectoire d'industrialisation suivie par la production réelle"
       />
