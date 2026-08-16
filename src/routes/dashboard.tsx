@@ -34,6 +34,8 @@ import {
   type Qualite,
 } from "@/lib/erp/model";
 import { ExportBar } from "@/components/erp/ExportBar";
+import { ImportButton } from "@/components/erp/ImportButton";
+import type { ImportLog } from "@/lib/erp/import";
 import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
@@ -1707,50 +1709,58 @@ function ApproSection() {
       <Card
         title="Réceptions fournisseurs"
         action={
-          <EntryForm
-            submitLabel="Nouvelle réception"
-            fields={[
-              { name: "numero", label: "N° réception", default: "002_2026" },
-              { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-              { name: "idProducteur", label: "ID producteur", default: "PRD-001" },
-              { name: "fournisseur", label: "Fournisseur" },
-              { name: "village", label: "Village" },
-              { name: "qteCommandeeKg", label: "Qté commandée (kg)", type: "number", default: 0 },
-              { name: "qteRecueKg", label: "Qté reçue (kg)", type: "number", default: 0 },
-              { name: "prixKg", label: "Prix FC/kg", type: "number", default: p.prix300 ? 742 : 0 },
-              { name: "transport", label: "Transport FC", type: "number", default: 0 },
-              { name: "autresFrais", label: "Autres frais FC", type: "number", default: 0 },
-              {
-                name: "qualite",
-                label: "Qualité",
-                type: "select",
-                options: QUALITES,
-                default: "Conforme",
-              },
-            ]}
-            onSubmit={(v) => {
-              addRow("approvisionnements", {
-                id: newId("APP"),
-                numero: v.numero,
-                date: v.date,
-                idProducteur: v.idProducteur,
-                fournisseur: v.fournisseur,
-                village: v.village,
-                produit: "Ananas",
-                qteCommandeeKg: n(v.qteCommandeeKg),
-                qteRecueKg: n(v.qteRecueKg),
-                prixKg: n(v.prixKg),
-                transport: n(v.transport),
-                autresFrais: n(v.autresFrais),
-                qualite: v.qualite as Qualite,
-              });
-              createTask(
-                "production",
-                `Transformer la réception ${v.numero} (${n(v.qteRecueKg)} kg)`,
-                v.numero,
-              );
-            }}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <ImportButton target="approvisionnements" />
+            <EntryForm
+              submitLabel="Nouvelle réception"
+              fields={[
+                { name: "numero", label: "N° réception", default: "002_2026" },
+                { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                { name: "idProducteur", label: "ID producteur", default: "PRD-001" },
+                { name: "fournisseur", label: "Fournisseur" },
+                { name: "village", label: "Village" },
+                { name: "qteCommandeeKg", label: "Qté commandée (kg)", type: "number", default: 0 },
+                { name: "qteRecueKg", label: "Qté reçue (kg)", type: "number", default: 0 },
+                {
+                  name: "prixKg",
+                  label: "Prix FC/kg",
+                  type: "number",
+                  default: p.prix300 ? 742 : 0,
+                },
+                { name: "transport", label: "Transport FC", type: "number", default: 0 },
+                { name: "autresFrais", label: "Autres frais FC", type: "number", default: 0 },
+                {
+                  name: "qualite",
+                  label: "Qualité",
+                  type: "select",
+                  options: QUALITES,
+                  default: "Conforme",
+                },
+              ]}
+              onSubmit={(v) => {
+                addRow("approvisionnements", {
+                  id: newId("APP"),
+                  numero: v.numero,
+                  date: v.date,
+                  idProducteur: v.idProducteur,
+                  fournisseur: v.fournisseur,
+                  village: v.village,
+                  produit: "Ananas",
+                  qteCommandeeKg: n(v.qteCommandeeKg),
+                  qteRecueKg: n(v.qteRecueKg),
+                  prixKg: n(v.prixKg),
+                  transport: n(v.transport),
+                  autresFrais: n(v.autresFrais),
+                  qualite: v.qualite as Qualite,
+                });
+                createTask(
+                  "production",
+                  `Transformer la réception ${v.numero} (${n(v.qteRecueKg)} kg)`,
+                  v.numero,
+                );
+              }}
+            />
+          </div>
         }
       >
         <Table
@@ -1931,7 +1941,7 @@ function ApproSection() {
         />
       </div>
 
-      <Card title="Registre des producteurs">
+      <Card title="Registre des producteurs" action={<ImportButton target="producteurs" />}>
         <Table
           onRowClick={(i) => setSelectedProducteur(state.producteurs[i])}
           headers={[
@@ -2078,46 +2088,49 @@ function ProductionSection() {
       <Card
         title="Lots de production"
         action={
-          <EntryForm
-            submitLabel="Nouveau lot"
-            fields={[
-              { name: "lot", label: "N° lot", default: "002_AROM" },
-              { name: "date", label: "Date", type: "date", default: "2026-07-13" },
-              { name: "kgUtilises", label: "Kg ananas utilisés", type: "number", default: 0 },
-              { name: "volumeJusL", label: "Volume jus (L)", type: "number", default: 0 },
-              { name: "q500", label: "500 ml produits", type: "number", default: 0 },
-              { name: "q330", label: "330 ml produits", type: "number", default: 0 },
-              { name: "q300", label: "300 ml produits", type: "number", default: 0 },
-              { name: "rejets", label: "Rejets", type: "number", default: 0 },
-              {
-                name: "statut",
-                label: "Statut lot",
-                type: "select",
-                options: ["En cours", "Terminé"],
-                default: "Terminé",
-              },
-            ]}
-            onSubmit={(v) =>
-              addRow("productions", {
-                id: newId("PRO"),
-                lot: v.lot,
-                date: v.date,
-                kgUtilises: n(v.kgUtilises),
-                volumeJusL: n(v.volumeJusL),
-                q500: n(v.q500),
-                q330: n(v.q330),
-                q300: n(v.q300),
-                rejets: n(v.rejets),
-                // Auto-filled from the logged-in staff member — one less
-                // field to type, and reliable enough (a real uid) to power
-                // per-person bonus tracking (sprint 17), unlike matching on
-                // free-text names.
-                responsable: profile?.displayName || profile?.email || "Équipe production",
-                ...(profile?.uid ? { staffUid: profile.uid } : {}),
-                statut: v.statut,
-              })
-            }
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <ImportButton target="productions" />
+            <EntryForm
+              submitLabel="Nouveau lot"
+              fields={[
+                { name: "lot", label: "N° lot", default: "002_AROM" },
+                { name: "date", label: "Date", type: "date", default: "2026-07-13" },
+                { name: "kgUtilises", label: "Kg ananas utilisés", type: "number", default: 0 },
+                { name: "volumeJusL", label: "Volume jus (L)", type: "number", default: 0 },
+                { name: "q500", label: "500 ml produits", type: "number", default: 0 },
+                { name: "q330", label: "330 ml produits", type: "number", default: 0 },
+                { name: "q300", label: "300 ml produits", type: "number", default: 0 },
+                { name: "rejets", label: "Rejets", type: "number", default: 0 },
+                {
+                  name: "statut",
+                  label: "Statut lot",
+                  type: "select",
+                  options: ["En cours", "Terminé"],
+                  default: "Terminé",
+                },
+              ]}
+              onSubmit={(v) =>
+                addRow("productions", {
+                  id: newId("PRO"),
+                  lot: v.lot,
+                  date: v.date,
+                  kgUtilises: n(v.kgUtilises),
+                  volumeJusL: n(v.volumeJusL),
+                  q500: n(v.q500),
+                  q330: n(v.q330),
+                  q300: n(v.q300),
+                  rejets: n(v.rejets),
+                  // Auto-filled from the logged-in staff member — one less
+                  // field to type, and reliable enough (a real uid) to power
+                  // per-person bonus tracking (sprint 17), unlike matching on
+                  // free-text names.
+                  responsable: profile?.displayName || profile?.email || "Équipe production",
+                  ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                  statut: v.statut,
+                })
+              }
+            />
+          </div>
         }
       >
         <Table
@@ -2361,38 +2374,41 @@ function StockSection() {
       <Card
         title="Mouvements matières premières"
         action={
-          <EntryForm
-            submitLabel="Mouvement"
-            fields={[
-              { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-              { name: "produit", label: "Produit", default: "Ananas" },
-              { name: "unite", label: "Unité", default: "Pièce" },
-              {
-                name: "type",
-                label: "Type",
-                type: "select",
-                options: ["Entrée", "Sortie", "Ajustement"],
-                default: "Entrée",
-              },
-              { name: "entree", label: "Quantité entrée", type: "number", default: 0 },
-              { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
-              { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
-              { name: "observation", label: "Observation" },
-            ]}
-            onSubmit={(v) =>
-              addRow("stockMP", {
-                id: newId("MP"),
-                date: v.date,
-                produit: v.produit,
-                unite: v.unite,
-                type: v.type as "Entrée" | "Sortie" | "Ajustement",
-                entree: n(v.entree),
-                sortie: n(v.sortie),
-                coutUnitaire: n(v.coutUnitaire),
-                observation: v.observation,
-              })
-            }
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <ImportButton target="stockMP" />
+            <EntryForm
+              submitLabel="Mouvement"
+              fields={[
+                { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                { name: "produit", label: "Produit", default: "Ananas" },
+                { name: "unite", label: "Unité", default: "Pièce" },
+                {
+                  name: "type",
+                  label: "Type",
+                  type: "select",
+                  options: ["Entrée", "Sortie", "Ajustement"],
+                  default: "Entrée",
+                },
+                { name: "entree", label: "Quantité entrée", type: "number", default: 0 },
+                { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
+                { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
+                { name: "observation", label: "Observation" },
+              ]}
+              onSubmit={(v) =>
+                addRow("stockMP", {
+                  id: newId("MP"),
+                  date: v.date,
+                  produit: v.produit,
+                  unite: v.unite,
+                  type: v.type as "Entrée" | "Sortie" | "Ajustement",
+                  entree: n(v.entree),
+                  sortie: n(v.sortie),
+                  coutUnitaire: n(v.coutUnitaire),
+                  observation: v.observation,
+                })
+              }
+            />
+          </div>
         }
       >
         <Table
@@ -3266,56 +3282,59 @@ function CommercialisationSection({
           <Card
             title="Journal des ventes"
             action={
-              <EntryForm
-                submitLabel="Nouvelle vente"
-                fields={[
-                  { name: "numero", label: "N° vente", default: "V-001" },
-                  { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-                  { name: "client", label: "Client" },
-                  {
-                    name: "canal",
-                    label: "Canal",
-                    type: "select",
-                    options: CANAUX,
-                    default: "Restaurant",
-                  },
-                  {
-                    name: "format",
-                    label: "Format",
-                    type: "select",
-                    options: FORMATS,
-                    default: "500 ml",
-                  },
-                  { name: "quantite", label: "Quantité", type: "number", default: 0 },
-                  {
-                    name: "prixUnitaire",
-                    label: "Prix unitaire FC",
-                    type: "number",
-                    default: p.prix500,
-                  },
-                  { name: "remise", label: "Remise FC", type: "number", default: 0 },
-                  { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-                ]}
-                onSubmit={(v) =>
-                  addRow("ventes", {
-                    id: newId("VTE"),
-                    numero: v.numero,
-                    date: v.date,
-                    idClient: v.client,
-                    client: v.client,
-                    canal: v.canal as Canal,
-                    format: v.format as Format,
-                    quantite: n(v.quantite),
-                    prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
-                    remise: n(v.remise),
-                    encaisse: n(v.encaisse),
-                    // Auto-filled from the logged-in staff member — see the
-                    // matching note in ProductionSection.
-                    commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
-                    ...(profile?.uid ? { staffUid: profile.uid } : {}),
-                  })
-                }
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                <ImportButton target="ventes" />
+                <EntryForm
+                  submitLabel="Nouvelle vente"
+                  fields={[
+                    { name: "numero", label: "N° vente", default: "V-001" },
+                    { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                    { name: "client", label: "Client" },
+                    {
+                      name: "canal",
+                      label: "Canal",
+                      type: "select",
+                      options: CANAUX,
+                      default: "Restaurant",
+                    },
+                    {
+                      name: "format",
+                      label: "Format",
+                      type: "select",
+                      options: FORMATS,
+                      default: "500 ml",
+                    },
+                    { name: "quantite", label: "Quantité", type: "number", default: 0 },
+                    {
+                      name: "prixUnitaire",
+                      label: "Prix unitaire FC",
+                      type: "number",
+                      default: p.prix500,
+                    },
+                    { name: "remise", label: "Remise FC", type: "number", default: 0 },
+                    { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+                  ]}
+                  onSubmit={(v) =>
+                    addRow("ventes", {
+                      id: newId("VTE"),
+                      numero: v.numero,
+                      date: v.date,
+                      idClient: v.client,
+                      client: v.client,
+                      canal: v.canal as Canal,
+                      format: v.format as Format,
+                      quantite: n(v.quantite),
+                      prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
+                      remise: n(v.remise),
+                      encaisse: n(v.encaisse),
+                      // Auto-filled from the logged-in staff member — see the
+                      // matching note in ProductionSection.
+                      commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
+                      ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                    })
+                  }
+                />
+              </div>
             }
           >
             <Table
@@ -3466,7 +3485,7 @@ function CommercialisationSection({
             />
           )}
 
-          <Card title="Portefeuille clients par canal">
+          <Card title="Portefeuille clients par canal" action={<ImportButton target="clients" />}>
             <Table
               onRowClick={(i) => setSelectedCanal(CANAUX[i])}
               headers={["Canal", "Clients", "Bouteilles", "CA", "Encaissé", "Solde dû"]}
@@ -3851,52 +3870,55 @@ function MarketingSection() {
       <Card
         title="Actions marketing"
         action={
-          <EntryForm
-            submitLabel="Nouvelle action"
-            fields={[
-              { name: "numero", label: "ID action", default: "MKT-001" },
-              { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-              { name: "campagne", label: "Campagne", default: "Campagne pilote 2026" },
-              {
-                name: "canal",
-                label: "Canal",
-                type: "select",
-                options: [
-                  "Dégustation",
-                  "Facebook",
-                  "WhatsApp",
-                  "TikTok",
-                  "Instagram",
-                  "Affiches",
-                  "Prospection terrain",
-                ],
-                default: "Facebook",
-              },
-              { name: "cible", label: "Cible" },
-              { name: "description", label: "Description" },
-              { name: "budget", label: "Budget FC", type: "number", default: 0 },
-              { name: "coutReel", label: "Coût réel FC", type: "number", default: 0 },
-              { name: "contacts", label: "Contacts touchés", type: "number", default: 0 },
-              { name: "prospects", label: "Prospects générés", type: "number", default: 0 },
-              { name: "ventesGenerees", label: "Ventes générées FC", type: "number", default: 0 },
-            ]}
-            onSubmit={(v) =>
-              addRow("marketing", {
-                id: newId("MKT"),
-                numero: v.numero,
-                date: v.date,
-                campagne: v.campagne,
-                canal: v.canal,
-                cible: v.cible,
-                description: v.description,
-                budget: n(v.budget),
-                coutReel: n(v.coutReel),
-                contacts: n(v.contacts),
-                prospects: n(v.prospects),
-                ventesGenerees: n(v.ventesGenerees),
-              })
-            }
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <ImportButton target="marketing" />
+            <EntryForm
+              submitLabel="Nouvelle action"
+              fields={[
+                { name: "numero", label: "ID action", default: "MKT-001" },
+                { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                { name: "campagne", label: "Campagne", default: "Campagne pilote 2026" },
+                {
+                  name: "canal",
+                  label: "Canal",
+                  type: "select",
+                  options: [
+                    "Dégustation",
+                    "Facebook",
+                    "WhatsApp",
+                    "TikTok",
+                    "Instagram",
+                    "Affiches",
+                    "Prospection terrain",
+                  ],
+                  default: "Facebook",
+                },
+                { name: "cible", label: "Cible" },
+                { name: "description", label: "Description" },
+                { name: "budget", label: "Budget FC", type: "number", default: 0 },
+                { name: "coutReel", label: "Coût réel FC", type: "number", default: 0 },
+                { name: "contacts", label: "Contacts touchés", type: "number", default: 0 },
+                { name: "prospects", label: "Prospects générés", type: "number", default: 0 },
+                { name: "ventesGenerees", label: "Ventes générées FC", type: "number", default: 0 },
+              ]}
+              onSubmit={(v) =>
+                addRow("marketing", {
+                  id: newId("MKT"),
+                  numero: v.numero,
+                  date: v.date,
+                  campagne: v.campagne,
+                  canal: v.canal,
+                  cible: v.cible,
+                  description: v.description,
+                  budget: n(v.budget),
+                  coutReel: n(v.coutReel),
+                  contacts: n(v.contacts),
+                  prospects: n(v.prospects),
+                  ventesGenerees: n(v.ventesGenerees),
+                })
+              }
+            />
+          </div>
         }
       >
         <Table
@@ -5343,7 +5365,45 @@ function ParametresSection() {
           {dateField("Fin commercialisation", "finCommercialisation")}
         </div>
       </Card>
+      <ImportLogCard />
     </div>
+  );
+}
+
+/** Audit trail for every CSV/Excel import (sprint 27) — one row per confirmed import, never edited. */
+function ImportLogCard() {
+  const [logs, setLogs] = useState<ImportLog[]>([]);
+
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "importLogs"), orderBy("importedAt", "desc")),
+      (snap) =>
+        setLogs(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ImportLog, "id">) }))),
+      (err) => toast.error(`Synchronisation "journal des imports" impossible : ${err.message}`),
+    );
+  }, []);
+
+  return (
+    <Card title="Journal des imports">
+      {logs.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          Aucun import de fichier effectué pour le moment.
+        </p>
+      ) : (
+        <Table
+          headers={["Date", "Module", "Fichier", "Lignes lues", "Ajoutées", "Ignorées", "Par"]}
+          rows={logs.map((l) => [
+            formatDateOnly(l.importedAt.slice(0, 10)),
+            l.collectionLabel,
+            l.fileName || "—",
+            l.totalRows,
+            l.added,
+            l.skipped,
+            l.importedByName,
+          ])}
+        />
+      )}
+    </Card>
   );
 }
 
