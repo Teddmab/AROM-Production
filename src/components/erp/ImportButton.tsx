@@ -11,6 +11,7 @@ import {
   type ImportTargetKey,
   type ParsedImport,
 } from "@/lib/erp/import";
+import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
 
 const BATCH_SIZE = 400;
 
@@ -22,7 +23,7 @@ const BATCH_SIZE = 400;
  * entry — surfaced in Paramètres ERP's "Journal des imports".
  */
 export function ImportButton({ target }: { target: ImportTargetKey }) {
-  const { state } = useErp();
+  const { state, computed } = useErp();
   const { profile } = useAuth();
   const [open, setOpen] = useState(false);
   const [parsed, setParsed] = useState<ParsedImport | null>(null);
@@ -32,6 +33,14 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const [readyToConfirm, setReadyToConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Imported rows need the same source links a manually-entered row would
+  // require (sprint 33) — since a CSV rarely carries real Firestore ids for
+  // the réception/lot/client it relates to, the operator picks them once
+  // here and every added row in this batch gets the same link(s).
+  const [linkApproIds, setLinkApproIds] = useState<string[]>([]);
+  const [linkProductionIds, setLinkProductionIds] = useState<string[]>([]);
+  const [linkClientId, setLinkClientId] = useState("");
+
   const targetDef = IMPORT_TARGETS[target];
 
   const existingKeys = useMemo(() => {
@@ -39,11 +48,47 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
     return new Set(rows.map((r) => targetDef.dupKeys.map((k) => String(r[k] ?? "")).join("|")));
   }, [state, target, targetDef.dupKeys]);
 
+  const addedRows = parsed?.rows.filter((_, i) => decisions[i] === "add") ?? [];
+  const stockHasEntree = target === "stockMP" && addedRows.some((r) => r.record.type === "Entrée");
+  const stockHasSortie = target === "stockMP" && addedRows.some((r) => r.record.type === "Sortie");
+
+  const receptionOptions = computed.appro.map((r) => ({
+    value: r.id,
+    label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
+  }));
+  const lotOptions = computed.production.map((r) => ({
+    value: r.id,
+    label: `${r.lot} — ${r.date}`,
+  }));
+  const clientOptions = state.clients.map((c) => ({ value: c.id, label: c.nom }));
+
+  const validateLinks = (): string | null => {
+    if (target === "productions" && linkApproIds.length === 0) {
+      return "Réceptions sources requises pour importer des lots de production.";
+    }
+    if (target === "ventes") {
+      if (!linkClientId) return "Client requis pour importer des ventes.";
+      if (linkProductionIds.length === 0) return "Lots sources requis pour importer des ventes.";
+    }
+    if (target === "stockMP") {
+      if (stockHasEntree && linkApproIds.length === 0) {
+        return "Réceptions sources requises pour les mouvements d'entrée de ce fichier.";
+      }
+      if (stockHasSortie && linkProductionIds.length === 0) {
+        return "Lot(s) destination requis pour les mouvements de sortie de ce fichier.";
+      }
+    }
+    return null;
+  };
+
   const reset = () => {
     setParsed(null);
     setDecisions({});
     setFileName("");
     setReadyToConfirm(false);
+    setLinkApproIds([]);
+    setLinkProductionIds([]);
+    setLinkClientId("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -76,14 +121,31 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
 
   const confirmImport = async () => {
     if (!parsed || !profile) return;
+    const linkError = validateLinks();
+    if (linkError) {
+      toast.error(linkError);
+      return;
+    }
     setBusy(true);
     try {
+      const clientName = state.clients.find((c) => c.id === linkClientId)?.nom ?? "";
       const toImport = parsed.rows.filter((_, i) => decisions[i] === "add");
       for (let i = 0; i < toImport.length; i += BATCH_SIZE) {
         const batch = writeBatch(db);
         toImport.slice(i, i + BATCH_SIZE).forEach((row) => {
           const id = newId(targetDef.idPrefix);
-          batch.set(doc(db, target, id), { id, ...row.record });
+          const links: Record<string, string | string[]> = {};
+          if (target === "productions") links.approvisionnementIds = linkApproIds;
+          if (target === "ventes") {
+            links.productionIds = linkProductionIds;
+            links.idClient = linkClientId;
+            links.client = clientName;
+          }
+          if (target === "stockMP") {
+            if (row.record.type === "Entrée") links.approvisionnementIds = linkApproIds;
+            if (row.record.type === "Sortie") links.productionIds = linkProductionIds;
+          }
+          batch.set(doc(db, target, id), { id, ...row.record, ...links });
         });
         await batch.commit();
       }
@@ -207,6 +269,59 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                     )}
                   </div>
 
+                  {(target === "productions" || target === "ventes" || target === "stockMP") && (
+                    <div className="space-y-3 rounded-xl border border-border bg-primary/5 p-4">
+                      <p className="text-xs font-semibold text-foreground">
+                        À quoi ces lignes sont-elles rattachées ?
+                        <span className="ml-1 font-normal text-muted-foreground">
+                          Un fichier importé ne contient pas les identifiants réels des
+                          réceptions/lots/clients existants — indiquez-les une fois ici, ils
+                          s'appliquent à toutes les lignes ajoutées de ce fichier.
+                        </span>
+                      </p>
+                      {(target === "productions" || stockHasEntree) && (
+                        <label className="block text-xs font-medium text-muted-foreground">
+                          Réceptions sources
+                          <span className="text-destructive"> *</span>
+                          <MultiSelectCombobox
+                            options={receptionOptions}
+                            value={linkApproIds}
+                            onChange={setLinkApproIds}
+                          />
+                        </label>
+                      )}
+                      {target === "ventes" && (
+                        <label className="block text-xs font-medium text-muted-foreground">
+                          Client
+                          <span className="text-destructive"> *</span>
+                          <select
+                            value={linkClientId}
+                            onChange={(e) => setLinkClientId(e.target.value)}
+                            className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+                          >
+                            <option value="">— Choisir —</option>
+                            {clientOptions.map((c) => (
+                              <option key={c.value} value={c.value}>
+                                {c.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      {(target === "ventes" || stockHasSortie) && (
+                        <label className="block text-xs font-medium text-muted-foreground">
+                          {target === "ventes" ? "Lots sources" : "Lots destination"}
+                          <span className="text-destructive"> *</span>
+                          <MultiSelectCombobox
+                            options={lotOptions}
+                            value={linkProductionIds}
+                            onChange={setLinkProductionIds}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
+
                   {parsed.matchedFields.length === 0 ? (
                     <p className="rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
                       Aucune colonne reconnue pour « {targetDef.label} ». Vérifiez que le fichier
@@ -292,7 +407,18 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                   Choisir un autre fichier
                 </button>
                 <button
-                  onClick={() => (readyToConfirm ? confirmImport() : setReadyToConfirm(true))}
+                  onClick={() => {
+                    if (readyToConfirm) {
+                      confirmImport();
+                      return;
+                    }
+                    const linkError = validateLinks();
+                    if (linkError) {
+                      toast.error(linkError);
+                      return;
+                    }
+                    setReadyToConfirm(true);
+                  }}
                   disabled={busy || addCount === 0}
                   className={`rounded-lg px-4 py-2 text-xs font-semibold disabled:opacity-50 ${
                     readyToConfirm
