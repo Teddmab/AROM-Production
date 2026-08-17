@@ -41,6 +41,7 @@ import type { ImportLog } from "@/lib/erp/import";
 import type { SiteContent, SiteVideo } from "@/lib/site-content";
 import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
 import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
+import { ConfirmButton } from "@/components/erp/ConfirmButton";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
 import {
@@ -1761,12 +1762,16 @@ function TachesSection() {
 
       {profile?.role === "admin" && (
         <div className="flex justify-end">
-          <button
-            onClick={backfillMissingTasks}
+          <ConfirmButton
+            onConfirm={backfillMissingTasks}
+            confirmLabel="Confirmer ?"
+            ariaLabel="Générer les tâches manquantes"
+            confirmAriaLabel="Confirmer la génération des tâches manquantes"
             className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
+            confirmClassName="rounded-lg border border-warning bg-warning/10 px-3 py-1.5 text-xs font-semibold text-foreground transition"
           >
             Générer les tâches manquantes
-          </button>
+          </ConfirmButton>
         </div>
       )}
 
@@ -1796,17 +1801,16 @@ function TachesSection() {
                       className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
                     >
                       <span className="text-sm text-foreground">{t.title}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          complete(t);
-                        }}
-                        aria-label="Marquer terminé"
-                        title="Marquer terminé"
+                      <ConfirmButton
+                        onConfirm={() => complete(t)}
+                        confirmLabel="Confirmer ?"
+                        ariaLabel="Marquer terminé"
+                        confirmAriaLabel="Confirmer la tâche terminée"
                         className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                        confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
                       >
                         <Check className="h-4 w-4" aria-hidden />
-                      </button>
+                      </ConfirmButton>
                     </li>
                   ))}
                 </ul>
@@ -3183,20 +3187,27 @@ function CatalogueCard() {
                   className="w-full resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/70"
                 />
                 <div className="flex items-center justify-between gap-2 pt-1">
-                  <button
-                    onClick={() => toggleActive(p)}
+                  <ConfirmButton
+                    onConfirm={() => toggleActive(p)}
+                    ariaLabel={p.active ? "Marquer inactif" : "Marquer actif"}
+                    confirmAriaLabel="Confirmer le changement de statut"
                     className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
                       p.active ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
                     }`}
+                    confirmClassName="rounded-full bg-warning/20 px-2.5 py-1 text-[11px] font-semibold text-foreground"
                   >
                     {p.active ? "Actif" : "Inactif"}
-                  </button>
-                  <button
-                    onClick={() => saveProduct(p)}
+                  </ConfirmButton>
+                  <ConfirmButton
+                    onConfirm={() => saveProduct(p)}
+                    confirmLabel="Confirmer ?"
+                    ariaLabel="Enregistrer"
+                    confirmAriaLabel="Confirmer l'enregistrement"
                     className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+                    confirmClassName="rounded-lg bg-destructive px-3 py-1.5 text-xs font-semibold text-destructive-foreground"
                   >
                     Enregistrer
-                  </button>
+                  </ConfirmButton>
                 </div>
               </div>
             </div>
@@ -3583,29 +3594,38 @@ function OrdersCard() {
                   >
                     Confirmer
                   </button>
-                  <button
-                    onClick={() => setStatus(o.id, "cancelled")}
+                  <ConfirmButton
+                    onConfirm={() => setStatus(o.id, "cancelled")}
+                    confirmLabel="Confirmer ?"
+                    ariaLabel="Annuler la commande"
+                    confirmAriaLabel="Confirmer l'annulation de la commande"
                     className="text-xs font-semibold text-destructive hover:underline"
                   >
                     Annuler
-                  </button>
+                  </ConfirmButton>
                 </div>
               </>
             )}
             {o.status === "confirmed" && (
               <div className="flex gap-3">
-                <button
-                  onClick={() => fulfillAndConvert(o)}
+                <ConfirmButton
+                  onConfirm={() => fulfillAndConvert(o)}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Marquer livrée"
+                  confirmAriaLabel="Confirmer la livraison"
                   className="text-xs font-semibold text-success hover:underline"
                 >
                   Marquer livrée
-                </button>
-                <button
-                  onClick={() => setStatus(o.id, "cancelled")}
+                </ConfirmButton>
+                <ConfirmButton
+                  onConfirm={() => setStatus(o.id, "cancelled")}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Annuler la commande"
+                  confirmAriaLabel="Confirmer l'annulation de la commande"
                   className="text-xs font-semibold text-destructive hover:underline"
                 >
                   Annuler
-                </button>
+                </ConfirmButton>
               </div>
             )}
           </div>,
@@ -5359,17 +5379,17 @@ function BoutiquesCard() {
           </div>,
           b.address ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}` : "—",
           b.idNumber || "—",
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleVerified(b);
-            }}
+          <ConfirmButton
+            onConfirm={() => toggleVerified(b)}
+            ariaLabel={b.verified ? "Marquer non vérifié" : "Marquer vérifié"}
+            confirmAriaLabel="Confirmer le changement de statut"
             className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
               b.verified ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
             }`}
+            confirmClassName="rounded-full bg-warning/20 px-2.5 py-1 text-[11px] font-semibold text-foreground"
           >
             {b.verified ? "Vérifié" : "Non vérifié"}
-          </button>,
+          </ConfirmButton>,
         ])}
       />
 
@@ -5450,6 +5470,10 @@ interface StaffMember {
 function StaffCard() {
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [selectedStaff, setSelectedStaff] = useState<StaffMember | null>(null);
+  // Poste changes affect section access (rbac.md) — a bare onChange write
+  // was one accidental click away from re-scoping someone's account, so a
+  // change is now staged here and only committed via the "Appliquer" confirm.
+  const [pendingPoste, setPendingPoste] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "staff"));
@@ -5484,23 +5508,48 @@ function StaffCard() {
         onRowClick={(i) => setSelectedStaff(staff[i])}
         headers={["Nom", "E-mail", "Poste"]}
         empty="Aucun compte staff pour l'instant."
-        rows={staff.map((s) => [
-          s.displayName,
-          s.email,
-          <select
-            value={s.poste ?? ""}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => setPosteFor(s, e.target.value)}
-            className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
-          >
-            <option value="">— Non assigné (accès complet) —</option>
-            {STAFF_POSTES.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.value}
-              </option>
-            ))}
-          </select>,
-        ])}
+        rows={staff.map((s) => {
+          const current = s.poste ?? "";
+          const pending = pendingPoste[s.uid];
+          const dirty = pending !== undefined && pending !== current;
+          return [
+            s.displayName,
+            s.email,
+            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+              <select
+                value={pending ?? current}
+                onChange={(e) => setPendingPoste((p) => ({ ...p, [s.uid]: e.target.value }))}
+                className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
+              >
+                <option value="">— Non assigné (accès complet) —</option>
+                {STAFF_POSTES.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.value}
+                  </option>
+                ))}
+              </select>
+              {dirty && (
+                <ConfirmButton
+                  onConfirm={() => {
+                    setPosteFor(s, pending);
+                    setPendingPoste((p) => {
+                      const next = { ...p };
+                      delete next[s.uid];
+                      return next;
+                    });
+                  }}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Appliquer le changement de poste"
+                  confirmAriaLabel="Confirmer le changement de poste"
+                  className="rounded-lg bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground"
+                  confirmClassName="rounded-lg bg-warning/20 px-2 py-1.5 text-xs font-semibold text-foreground"
+                >
+                  Appliquer
+                </ConfirmButton>
+              )}
+            </div>,
+          ];
+        })}
       />
 
       {selectedStaff && (
