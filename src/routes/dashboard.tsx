@@ -753,7 +753,11 @@ function EntryForm({
 }: {
   fields: FieldDef[];
   submitLabel: string;
-  onSubmit: (values: Record<string, string>) => void;
+  // Returning `false` blocks the submit (form stays open, values kept) —
+  // used when validity depends on more than one field (e.g. a required
+  // link that only applies for a given "type" selection), which a static
+  // per-field `required` flag can't express.
+  onSubmit: (values: Record<string, string>) => void | false;
 }) {
   const [open, setOpen] = useState(false);
   const initial = () => Object.fromEntries(fields.map((f) => [f.name, String(f.default ?? "")]));
@@ -779,7 +783,7 @@ function EntryForm({
           toast.error(`${missing.label} requis.`);
           return;
         }
-        onSubmit(values);
+        if (onSubmit(values) === false) return;
         setValues(initial());
         setOpen(false);
       }}
@@ -2599,8 +2603,38 @@ function StockSection() {
                 { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
                 { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
                 { name: "observation", label: "Observation" },
+                {
+                  name: "approvisionnementIds",
+                  label: "Réceptions sources (si Entrée)",
+                  type: "multiselect",
+                  multiOptions: computed.appro.map((r) => ({
+                    value: r.id,
+                    label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
+                  })),
+                },
+                {
+                  name: "productionIds",
+                  label: "Lots destination (si Sortie)",
+                  type: "multiselect",
+                  multiOptions: computed.production.map((r) => ({
+                    value: r.id,
+                    label: `${r.lot} — ${r.date}`,
+                  })),
+                },
               ]}
-              onSubmit={(v) =>
+              onSubmit={(v) => {
+                // Required, but only for the movement type it applies to —
+                // a static per-field `required` can't express that, so it's
+                // checked here (EntryForm treats a `false` return as "block
+                // submit, keep the form open").
+                if (v.type === "Entrée" && !v.approvisionnementIds) {
+                  toast.error("Réceptions sources requises pour un mouvement d'entrée.");
+                  return false;
+                }
+                if (v.type === "Sortie" && !v.productionIds) {
+                  toast.error("Lot(s) destination requis pour un mouvement de sortie.");
+                  return false;
+                }
                 addRow("stockMP", {
                   id: newId("MP"),
                   date: v.date,
@@ -2611,8 +2645,12 @@ function StockSection() {
                   sortie: n(v.sortie),
                   coutUnitaire: n(v.coutUnitaire),
                   observation: v.observation,
-                })
-              }
+                  approvisionnementIds: v.approvisionnementIds
+                    ? v.approvisionnementIds.split(",")
+                    : [],
+                  productionIds: v.productionIds ? v.productionIds.split(",") : [],
+                });
+              }}
             />
           </div>
         }
@@ -2720,6 +2758,26 @@ function StockSection() {
                 type: "text",
                 value: selectedMouvement.m.observation ?? "",
               },
+            },
+            {
+              label: "Réceptions sources",
+              value: selectedMouvement.m.approvisionnementIds?.length
+                ? selectedMouvement.m.approvisionnementIds
+                    .map((id) => computed.appro.find((a) => a.id === id)?.numero ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Réception(s) d'ananas à l'origine de ce mouvement d'entrée, sélectionnées à la saisie.",
+            },
+            {
+              label: "Lots destination",
+              value: selectedMouvement.m.productionIds?.length
+                ? selectedMouvement.m.productionIds
+                    .map((id) => computed.production.find((r) => r.id === id)?.lot ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Lot(s) de production alimentés par ce mouvement de sortie, sélectionnés à la saisie.",
             },
             {
               label: "Stock cumulé",

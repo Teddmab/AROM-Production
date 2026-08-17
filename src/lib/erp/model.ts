@@ -96,6 +96,17 @@ export interface MouvementStockMP {
   sortie: number;
   coutUnitaire: number;
   observation: string;
+  /**
+   * Réceptions (`Approvisionnement.id`) à l'origine d'un mouvement d'entrée —
+   * requis à la saisie pour type "Entrée" depuis le sprint 31. Optionnel
+   * dans le type car les mouvements créés avant ce sprint n'ont pas ce champ.
+   */
+  approvisionnementIds?: string[];
+  /**
+   * Lots de production (`Production.id`) alimentés par un mouvement de
+   * sortie — requis à la saisie pour type "Sortie" depuis le sprint 31.
+   */
+  productionIds?: string[];
 }
 
 export interface Client {
