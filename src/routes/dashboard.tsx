@@ -30,6 +30,7 @@ import {
   prixFormat,
   usdFormat,
   type Canal,
+  type Client,
   type Format,
   type Parametres,
   type Qualite,
@@ -162,21 +163,24 @@ interface Task {
   id: string;
   stage: TaskStage;
   title: string;
-  /** The originating réception's numéro — carried through every task spawned from it, so the chain reads as one story even though the underlying records don't link to each other. */
+  /** The originating réception's numéro — kept for display even though sourceId (below) is now the real lineage key, since a staff member renaming a réception shouldn't also rewrite every task title. */
   sourceLabel: string;
+  /** Real Approvisionnement.id this task traces back to (sprint 32) — used for lineage matching instead of the editable sourceLabel string. Optional: tasks created before this sprint only have sourceLabel. */
+  sourceId?: string;
   status: "pending" | "done";
   createdAt: string;
   completedAt?: string;
   completedBy?: string;
 }
 
-function createTask(stage: TaskStage, title: string, sourceLabel: string) {
+function createTask(stage: TaskStage, title: string, sourceLabel: string, sourceId?: string) {
   const id = newId("TASK");
   setDoc(doc(db, "tasks", id), {
     id,
     stage,
     title,
     sourceLabel,
+    ...(sourceId ? { sourceId } : {}),
     status: "pending",
     createdAt: new Date().toISOString(),
   } satisfies Task).catch((err) =>
@@ -734,6 +738,8 @@ type FieldDef = {
   label: string;
   type?: "text" | "number" | "date" | "select" | "multiselect";
   options?: readonly string[];
+  /** For type "select" where the value isn't the label (e.g. a real record id). Takes precedence over `options`. */
+  selectOptions?: { value: string; label: string }[];
   /** For type "multiselect": the pickable records, richer than a plain option string. */
   multiOptions?: { value: string; label: string }[];
   default?: string | number;
@@ -745,6 +751,101 @@ type FieldDef = {
 // same Record<string,string> as every other field, then split back into an
 // array at the call site — keeps EntryForm's onSubmit signature unchanged.
 const MULTI_SEP = ",";
+
+/** Searchable tag-picker used for every required multi-record link (réceptions sources, lots destination, etc.) — a plain checkbox list doesn't scale once a campaign has more than a handful of réceptions/lots. */
+function MultiSelectCombobox({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: string; label: string }[];
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const filtered = options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()));
+  const selected = value
+    .map((id) => options.find((o) => o.value === id))
+    .filter((o): o is { value: string; label: string } => Boolean(o));
+
+  const toggle = (id: string) => {
+    onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id]);
+  };
+
+  return (
+    <div
+      className="relative mt-1"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setOpen(false);
+      }}
+    >
+      {selected.length > 0 && (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {selected.map((o) => (
+            <span
+              key={o.value}
+              className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+            >
+              {o.label}
+              <button
+                type="button"
+                onClick={() => toggle(o.value)}
+                aria-label={`Retirer ${o.label}`}
+                className="text-primary/70 hover:text-primary"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        type="text"
+        value={query}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        placeholder={options.length ? "Rechercher…" : "Aucun élément disponible"}
+        disabled={options.length === 0}
+        className="w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground disabled:opacity-50"
+      />
+      {open && filtered.length > 0 && (
+        <div className="absolute z-10 mt-1 max-h-40 w-full overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg">
+          {filtered.map((o) => {
+            const checked = value.includes(o.value);
+            return (
+              <button
+                type="button"
+                key={o.value}
+                onClick={() => {
+                  toggle(o.value);
+                  // Closes after each pick rather than staying open for rapid
+                  // multi-select: an always-open dropdown can visually cover
+                  // other fields/buttons below it (it's `position: absolute`,
+                  // so it breaks out of the form's grid layout). Re-focusing
+                  // the search input reopens it for another pick.
+                  setOpen(false);
+                  setQuery("");
+                }}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${
+                  checked ? "bg-primary/10 text-primary" : "text-foreground hover:bg-secondary"
+                }`}
+              >
+                <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-border">
+                  {checked && <Check className="h-3 w-3" aria-hidden />}
+                </span>
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function EntryForm({
   fields,
@@ -800,44 +901,24 @@ function EntryForm({
                 onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
                 className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
               >
-                {f.options?.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
+                {f.selectOptions
+                  ? f.selectOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))
+                  : f.options?.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
               </select>
             ) : f.type === "multiselect" ? (
-              <div className="mt-1 max-h-32 w-full space-y-1 overflow-y-auto rounded-lg border border-border bg-card p-2">
-                {f.multiOptions?.length ? (
-                  f.multiOptions.map((o) => {
-                    const selected = values[f.name] ? values[f.name].split(MULTI_SEP) : [];
-                    const checked = selected.includes(o.value);
-                    return (
-                      <label
-                        key={o.value}
-                        className="flex items-center gap-2 text-xs text-foreground"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() =>
-                            setValues((v) => {
-                              const cur = v[f.name] ? v[f.name].split(MULTI_SEP) : [];
-                              const next = checked
-                                ? cur.filter((id) => id !== o.value)
-                                : [...cur, o.value];
-                              return { ...v, [f.name]: next.join(MULTI_SEP) };
-                            })
-                          }
-                        />
-                        {o.label}
-                      </label>
-                    );
-                  })
-                ) : (
-                  <span className="text-xs text-muted-foreground">Aucun élément disponible.</span>
-                )}
-              </div>
+              <MultiSelectCombobox
+                options={f.multiOptions ?? []}
+                value={values[f.name] ? values[f.name].split(MULTI_SEP) : []}
+                onChange={(ids) => setValues((v) => ({ ...v, [f.name]: ids.join(MULTI_SEP) }))}
+              />
             ) : (
               <input
                 type={f.type ?? "text"}
@@ -1662,11 +1743,17 @@ function TachesSection() {
         completedBy: profile.uid,
       });
       if (task.stage === "production") {
-        createTask("stock", `Ranger en stock le lot issu de ${task.sourceLabel}`, task.sourceLabel);
+        createTask(
+          "stock",
+          `Ranger en stock le lot issu de ${task.sourceLabel}`,
+          task.sourceLabel,
+          task.sourceId,
+        );
         createTask(
           "commercialisation",
           `Mettre en vente le lot issu de ${task.sourceLabel}`,
           task.sourceLabel,
+          task.sourceId,
         );
       }
     } catch (err) {
@@ -1702,16 +1789,20 @@ function TachesSection() {
   };
 
   // What led to this task existing, in order — for "stock"/"commercialisation"
-  // tasks that's the originating "production" task's own completion (they
-  // don't share a Firestore reference to each other, only the same
-  // `sourceLabel`, so the lineage is reconstructed by matching on it).
+  // tasks that's the originating "production" task's own completion. Matched
+  // by the real `sourceId` (Approvisionnement.id, sprint 32) when present, so
+  // the lineage survives a staff member renaming the réception's numéro
+  // afterward; falls back to the old `sourceLabel` string match for tasks
+  // created before that field existed.
   const buildHistory = (task: Task): DetailField["breakdown"] => {
     const steps: { label: string; value: string }[] = [
       { label: "Réception reçue", value: task.sourceLabel },
     ];
     if (task.stage !== "production") {
       const origin = tasks.find(
-        (t) => t.stage === "production" && t.sourceLabel === task.sourceLabel,
+        (t) =>
+          t.stage === "production" &&
+          (task.sourceId ? t.sourceId === task.sourceId : t.sourceLabel === task.sourceLabel),
       );
       steps.push({
         label: "Production terminée",
@@ -1731,10 +1822,12 @@ function TachesSection() {
   // réception whose task was already completed is correctly left alone;
   // only réceptions with zero task lineage get backfilled.
   const backfillMissingTasks = () => {
-    const covered = new Set(
-      tasks.filter((t) => t.stage === "production").map((t) => t.sourceLabel),
+    const productionTasks = tasks.filter((t) => t.stage === "production");
+    const coveredLabels = new Set(productionTasks.map((t) => t.sourceLabel));
+    const coveredIds = new Set(productionTasks.map((t) => t.sourceId).filter(Boolean));
+    const missing = state.approvisionnements.filter(
+      (a) => !coveredLabels.has(a.numero) && !coveredIds.has(a.id),
     );
-    const missing = state.approvisionnements.filter((a) => !covered.has(a.numero));
     if (missing.length === 0) {
       toast.info("Aucune tâche manquante — tout est déjà suivi.");
       return;
@@ -1744,6 +1837,7 @@ function TachesSection() {
         "production",
         `Transformer la réception ${a.numero} (${a.qteRecueKg} kg)`,
         a.numero,
+        a.id,
       );
     });
     toast.success(
@@ -1899,8 +1993,9 @@ function ApproSection() {
                 },
               ]}
               onSubmit={(v) => {
+                const approId = newId("APP");
                 addRow("approvisionnements", {
-                  id: newId("APP"),
+                  id: approId,
                   numero: v.numero,
                   date: v.date,
                   idProducteur: v.idProducteur,
@@ -1918,6 +2013,7 @@ function ApproSection() {
                   "production",
                   `Transformer la réception ${v.numero} (${n(v.qteRecueKg)} kg)`,
                   v.numero,
+                  approId,
                 );
               }}
             />
@@ -2945,9 +3041,22 @@ interface Product {
   active: boolean;
   imageUrl?: string;
   description?: string;
+  /**
+   * Lots de production (`Production.id`) rattachés à ce produit du catalogue
+   * (sprint 32) — optionnel, contrairement aux liens Production/Vente/Stock :
+   * un produit catalogue est une fiche de vente (nom/format/prix) qui peut
+   * légitimement exister avant qu'un lot ne soit produit.
+   */
+  productionIds?: string[];
 }
 
-type ProductDraft = { name: string; format: Format; price: string; description: string };
+type ProductDraft = {
+  name: string;
+  format: Format;
+  price: string;
+  description: string;
+  productionIds: string[];
+};
 
 function ProductPhoto({
   product,
@@ -2993,6 +3102,7 @@ function ProductPhoto({
  * editing here never touches order history — see sprints/01).
  */
 function CatalogueCard() {
+  const { computed } = useErp();
   const [products, setProducts] = useState<Product[]>([]);
   const [drafts, setDrafts] = useState<Record<string, ProductDraft>>({});
   const [uploadingId, setUploadingId] = useState<string | null>(null);
@@ -3014,6 +3124,7 @@ function CatalogueCard() {
                 format: p.format,
                 price: String(p.price),
                 description: p.description ?? "",
+                productionIds: p.productionIds ?? [],
               };
           }
           return next;
@@ -3029,6 +3140,7 @@ function CatalogueCard() {
       format: p.format,
       price: String(p.price),
       description: p.description ?? "",
+      productionIds: p.productionIds ?? [],
     };
 
   const setDraft = (id: string, patch: Partial<ProductDraft>) =>
@@ -3041,6 +3153,7 @@ function CatalogueCard() {
       format: draft.format,
       price: n(draft.price),
       description: draft.description.trim(),
+      productionIds: draft.productionIds,
     })
       .then(() => toast.success("Produit enregistré."))
       .catch((err) => toast.error(`Enregistrement impossible : ${err.message}`));
@@ -3136,6 +3249,26 @@ function CatalogueCard() {
                     className="w-1/2 rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground"
                   />
                 </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Stock disponible :{" "}
+                  <span className="font-semibold text-foreground">
+                    {computed.stockPF.find((s) => s.format === p.format)?.stock ?? 0} bouteilles
+                  </span>{" "}
+                  <span className="text-muted-foreground/70">
+                    (calculé : production − ventes, format {p.format})
+                  </span>
+                </p>
+                <label className="block text-[11px] font-medium text-muted-foreground">
+                  Lots de production liés (optionnel)
+                  <MultiSelectCombobox
+                    options={computed.production.map((r) => ({
+                      value: r.id,
+                      label: `${r.lot} — ${r.date}`,
+                    }))}
+                    value={draft.productionIds}
+                    onChange={(ids) => setDraft(p.id, { productionIds: ids })}
+                  />
+                </label>
                 <textarea
                   value={draft.description}
                   onChange={(e) => setDraft(p.id, { description: e.target.value })}
@@ -3211,40 +3344,34 @@ interface StorefrontOrder {
  * write idempotent if it's ever retried.
  */
 
-interface Promo {
-  active: boolean;
+interface Promotion {
+  id: string;
   headline: string;
   description: string;
   productId: string;
   startDate: string;
   endDate: string;
+  active: boolean;
 }
 
-const EMPTY_PROMO: Promo = {
-  active: false,
-  headline: "",
-  description: "",
-  productId: "",
-  startDate: "",
-  endDate: "",
-};
-
 /**
- * Single active-or-not promo (sprint 06) — a `config/promo` singleton,
- * mirroring the existing `config/parametres` pattern. Deliberately no
- * rotation/scheduling queue: v1 ships with exactly one promo, matching
- * how a small operation actually runs a promotion.
+ * Real collection (sprint 32) — replaces the old `config/promo` singleton,
+ * which silently overwrote itself on every save with no history and never
+ * showed up as a "record" anywhere. Only one promotion is meant to be
+ * `active` (diffusée) at a time — the storefront banner picks whichever
+ * active one is currently inside its date window — so activating one here
+ * auto-deactivates the others.
  */
-function PromoCard() {
-  const [promo, setPromo] = useState<Promo>(EMPTY_PROMO);
+function PromotionsCard() {
+  const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [products, setProducts] = useState<{ id: string; name: string }[]>([]);
-  const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState<Promotion | null>(null);
 
   useEffect(() => {
     return onSnapshot(
-      doc(db, "config", "promo"),
-      (snap) => setPromo(snap.exists() ? { ...EMPTY_PROMO, ...snap.data() } : EMPTY_PROMO),
-      (err) => toast.error(`Synchronisation "promo" impossible : ${err.message}`),
+      query(collection(db, "promotions"), orderBy("startDate", "desc")),
+      (snap) => setPromotions(snap.docs.map((d) => d.data() as Promotion)),
+      (err) => toast.error(`Synchronisation "promotions" impossible : ${err.message}`),
     );
   }, []);
 
@@ -3254,81 +3381,178 @@ function PromoCard() {
     });
   }, []);
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      await setDoc(doc(db, "config", "promo"), promo);
-      toast.success("Promotion enregistrée.");
-    } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? `Enregistrement impossible : ${err.message}`
-          : "Enregistrement impossible.",
-      );
-    } finally {
-      setSaving(false);
-    }
+  const productOptions = [
+    { value: "", label: "Aucun produit lié" },
+    ...products.map((p) => ({ value: p.id, label: p.name })),
+  ];
+  const productName = (id: string) => products.find((p) => p.id === id)?.name ?? "—";
+
+  const today = new Date().toISOString().slice(0, 10);
+  const lifecycle = (p: Promotion): "Terminée" | "À venir" | "En cours" =>
+    p.endDate && today > p.endDate
+      ? "Terminée"
+      : p.startDate && today < p.startDate
+        ? "À venir"
+        : "En cours";
+
+  const deactivateOthers = (exceptId: string) =>
+    Promise.all(
+      promotions
+        .filter((p) => p.active && p.id !== exceptId)
+        .map((p) => updateDoc(doc(db, "promotions", p.id), { active: false })),
+    );
+
+  const createPromotion = (v: Record<string, string>) => {
+    const id = newId("PROMO");
+    const active = v.active === "Oui";
+    const write = () =>
+      setDoc(doc(db, "promotions", id), {
+        id,
+        headline: v.headline,
+        description: v.description,
+        productId: v.productId,
+        startDate: v.startDate,
+        endDate: v.endDate,
+        active,
+      } satisfies Promotion).catch((err) => toast.error(`Création impossible : ${err.message}`));
+    if (active) deactivateOthers(id).then(write);
+    else write();
   };
 
   return (
-    <Card title="Promotion boutique">
-      <div className="space-y-3">
-        <label className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <input
-            type="checkbox"
-            checked={promo.active}
-            onChange={(e) => setPromo((p) => ({ ...p, active: e.target.checked }))}
-            className="h-4 w-4 rounded border-border"
-          />
-          Promotion active
-        </label>
-        <input
-          value={promo.headline}
-          onChange={(e) => setPromo((p) => ({ ...p, headline: e.target.value }))}
-          placeholder="Titre (ex. -10% sur les bouteilles 500 ml)"
-          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+    <Card
+      title="Promotions"
+      action={
+        <EntryForm
+          submitLabel="Nouvelle promotion"
+          fields={[
+            { name: "headline", label: "Titre" },
+            { name: "description", label: "Description" },
+            {
+              name: "productId",
+              label: "Produit lié",
+              type: "select",
+              selectOptions: productOptions,
+            },
+            { name: "startDate", label: "Début", type: "date" },
+            { name: "endDate", label: "Fin", type: "date" },
+            {
+              name: "active",
+              label: "Diffusée sur la boutique",
+              type: "select",
+              options: ["Oui", "Non"],
+              default: "Oui",
+            },
+          ]}
+          onSubmit={createPromotion}
         />
-        <textarea
-          value={promo.description}
-          onChange={(e) => setPromo((p) => ({ ...p, description: e.target.value }))}
-          placeholder="Description (optionnel)"
-          rows={2}
-          className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+      }
+    >
+      <Table
+        onRowClick={(i) => setSelected(promotions[i])}
+        headers={["Titre", "Produit", "Début", "Fin", "Diffusée", "Statut", ""]}
+        rows={promotions.map((p) => [
+          p.headline || "—",
+          productName(p.productId),
+          p.startDate || "—",
+          p.endDate || "—",
+          p.active ? "Oui" : "Non",
+          lifecycle(p),
+          <DeleteButton
+            onClick={(e) => {
+              e.stopPropagation();
+              deleteDoc(doc(db, "promotions", p.id)).catch((err) =>
+                toast.error(`Suppression impossible : ${err.message}`),
+              );
+            }}
+          />,
+        ])}
+      />
+      {promotions.length === 0 && (
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          Aucune promotion. Ajoutez la première avec « Nouvelle promotion ».
+        </p>
+      )}
+      {selected && (
+        <RecordDetailModal
+          title={selected.headline || "Promotion"}
+          subtitle={`${selected.startDate || "—"} → ${selected.endDate || "—"}`}
+          onClose={() => setSelected(null)}
+          onSave={async (patch) => {
+            const finalPatch: Record<string, unknown> = { ...patch };
+            if (patch.active === "Oui" || patch.active === "Non") {
+              const nextActive = patch.active === "Oui";
+              finalPatch.active = nextActive;
+              if (nextActive) await deactivateOthers(selected.id);
+            }
+            updateDoc(doc(db, "promotions", selected.id), finalPatch).catch((err) =>
+              toast.error(`Enregistrement impossible : ${err.message}`),
+            );
+            setSelected(null);
+          }}
+          onDelete={() => {
+            deleteDoc(doc(db, "promotions", selected.id)).catch((err) =>
+              toast.error(`Suppression impossible : ${err.message}`),
+            );
+            setSelected(null);
+          }}
+          fields={[
+            {
+              label: "Titre",
+              value: selected.headline || "—",
+              description: "Titre affiché sur le bandeau promo de la boutique partenaire.",
+              edit: { key: "headline", type: "text", value: selected.headline },
+            },
+            {
+              label: "Description",
+              value: selected.description || "—",
+              description: "Texte secondaire optionnel affiché sous le titre.",
+              edit: { key: "description", type: "text", value: selected.description },
+            },
+            {
+              label: "Produit lié",
+              value: productName(selected.productId),
+              description: "Un clic sur le bandeau ouvre cette fiche produit dans la boutique.",
+              edit: {
+                key: "productId",
+                type: "select",
+                selectOptions: productOptions,
+                value: selected.productId,
+              },
+            },
+            {
+              label: "Début",
+              value: selected.startDate || "—",
+              description: "Première date où cette promotion apparaît comme « En cours ».",
+              edit: { key: "startDate", type: "date", value: selected.startDate },
+            },
+            {
+              label: "Fin",
+              value: selected.endDate || "—",
+              description: "Dernière date où cette promotion apparaît comme « En cours ».",
+              edit: { key: "endDate", type: "date", value: selected.endDate },
+            },
+            {
+              label: "Diffusée sur la boutique",
+              value: selected.active ? "Oui" : "Non",
+              description:
+                "Une seule promotion diffusée à la fois — en activer une désactive automatiquement les autres.",
+              edit: {
+                key: "active",
+                type: "select",
+                options: ["Oui", "Non"],
+                value: selected.active ? "Oui" : "Non",
+              },
+            },
+            {
+              label: "Statut",
+              value: lifecycle(selected),
+              description:
+                "Calculé automatiquement à partir des dates de début/fin par rapport à aujourd'hui.",
+            },
+          ]}
         />
-        <div className="grid gap-3 sm:grid-cols-3">
-          <select
-            value={promo.productId}
-            onChange={(e) => setPromo((p) => ({ ...p, productId: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          >
-            <option value="">Aucun produit lié</option>
-            {products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <input
-            type="date"
-            value={promo.startDate}
-            onChange={(e) => setPromo((p) => ({ ...p, startDate: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          />
-          <input
-            type="date"
-            value={promo.endDate}
-            onChange={(e) => setPromo((p) => ({ ...p, endDate: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          />
-        </div>
-        <button
-          onClick={save}
-          disabled={saving}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60"
-        >
-          {saving ? "Enregistrement…" : "Enregistrer"}
-        </button>
-      </div>
+      )}
     </Card>
   );
 }
@@ -3565,16 +3789,17 @@ function CommercialisationSection({
   const p = state.parametres;
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
   const [selectedCanal, setSelectedCanal] = useState<Canal | null>(null);
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const breakdowns = buildBreakdowns(computed);
 
   // Promotion → commercialisation: a vente reads as "sous promotion" when the
-  // active promo's linked catalogue product shares its format and the vente
-  // falls inside the promo's date window (if one is set).
-  const [promo, setPromo] = useState<Promo>(EMPTY_PROMO);
+  // currently-diffusée promotion's linked catalogue product shares its
+  // format and the vente falls inside the promo's date window (if set).
+  const [activePromo, setActivePromo] = useState<Promotion | null>(null);
   const [promoProducts, setPromoProducts] = useState<{ id: string; format: Format }[]>([]);
   useEffect(() => {
-    return onSnapshot(doc(db, "config", "promo"), (snap) =>
-      setPromo(snap.exists() ? { ...EMPTY_PROMO, ...(snap.data() as Promo) } : EMPTY_PROMO),
+    return onSnapshot(collection(db, "promotions"), (snap) =>
+      setActivePromo(snap.docs.map((d) => d.data() as Promotion).find((p) => p.active) ?? null),
     );
   }, []);
   useEffect(() => {
@@ -3582,14 +3807,14 @@ function CommercialisationSection({
       setPromoProducts(snap.docs.map((d) => d.data() as { id: string; format: Format })),
     );
   }, []);
-  const promoFormat = promo.active
-    ? promoProducts.find((pr) => pr.id === promo.productId)?.format
+  const promoFormat = activePromo
+    ? promoProducts.find((pr) => pr.id === activePromo.productId)?.format
     : undefined;
   const isSousPromotion = (v: { format: Format; date: string }) =>
     !!promoFormat &&
     v.format === promoFormat &&
-    (!promo.startDate || v.date >= promo.startDate) &&
-    (!promo.endDate || v.date <= promo.endDate);
+    (!activePromo?.startDate || v.date >= activePromo.startDate) &&
+    (!activePromo?.endDate || v.date <= activePromo.endDate);
 
   return (
     <div className="space-y-6">
@@ -3653,7 +3878,13 @@ function CommercialisationSection({
                   fields={[
                     { name: "numero", label: "N° vente", default: "V-001" },
                     { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-                    { name: "client", label: "Client" },
+                    {
+                      name: "idClient",
+                      label: "Client",
+                      type: "select",
+                      required: true,
+                      selectOptions: state.clients.map((c) => ({ value: c.id, label: c.nom })),
+                    },
                     {
                       name: "canal",
                       label: "Canal",
@@ -3693,8 +3924,8 @@ function CommercialisationSection({
                       id: newId("VTE"),
                       numero: v.numero,
                       date: v.date,
-                      idClient: v.client,
-                      client: v.client,
+                      idClient: v.idClient,
+                      client: state.clients.find((c) => c.id === v.idClient)?.nom ?? "",
                       canal: v.canal as Canal,
                       format: v.format as Format,
                       quantite: n(v.quantite),
@@ -3762,7 +3993,11 @@ function CommercialisationSection({
               subtitle={selectedVente.date}
               onClose={() => setSelectedVente(null)}
               onSave={(patch) => {
-                updateDoc(doc(db, "ventes", selectedVente.id), patch);
+                const finalPatch = { ...patch };
+                if (typeof patch.idClient === "string") {
+                  finalPatch.client = state.clients.find((c) => c.id === patch.idClient)?.nom ?? "";
+                }
+                updateDoc(doc(db, "ventes", selectedVente.id), finalPatch);
                 setSelectedVente(null);
               }}
               onDelete={() => {
@@ -3785,10 +4020,15 @@ function CommercialisationSection({
                 },
                 {
                   label: "Client",
-                  value: selectedVente.client,
+                  value: selectedVente.client || "—",
                   description:
-                    "Nom du client — texte libre, non relié au Registre clients interne.",
-                  edit: { key: "client", type: "text", value: selectedVente.client },
+                    "Client réel du Registre clients (sprint 32) — sert au calcul des clients actifs.",
+                  edit: {
+                    key: "idClient",
+                    type: "select",
+                    selectOptions: state.clients.map((c) => ({ value: c.id, label: c.nom })),
+                    value: selectedVente.idClient,
+                  },
                 },
                 {
                   label: "Canal",
@@ -3882,6 +4122,143 @@ function CommercialisationSection({
             />
           )}
 
+          <Card
+            title="Registre clients"
+            action={
+              <EntryForm
+                submitLabel="Nouveau client"
+                fields={[
+                  { name: "nom", label: "Nom" },
+                  {
+                    name: "categorie",
+                    label: "Canal",
+                    type: "select",
+                    options: CANAUX,
+                    default: "Restaurant",
+                  },
+                  { name: "contact", label: "Contact" },
+                  { name: "zone", label: "Zone" },
+                  {
+                    name: "premierContact",
+                    label: "Premier contact",
+                    type: "date",
+                    default: "2026-07-20",
+                  },
+                  {
+                    name: "statut",
+                    label: "Statut",
+                    type: "select",
+                    options: ["Actif", "Inactif", "Prospect"],
+                    default: "Actif",
+                  },
+                ]}
+                onSubmit={(v) =>
+                  addRow("clients", {
+                    id: newId("CLI"),
+                    nom: v.nom,
+                    categorie: v.categorie as Canal,
+                    contact: v.contact,
+                    zone: v.zone,
+                    premierContact: v.premierContact,
+                    statut: v.statut,
+                  })
+                }
+              />
+            }
+          >
+            <Table
+              onRowClick={(i) => setSelectedClient(state.clients[i])}
+              headers={["Nom", "Canal", "Contact", "Zone", "Premier contact", "Statut", ""]}
+              rows={state.clients.map((c) => [
+                c.nom,
+                c.categorie,
+                c.contact || "—",
+                c.zone || "—",
+                c.premierContact || "—",
+                c.statut || "—",
+                <DeleteButton
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeRow("clients", c.id);
+                  }}
+                />,
+              ])}
+            />
+            {state.clients.length === 0 && (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Aucun client. Ajoutez le premier avec « Nouveau client », ou importez un fichier.
+              </p>
+            )}
+          </Card>
+
+          {selectedClient && (
+            <RecordDetailModal
+              title={selectedClient.nom}
+              onClose={() => setSelectedClient(null)}
+              onSave={(patch) => {
+                updateDoc(doc(db, "clients", selectedClient.id), patch);
+                setSelectedClient(null);
+              }}
+              onDelete={() => {
+                removeRow("clients", selectedClient.id);
+                setSelectedClient(null);
+              }}
+              fields={[
+                {
+                  label: "Nom",
+                  value: selectedClient.nom,
+                  description:
+                    "Nom du client — c'est ce nom qui apparaît partout où une vente le référence.",
+                  edit: { key: "nom", type: "text", value: selectedClient.nom },
+                },
+                {
+                  label: "Canal",
+                  value: selectedClient.categorie,
+                  description: "Circuit de vente habituel de ce client.",
+                  edit: {
+                    key: "categorie",
+                    type: "select",
+                    options: CANAUX,
+                    value: selectedClient.categorie,
+                  },
+                },
+                {
+                  label: "Contact",
+                  value: selectedClient.contact || "—",
+                  description: "Téléphone ou autre moyen de contact.",
+                  edit: { key: "contact", type: "text", value: selectedClient.contact },
+                },
+                {
+                  label: "Zone",
+                  value: selectedClient.zone || "—",
+                  description: "Zone géographique du client.",
+                  edit: { key: "zone", type: "text", value: selectedClient.zone },
+                },
+                {
+                  label: "Premier contact",
+                  value: selectedClient.premierContact || "—",
+                  description: "Date du premier contact commercial.",
+                  edit: {
+                    key: "premierContact",
+                    type: "date",
+                    value: selectedClient.premierContact,
+                  },
+                },
+                {
+                  label: "Statut",
+                  value: selectedClient.statut || "—",
+                  description: "État actuel de la relation commerciale.",
+                  edit: {
+                    key: "statut",
+                    type: "select",
+                    options: ["Actif", "Inactif", "Prospect"],
+                    value: selectedClient.statut,
+                  },
+                },
+              ]}
+            />
+          )}
+
           <Card title="Portefeuille clients par canal" action={<ImportButton target="clients" />}>
             <Table
               onRowClick={(i) => setSelectedCanal(CANAUX[i])}
@@ -3964,7 +4341,7 @@ function PromotionSection() {
         responsable="Chargée de Commercialisation"
         subtitle="Bandeau promo affiché sur la boutique partenaire."
       />
-      <PromoCard />
+      <PromotionsCard />
     </div>
   );
 }
