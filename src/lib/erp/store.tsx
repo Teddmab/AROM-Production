@@ -15,7 +15,7 @@ import { SEED, type ErpState } from "./model";
 import { computeErp, type ErpComputed } from "./engine";
 import { filterErpState, type ExportFilter } from "./export";
 
-type Collections =
+export type Collections =
   | "producteurs"
   | "approvisionnements"
   | "productions"

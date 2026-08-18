@@ -17,7 +17,7 @@ import {
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
-import { ErpProvider, useErp, newId } from "@/lib/erp/store";
+import { ErpProvider, useErp, newId, type Collections } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
 import { db, storage } from "@/lib/firebase/config";
 import {
@@ -895,6 +895,260 @@ function DeleteButton({ onClick }: { onClick: (e: MouseEvent) => void }) {
       {confirming ? "Confirmer ?" : "Suppr."}
     </button>
   );
+}
+
+interface DependentRule {
+  collection: Collections;
+  field: string;
+  isArray: boolean;
+  /** Plural, human-readable — e.g. "lot(s) de production". */
+  label: string;
+  recordLabel: (r: Record<string, unknown>) => string;
+}
+
+/**
+ * Which collections reference which — required links (sprints 30-32) mean
+ * deleting a parent now leaves a dangling id in every child that pointed
+ * to it, unless something resolves it first (sprint 34). Only lists
+ * collections that actually have real dependents; ventes/stockMP/marketing/
+ * charges are always leaves here, so their DeleteButton stays untouched.
+ */
+const DEPENDENTS_RULES: Partial<Record<Collections, DependentRule[]>> = {
+  approvisionnements: [
+    {
+      collection: "productions",
+      field: "approvisionnementIds",
+      isArray: true,
+      label: "lot(s) de production",
+      recordLabel: (r) => `${r.lot} — ${r.date}`,
+    },
+    {
+      collection: "stockMP",
+      field: "approvisionnementIds",
+      isArray: true,
+      label: "mouvement(s) de stock",
+      recordLabel: (r) => `${r.type} du ${r.date}`,
+    },
+  ],
+  productions: [
+    {
+      collection: "ventes",
+      field: "productionIds",
+      isArray: true,
+      label: "vente(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+    {
+      collection: "stockMP",
+      field: "productionIds",
+      isArray: true,
+      label: "mouvement(s) de stock",
+      recordLabel: (r) => `${r.type} du ${r.date}`,
+    },
+  ],
+  producteurs: [
+    {
+      collection: "approvisionnements",
+      field: "idProducteur",
+      isArray: false,
+      label: "réception(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+  ],
+  clients: [
+    {
+      collection: "ventes",
+      field: "idClient",
+      isArray: false,
+      label: "vente(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+  ],
+};
+
+// How to label a record of each parent collection — used for the deleted
+// record's own name in the modal title, and for the "reassign to" options.
+const PARENT_RECORD_LABEL: Partial<Record<Collections, (r: Record<string, unknown>) => string>> = {
+  approvisionnements: (r) => `${r.numero} — ${r.date}`,
+  productions: (r) => `${r.lot} — ${r.date}`,
+  producteurs: (r) => String(r.nom),
+  clients: (r) => String(r.nom),
+};
+
+/**
+ * Cascade-aware delete (sprint 34) — before actually removing a record that
+ * has real dependents, asks per dependent group whether to delete those
+ * too or reassign them to a different existing record of the same parent
+ * type. No "just unlink" option: links are required now, so leaving a
+ * child with none would recreate the standalone-record problem sprints
+ * 30-32 closed. Falls straight through to a plain delete when there are no
+ * dependents, so it's a drop-in replacement for `removeRow` in a
+ * DeleteButton/RecordDetailModal onDelete.
+ */
+function useCascadeDelete() {
+  const { state, removeRow } = useErp();
+  const [pending, setPending] = useState<{
+    collection: Collections;
+    id: string;
+    label: string;
+    groups: { rule: DependentRule; ids: string[]; labels: string[] }[];
+  } | null>(null);
+  const [choices, setChoices] = useState<Record<number, "delete" | "reassign">>({});
+  const [reassignTo, setReassignTo] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const requestDelete = (targetCollection: Collections, id: string) => {
+    const rules = DEPENDENTS_RULES[targetCollection] ?? [];
+    const groups = rules
+      .map((rule) => {
+        const rows = state[rule.collection] as unknown as Record<string, unknown>[];
+        const matches = rows.filter((r) =>
+          rule.isArray
+            ? ((r[rule.field] as string[] | undefined) ?? []).includes(id)
+            : r[rule.field] === id,
+        );
+        return {
+          rule,
+          ids: matches.map((r) => r.id as string),
+          labels: matches.map((r) => rule.recordLabel(r)),
+        };
+      })
+      .filter((g) => g.ids.length > 0);
+    if (groups.length === 0) {
+      removeRow(targetCollection, id);
+      return;
+    }
+    const parentRows = state[targetCollection] as unknown as Record<string, unknown>[];
+    const parent = parentRows.find((r) => r.id === id);
+    const label = parent ? (PARENT_RECORD_LABEL[targetCollection]?.(parent) ?? id) : id;
+    setPending({ collection: targetCollection, id, label, groups });
+    setChoices({});
+    setReassignTo({});
+  };
+
+  const resolve = async () => {
+    if (!pending) return;
+    const missingReassign = pending.groups.some(
+      (g, i) => (choices[i] ?? "delete") === "reassign" && !reassignTo[i],
+    );
+    if (missingReassign) {
+      toast.error("Choisissez l'enregistrement de remplacement pour chaque groupe rattaché.");
+      return;
+    }
+    setBusy(true);
+    try {
+      for (let i = 0; i < pending.groups.length; i++) {
+        const g = pending.groups[i];
+        const choice = choices[i] ?? "delete";
+        if (choice === "delete") {
+          for (const childId of g.ids) {
+            await deleteDoc(doc(db, g.rule.collection, childId));
+          }
+        } else {
+          const newParentId = reassignTo[i];
+          const rows = state[g.rule.collection] as unknown as Record<string, unknown>[];
+          for (const childId of g.ids) {
+            const child = rows.find((r) => r.id === childId);
+            if (!child) continue;
+            if (g.rule.isArray) {
+              const cur = ((child[g.rule.field] as string[]) ?? []).filter((v) => v !== pending.id);
+              await updateDoc(doc(db, g.rule.collection, childId), {
+                [g.rule.field]: [...cur, newParentId],
+              });
+            } else {
+              await updateDoc(doc(db, g.rule.collection, childId), { [g.rule.field]: newParentId });
+            }
+          }
+        }
+      }
+      removeRow(pending.collection, pending.id);
+      setPending(null);
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Suppression impossible : ${err.message}`
+          : "Suppression impossible.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cascadeModal = pending ? (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4"
+      onClick={() => !busy && setPending(null)}
+    >
+      <div
+        className="w-full max-w-lg rounded-t-3xl bg-background pb-[env(safe-area-inset-bottom)] shadow-2xl sm:rounded-3xl sm:pb-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-border/70 px-5 py-4">
+          <h2 className="font-display text-[19px] font-bold text-primary">
+            Supprimer « {pending.label} » ?
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            D'autres enregistrements y sont rattachés — choisissez quoi faire pour chacun avant de
+            continuer.
+          </p>
+        </div>
+        <div className="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-5">
+          {pending.groups.map((g, i) => (
+            <div key={i} className="rounded-xl border border-border/70 p-3">
+              <p className="text-sm font-semibold text-foreground">
+                {g.ids.length} {g.rule.label}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">{g.labels.join(", ")}</p>
+              <select
+                value={choices[i] ?? "delete"}
+                onChange={(e) =>
+                  setChoices((c) => ({ ...c, [i]: e.target.value as "delete" | "reassign" }))
+                }
+                className="mt-2 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+              >
+                <option value="delete">Supprimer aussi</option>
+                <option value="reassign">Rattacher à un autre enregistrement</option>
+              </select>
+              {choices[i] === "reassign" && (
+                <select
+                  value={reassignTo[i] ?? ""}
+                  onChange={(e) => setReassignTo((r) => ({ ...r, [i]: e.target.value }))}
+                  className="mt-2 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+                >
+                  <option value="">— Choisir —</option>
+                  {(state[pending.collection] as unknown as Record<string, unknown>[])
+                    .filter((r) => r.id !== pending.id)
+                    .map((r) => (
+                      <option key={r.id as string} value={r.id as string}>
+                        {PARENT_RECORD_LABEL[pending.collection]?.(r) ?? (r.id as string)}
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-border/70 px-5 py-4">
+          <button
+            onClick={() => setPending(null)}
+            disabled={busy}
+            className="rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground disabled:opacity-50"
+          >
+            Annuler
+          </button>
+          <button
+            onClick={resolve}
+            disabled={busy}
+            className="rounded-lg bg-destructive px-4 py-2 text-xs font-semibold text-destructive-foreground disabled:opacity-50"
+          >
+            {busy ? "Suppression…" : "Confirmer la suppression"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return { requestDelete, cascadeModal };
 }
 
 /**
@@ -1857,7 +2111,8 @@ function TachesSection() {
 }
 
 function ApproSection() {
-  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { state, computed, addRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const p = state.parametres;
   const [selectedAppro, setSelectedAppro] = useState<(typeof computed.appro)[number] | null>(null);
   const [selectedProducteur, setSelectedProducteur] = useState<
@@ -1961,7 +2216,7 @@ function ApproSection() {
             <DeleteButton
               onClick={(e) => {
                 e.stopPropagation();
-                removeRow("approvisionnements", r.id);
+                requestDelete("approvisionnements", r.id);
               }}
             />,
           ])}
@@ -1978,7 +2233,7 @@ function ApproSection() {
             setSelectedAppro(null);
           }}
           onDelete={() => {
-            removeRow("approvisionnements", selectedAppro.id);
+            requestDelete("approvisionnements", selectedAppro.id);
             setSelectedAppro(null);
           }}
           fields={[
@@ -2144,7 +2399,7 @@ function ApproSection() {
             setSelectedProducteur(null);
           }}
           onDelete={() => {
-            removeRow("producteurs", selectedProducteur.id);
+            requestDelete("producteurs", selectedProducteur.id);
             setSelectedProducteur(null);
           }}
           fields={[
@@ -2203,12 +2458,14 @@ function ApproSection() {
       )}
 
       <ExportBar section="appro" />
+      {cascadeModal}
     </div>
   );
 }
 
 function ProductionSection() {
-  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { state, computed, addRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
@@ -2348,7 +2605,7 @@ function ProductionSection() {
             <DeleteButton
               onClick={(e) => {
                 e.stopPropagation();
-                removeRow("productions", r.id);
+                requestDelete("productions", r.id);
               }}
             />,
           ])}
@@ -2387,7 +2644,7 @@ function ProductionSection() {
             setSelectedLot(null);
           }}
           onDelete={() => {
-            removeRow("productions", selectedLot.id);
+            requestDelete("productions", selectedLot.id);
             setSelectedLot(null);
           }}
           fields={[
@@ -2498,6 +2755,7 @@ function ProductionSection() {
       )}
 
       <ExportBar section="production" />
+      {cascadeModal}
     </div>
   );
 }
@@ -3711,6 +3969,7 @@ function CommercialisationSection({
   onTabChange: (tab: string) => void;
 }) {
   const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
@@ -4118,7 +4377,7 @@ function CommercialisationSection({
                 <DeleteButton
                   onClick={(e) => {
                     e.stopPropagation();
-                    removeRow("clients", c.id);
+                    requestDelete("clients", c.id);
                   }}
                 />,
               ])}
@@ -4139,7 +4398,7 @@ function CommercialisationSection({
                 setSelectedClient(null);
               }}
               onDelete={() => {
-                removeRow("clients", selectedClient.id);
+                requestDelete("clients", selectedClient.id);
                 setSelectedClient(null);
               }}
               fields={[
@@ -4267,6 +4526,7 @@ function CommercialisationSection({
       </Tabs>
 
       <ExportBar section="commercialisation" />
+      {cascadeModal}
     </div>
   );
 }
