@@ -3809,7 +3809,13 @@ function CommercialisationSection({
                       label: "Client",
                       type: "select",
                       required: true,
-                      selectOptions: state.clients.map((c) => ({ value: c.id, label: c.nom })),
+                      // An empty <select> with zero <option>s looks broken
+                      // rather than blocked — show an explanatory (still
+                      // unselectable) placeholder instead when there's
+                      // nothing real to pick from yet.
+                      selectOptions: state.clients.length
+                        ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
+                        : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
                     },
                     {
                       name: "canal",
@@ -3869,6 +3875,13 @@ function CommercialisationSection({
               </div>
             }
           >
+            {state.clients.length === 0 && (
+              <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+                <strong>Aucun client enregistré.</strong> Chaque vente doit être rattachée à un
+                client réel — créez-en un d'abord dans le Registre clients (plus bas sur cette
+                page), sinon « Nouvelle vente » restera bloquée sur « Client requis. ».
+              </p>
+            )}
             <Table
               onRowClick={(i) => setSelectedVente(computed.ventes[i])}
               headers={[
