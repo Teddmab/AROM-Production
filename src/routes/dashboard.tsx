@@ -1871,11 +1871,70 @@ const STAGE_LABELS: Record<TaskStage, string> = {
   commercialisation: "Commercialisation",
 };
 
+/**
+ * Minimal stand-in for EntryForm's field rendering (sprint 35) — used
+ * inside the task-completion modal, which needs the fields shown
+ * immediately (no "+ X" collapse toggle, no internal open state) rather
+ * than embedded in a page. Only the field types the completion forms
+ * actually use (no multiselect: the source link is fixed by which task is
+ * being completed, never shown as an editable field here).
+ */
+function TaskCompletionFields({
+  fields,
+  values,
+  setValues,
+}: {
+  fields: FieldDef[];
+  values: Record<string, string>;
+  setValues: (fn: (v: Record<string, string>) => Record<string, string>) => void;
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {fields.map((f) => (
+        <label key={f.name} className="text-xs font-medium text-muted-foreground">
+          {f.label}
+          {f.required ? <span className="text-destructive"> *</span> : null}
+          {f.type === "select" ? (
+            <select
+              value={values[f.name]}
+              onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+              className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            >
+              {f.selectOptions
+                ? f.selectOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))
+                : f.options?.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+            </select>
+          ) : (
+            <input
+              type={f.type ?? "text"}
+              step="any"
+              value={values[f.name]}
+              onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+              className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            />
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function TachesSection() {
   const { profile } = useAuth();
-  const { state } = useErp();
+  const { state, computed, addRow } = useErp();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [completingTask, setCompletingTask] = useState<Task | null>(null);
+  const [completionValues, setCompletionValues] = useState<Record<string, string>>({});
+  const [completionBusy, setCompletionBusy] = useState(false);
 
   useEffect(() => {
     return onSnapshot(
@@ -1895,7 +1954,21 @@ function TachesSection() {
         ? ["commercialisation"]
         : ["production", "stock", "commercialisation"];
 
-  const complete = async (task: Task) => {
+  // A task can drive real record creation only when its source still
+  // resolves to a real, current record — false for tasks created before
+  // sprint 32 (no sourceId at all) and for a source since deleted.
+  const canAutoLink = (task: Task): boolean => {
+    if (!task.sourceId) return false;
+    return task.stage === "production"
+      ? computed.appro.some((a) => a.id === task.sourceId)
+      : computed.production.some((r) => r.id === task.sourceId);
+  };
+
+  // Fallback for tasks that can't drive record creation (sprint 35) —
+  // exactly the old behaviour: flip status, and for a "production" task
+  // spawn follow-ups that just carry the same (possibly stale) source
+  // forward, since there's no real new lot to point them at.
+  const legacyComplete = async (task: Task) => {
     if (!profile) return;
     try {
       await updateDoc(doc(db, "tasks", task.id), {
@@ -1926,6 +1999,179 @@ function TachesSection() {
     }
   };
 
+  // Marks a task done after its completion form actually created the real
+  // record (sprint 35). For a completed "production" task, the follow-up
+  // Stock/Commercialisation tasks now point at the real new lot — not the
+  // réception — so their own completion forms link to it correctly.
+  const finishTask = async (task: Task, newLot?: { id: string; label: string }) => {
+    if (!profile) return;
+    try {
+      await updateDoc(doc(db, "tasks", task.id), {
+        status: "done",
+        completedAt: new Date().toISOString(),
+        completedBy: profile.uid,
+      });
+      if (task.stage === "production" && newLot) {
+        createTask(
+          "stock",
+          `Enregistrer la sortie de stock du lot ${newLot.label}`,
+          newLot.label,
+          newLot.id,
+        );
+        createTask(
+          "commercialisation",
+          `Mettre en vente le lot ${newLot.label}`,
+          newLot.label,
+          newLot.id,
+        );
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Mise à jour impossible : ${err.message}`
+          : "Mise à jour impossible.",
+      );
+    }
+  };
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  // What each stage's completion form actually creates — the source link
+  // itself (réception/lot) is fixed by which task is being completed, so
+  // it's never shown as an editable field here.
+  const completionFieldsFor = (task: Task): FieldDef[] => {
+    if (task.stage === "production") {
+      return [
+        { name: "lot", label: "N° lot" },
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        { name: "kgUtilises", label: "Kg ananas utilisés", type: "number", default: 0 },
+        { name: "volumeJusL", label: "Volume jus (L)", type: "number", default: 0 },
+        { name: "q500", label: "500 ml produits", type: "number", default: 0 },
+        { name: "q330", label: "330 ml produits", type: "number", default: 0 },
+        { name: "q300", label: "300 ml produits", type: "number", default: 0 },
+        { name: "rejets", label: "Rejets", type: "number", default: 0 },
+        {
+          name: "statut",
+          label: "Statut lot",
+          type: "select",
+          options: ["En cours", "Terminé"],
+          default: "Terminé",
+        },
+      ];
+    }
+    if (task.stage === "stock") {
+      return [
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        { name: "produit", label: "Produit", default: "Ananas" },
+        { name: "unite", label: "Unité", default: "Pièce" },
+        { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
+        { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
+        {
+          name: "observation",
+          label: "Observation",
+          default: `Transformation lot ${task.sourceLabel}`,
+        },
+      ];
+    }
+    return [
+      { name: "numero", label: "N° vente" },
+      { name: "date", label: "Date", type: "date", default: todayIso },
+      {
+        name: "idClient",
+        label: "Client",
+        type: "select",
+        required: true,
+        selectOptions: state.clients.length
+          ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
+          : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
+      },
+      { name: "canal", label: "Canal", type: "select", options: CANAUX, default: "Restaurant" },
+      { name: "format", label: "Format", type: "select", options: FORMATS, default: "500 ml" },
+      { name: "quantite", label: "Quantité", type: "number", default: 0 },
+      {
+        name: "prixUnitaire",
+        label: "Prix unitaire FC",
+        type: "number",
+        default: state.parametres.prix500,
+      },
+      { name: "remise", label: "Remise FC", type: "number", default: 0 },
+      { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+    ];
+  };
+
+  const openCompletion = (task: Task) => {
+    const fields = completionFieldsFor(task);
+    setCompletionValues(Object.fromEntries(fields.map((f) => [f.name, String(f.default ?? "")])));
+    setCompletingTask(task);
+  };
+
+  const submitCompletion = async () => {
+    if (!completingTask || !profile) return;
+    const task = completingTask;
+    const fields = completionFieldsFor(task);
+    const missing = fields.find((f) => f.required && !completionValues[f.name]);
+    if (missing) {
+      toast.error(`${missing.label} requis.`);
+      return;
+    }
+    setCompletionBusy(true);
+    const v = completionValues;
+    if (task.stage === "production") {
+      const newLotId = newId("PRO");
+      addRow("productions", {
+        id: newLotId,
+        lot: v.lot,
+        date: v.date,
+        kgUtilises: n(v.kgUtilises),
+        volumeJusL: n(v.volumeJusL),
+        q500: n(v.q500),
+        q330: n(v.q330),
+        q300: n(v.q300),
+        rejets: n(v.rejets),
+        responsable: profile.displayName || profile.email || "Équipe production",
+        ...(profile.uid ? { staffUid: profile.uid } : {}),
+        statut: v.statut,
+        approvisionnementIds: [task.sourceId!],
+      });
+      await finishTask(task, { id: newLotId, label: v.lot });
+    } else if (task.stage === "stock") {
+      addRow("stockMP", {
+        id: newId("MP"),
+        date: v.date,
+        produit: v.produit,
+        unite: v.unite,
+        type: "Sortie",
+        entree: 0,
+        sortie: n(v.sortie),
+        coutUnitaire: n(v.coutUnitaire),
+        observation: v.observation,
+        productionIds: [task.sourceId!],
+      });
+      await finishTask(task);
+    } else {
+      const client = state.clients.find((c) => c.id === v.idClient);
+      addRow("ventes", {
+        id: newId("VTE"),
+        numero: v.numero,
+        date: v.date,
+        idClient: v.idClient,
+        client: client?.nom ?? "",
+        canal: v.canal as Canal,
+        format: v.format as Format,
+        quantite: n(v.quantite),
+        prixUnitaire: n(v.prixUnitaire) || prixFormat(state.parametres, v.format as Format),
+        remise: n(v.remise),
+        encaisse: n(v.encaisse),
+        commerciale: profile.displayName || profile.email || "Équipe commerciale",
+        ...(profile.uid ? { staffUid: profile.uid } : {}),
+        productionIds: [task.sourceId!],
+      });
+      await finishTask(task);
+    }
+    setCompletionBusy(false);
+    setCompletingTask(null);
+  };
+
   const pending = tasks.filter((t) => t.status === "pending");
   const doneCount = tasks.length - pending.length;
 
@@ -1942,32 +2188,45 @@ function TachesSection() {
 
   const NEXT_ACTION: Record<TaskStage, string> = {
     production:
-      "Une fois cette tâche terminée, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour la même réception.",
+      "Marquer cette tâche terminée ouvre l'enregistrement du lot produit à partir de cette réception. Une fois enregistré, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour ce lot.",
     stock:
-      "Dernière étape du suivi Stock pour cette réception — aucune tâche n'est créée après celle-ci.",
+      "Marquer cette tâche terminée ouvre l'enregistrement de la sortie de stock pour ce lot — dernière étape du suivi Stock.",
     commercialisation:
-      "Dernière étape du suivi Commercialisation pour cette réception — aucune tâche n'est créée après celle-ci.",
+      "Marquer cette tâche terminée ouvre l'enregistrement de la vente pour ce lot — dernière étape du suivi Commercialisation.",
   };
 
-  // What led to this task existing, in order — for "stock"/"commercialisation"
-  // tasks that's the originating "production" task's own completion. Matched
-  // by the real `sourceId` (Approvisionnement.id, sprint 32) when present, so
-  // the lineage survives a staff member renaming the réception's numéro
-  // afterward; falls back to the old `sourceLabel` string match for tasks
-  // created before that field existed.
+  // What led to this task existing, in order (sprint 35). A "production"
+  // task's own source is the réception. A "stock"/"commercialisation"
+  // task's source is now the real production lot it was spawned for — its
+  // origin production task is found by walking the lot's own
+  // approvisionnementIds back to a matching réception, not by matching
+  // sourceId/sourceLabel directly against each other (they're different
+  // records now). Resolves to "—" gracefully for legacy tasks or a since-
+  // deleted source, rather than guessing.
   const buildHistory = (task: Task): DetailField["breakdown"] => {
-    const steps: { label: string; value: string }[] = [
-      { label: "Réception reçue", value: task.sourceLabel },
-    ];
-    if (task.stage !== "production") {
+    const steps: { label: string; value: string }[] = [];
+    if (task.stage === "production") {
+      steps.push({ label: "Réception reçue", value: task.sourceLabel });
+    } else {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      const approIds = lot?.approvisionnementIds ?? [];
+      const approNumeros = approIds
+        .map((id) => computed.appro.find((a) => a.id === id)?.numero)
+        .filter((v): v is string => Boolean(v));
+      steps.push({
+        label: "Réception(s) source",
+        value: approNumeros.length ? approNumeros.join(", ") : "—",
+      });
       const origin = tasks.find(
-        (t) =>
-          t.stage === "production" &&
-          (task.sourceId ? t.sourceId === task.sourceId : t.sourceLabel === task.sourceLabel),
+        (t) => t.stage === "production" && !!t.sourceId && approIds.includes(t.sourceId),
       );
       steps.push({
-        label: "Production terminée",
-        value: origin?.completedAt ? formatDateTime(origin.completedAt) : "—",
+        label: "Lot produit",
+        value: origin?.completedAt
+          ? `${task.sourceLabel} — ${formatDateTime(origin.completedAt)}`
+          : task.sourceLabel,
       });
     }
     steps.push({
@@ -2055,16 +2314,30 @@ function TachesSection() {
                       className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
                     >
                       <span className="text-sm text-foreground">{t.title}</span>
-                      <ConfirmButton
-                        onConfirm={() => complete(t)}
-                        confirmLabel="Confirmer ?"
-                        ariaLabel="Marquer terminé"
-                        confirmAriaLabel="Confirmer la tâche terminée"
-                        className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
-                        confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
-                      >
-                        <Check className="h-4 w-4" aria-hidden />
-                      </ConfirmButton>
+                      {canAutoLink(t) ? (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openCompletion(t);
+                          }}
+                          aria-label="Marquer terminé"
+                          title="Marquer terminé"
+                          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                        >
+                          <Check className="h-4 w-4" aria-hidden />
+                        </button>
+                      ) : (
+                        <ConfirmButton
+                          onConfirm={() => legacyComplete(t)}
+                          confirmLabel="Confirmer ?"
+                          ariaLabel="Marquer terminé"
+                          confirmAriaLabel="Confirmer la tâche terminée"
+                          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                          confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
+                        >
+                          <Check className="h-4 w-4" aria-hidden />
+                        </ConfirmButton>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -2105,6 +2378,54 @@ function TachesSection() {
             },
           ]}
         />
+      )}
+
+      {completingTask && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4"
+          onClick={() => !completionBusy && setCompletingTask(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl bg-background pb-[env(safe-area-inset-bottom)] shadow-2xl sm:rounded-3xl sm:pb-0"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-border/70 px-5 py-4">
+              <h2 className="font-display text-[19px] font-bold text-primary">
+                {completingTask.title}
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {completingTask.stage === "production"
+                  ? "Enregistrez le lot produit à partir de cette réception."
+                  : completingTask.stage === "stock"
+                    ? "Enregistrez la sortie de stock pour ce lot."
+                    : "Enregistrez la vente pour ce lot."}
+              </p>
+            </div>
+            <div className="max-h-[55vh] overflow-y-auto px-5 py-5">
+              <TaskCompletionFields
+                fields={completionFieldsFor(completingTask)}
+                values={completionValues}
+                setValues={setCompletionValues}
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-border/70 px-5 py-4">
+              <button
+                onClick={() => setCompletingTask(null)}
+                disabled={completionBusy}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground disabled:opacity-50"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={submitCompletion}
+                disabled={completionBusy}
+                className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
+              >
+                {completionBusy ? "Enregistrement…" : "Enregistrer et terminer"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
