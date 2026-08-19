@@ -2041,10 +2041,22 @@ function TachesSection() {
   // it's never shown as an editable field here.
   const completionFieldsFor = (task: Task): FieldDef[] => {
     if (task.stage === "production") {
+      // Both already on record the moment this task exists — carrying them
+      // forward saves re-typing a number staff already entered once (and a
+      // real chance of transcribing it wrong): réceptions are named
+      // "PDR-001" and their lots "PDR_001" in practice, so the réception's
+      // own numero is a reasonable starting point for "N° lot", and kg
+      // utilisés naturally starts at the full kg received.
+      const appro = task.sourceId ? computed.appro.find((a) => a.id === task.sourceId) : undefined;
       return [
-        { name: "lot", label: "N° lot" },
+        { name: "lot", label: "N° lot", default: task.sourceLabel },
         { name: "date", label: "Date", type: "date", default: todayIso },
-        { name: "kgUtilises", label: "Kg ananas utilisés", type: "number", default: 0 },
+        {
+          name: "kgUtilises",
+          label: "Kg ananas utilisés",
+          type: "number",
+          default: appro?.qteRecueKg ?? 0,
+        },
         { name: "volumeJusL", label: "Volume jus (L)", type: "number", default: 0 },
         { name: "q500", label: "500 ml produits", type: "number", default: 0 },
         { name: "q330", label: "330 ml produits", type: "number", default: 0 },
@@ -2060,12 +2072,29 @@ function TachesSection() {
       ];
     }
     if (task.stage === "stock") {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      // The lot's own kgUtilises was entered one step earlier (completing
+      // the production task) — that's exactly the quantity now leaving raw
+      // stock, so it's the right starting point, not a fresh 0. Coût
+      // unitaire carries forward the last real movement's cost (same
+      // "dernierCout" the Stock KPI itself uses) instead of a stale
+      // hardcoded figure.
+      const dernierCout = state.stockMP.length
+        ? state.stockMP[state.stockMP.length - 1].coutUnitaire
+        : 1044;
       return [
         { name: "date", label: "Date", type: "date", default: todayIso },
         { name: "produit", label: "Produit", default: "Ananas" },
         { name: "unite", label: "Unité", default: "Pièce" },
-        { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
-        { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
+        {
+          name: "sortie",
+          label: "Quantité sortie",
+          type: "number",
+          default: lot?.kgUtilises ?? 0,
+        },
+        { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: dernierCout },
         {
           name: "observation",
           label: "Observation",
@@ -2073,6 +2102,19 @@ function TachesSection() {
         },
       ];
     }
+    const lot = task.sourceId ? computed.production.find((r) => r.id === task.sourceId) : undefined;
+    // Defaulting "Format" to whichever this lot actually produced the most
+    // of — a lot with zero 500ml bottles shouldn't default to selling
+    // 500ml. Prix unitaire is derived from that same format, not a
+    // hardcoded 500ml price that silently stays wrong if the format is
+    // ever changed without noticing.
+    const dominantFormat: Format = !lot
+      ? "500 ml"
+      : lot.q500 >= lot.q330 && lot.q500 >= lot.q300
+        ? "500 ml"
+        : lot.q330 >= lot.q300
+          ? "330 ml"
+          : "300 ml";
     return [
       { name: "numero", label: "N° vente" },
       { name: "date", label: "Date", type: "date", default: todayIso },
@@ -2086,13 +2128,19 @@ function TachesSection() {
           : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
       },
       { name: "canal", label: "Canal", type: "select", options: CANAUX, default: "Restaurant" },
-      { name: "format", label: "Format", type: "select", options: FORMATS, default: "500 ml" },
+      {
+        name: "format",
+        label: "Format",
+        type: "select",
+        options: FORMATS,
+        default: dominantFormat,
+      },
       { name: "quantite", label: "Quantité", type: "number", default: 0 },
       {
         name: "prixUnitaire",
         label: "Prix unitaire FC",
         type: "number",
-        default: state.parametres.prix500,
+        default: prixFormat(state.parametres, dominantFormat),
       },
       { name: "remise", label: "Remise FC", type: "number", default: 0 },
       { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
