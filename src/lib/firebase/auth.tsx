@@ -22,6 +22,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./config";
 import { AROM_DEPOT_NAME } from "@/lib/storefront/depot";
+import { createTask } from "@/lib/erp/tasks";
 
 export type Role = "admin" | "staff" | "partner";
 export type OAuthProviderName = "google" | "facebook";
@@ -274,6 +275,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         onboardingComplete: true,
         pointDeVente: AROM_DEPOT_NAME,
       });
+      const boutiqueName = auth.currentUser.displayName || data.contactName;
+      createTask("kyc", `Vérifier le KYC de ${boutiqueName}`, boutiqueName, auth.currentUser.uid);
     },
     updatePartnerProfile: async (data) => {
       if (!auth.currentUser) throw new Error("Vous devez être connecté.");

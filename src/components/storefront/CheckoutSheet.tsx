@@ -4,6 +4,7 @@ import { CheckCircle2, ChevronLeft, Smartphone, Truck, X } from "lucide-react";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/firebase/auth";
 import { fcFormat } from "@/lib/erp/model";
+import { createTask } from "@/lib/erp/tasks";
 import {
   PAWAPAY_PROVIDERS,
   checkPawapayDepositStatus,
@@ -66,7 +67,7 @@ export function CheckoutSheet({
     const { address } = profile;
     // Firestore rejects `undefined` field values, so these are only
     // included when the partner's profile actually has them.
-    await addDoc(collection(db, "orders"), {
+    const orderRef = await addDoc(collection(db, "orders"), {
       partnerId: profile.uid,
       partnerName: profile.displayName || profile.email,
       ...(profile.phone ? { partnerPhone: profile.phone } : {}),
@@ -81,6 +82,13 @@ export function CheckoutSheet({
       createdAt: new Date().toISOString(),
       payment,
     });
+    const partnerName = profile.displayName || profile.email || "Partenaire";
+    createTask(
+      "order-confirm",
+      `Confirmer la commande de ${partnerName}`,
+      partnerName,
+      orderRef.id,
+    );
   };
 
   const payCashOnDelivery = async () => {

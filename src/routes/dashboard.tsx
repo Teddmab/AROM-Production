@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ErpProvider, useErp, newId, type Collections } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
+import { createTask, visibleTaskStages, type Task, type TaskStage } from "@/lib/erp/tasks";
 import { db, storage } from "@/lib/firebase/config";
 import {
   CANAUX,
@@ -149,50 +150,21 @@ const ALL_MENU_OPTIONS: { id: string; label: string }[] = SECTIONS.flatMap((s) =
 ]);
 
 /**
- * Workflow tasks (sprint 26): "Inviter un membre" led to "have I implemented
- * the task feature" — the answer was no, so this adds it. Approvisionnement
- * → Production → {Stock, Commercialisation} is a chain of manual hand-offs,
- * not an automatic one — a Production lot has no field linking it back to
- * the réception(s) it consumed (sprint 20's deliberate call: AROM pools raw
- * ananas in shared storage, batches aren't physically traceable), so a task
- * can't be auto-completed by detecting a matching downstream record. Staff
- * click "Marquer terminé" once they've actually done the work; completing a
- * "production" task fires off its "stock" and "commercialisation" follow-ups
- * in the same action.
+ * Workflow tasks (sprint 26, extended sprint 37): "Inviter un membre" led to
+ * "have I implemented the task feature" — the answer was no, so this added
+ * it. Approvisionnement → Production → {Stock, Commercialisation} is a
+ * chain of manual hand-offs, not an automatic one — a Production lot has no
+ * field linking it back to the réception(s) it consumed (sprint 20's
+ * deliberate call: AROM pools raw ananas in shared storage, batches aren't
+ * physically traceable), so a task can't be auto-completed by detecting a
+ * matching downstream record. Staff click "Marquer terminé" once they've
+ * actually done the work; completing a "production" task fires off its
+ * "stock" and "commercialisation" follow-ups in the same action. Sprint 37
+ * extended this same pattern to KYC verification, order fulfillment, and
+ * invite follow-up — see src/lib/erp/tasks.ts, where Task/TaskStage/
+ * createTask now live so CheckoutSheet.tsx and auth.tsx can spawn tasks
+ * from outside the dashboard too.
  */
-type TaskStage = "production" | "stock" | "commercialisation";
-interface Task {
-  id: string;
-  stage: TaskStage;
-  title: string;
-  /** The originating réception's numéro — kept for display even though sourceId (below) is now the real lineage key, since a staff member renaming a réception shouldn't also rewrite every task title. */
-  sourceLabel: string;
-  /** Real Approvisionnement.id this task traces back to (sprint 32) — used for lineage matching instead of the editable sourceLabel string. Optional: tasks created before this sprint only have sourceLabel. */
-  sourceId?: string;
-  status: "pending" | "done";
-  createdAt: string;
-  completedAt?: string;
-  completedBy?: string;
-}
-
-function createTask(stage: TaskStage, title: string, sourceLabel: string, sourceId?: string) {
-  const id = newId("TASK");
-  setDoc(doc(db, "tasks", id), {
-    id,
-    stage,
-    title,
-    sourceLabel,
-    ...(sourceId ? { sourceId } : {}),
-    status: "pending",
-    createdAt: new Date().toISOString(),
-  } satisfies Task).catch((err) =>
-    toast.error(
-      err instanceof Error
-        ? `Création de tâche impossible : ${err.message}`
-        : "Création de tâche impossible.",
-    ),
-  );
-}
 
 function DashboardRoute() {
   return (
@@ -229,12 +201,7 @@ function Dashboard() {
   const [pendingTaskCount, setPendingTaskCount] = useState(0);
   useEffect(() => {
     if (!canAccessMenu(profile, "taches")) return;
-    const visibleStages: TaskStage[] =
-      profile?.poste === "Directeur de Production"
-        ? ["production", "stock"]
-        : profile?.poste === "Chargée de Commercialisation"
-          ? ["commercialisation"]
-          : ["production", "stock", "commercialisation"];
+    const visibleStages = visibleTaskStages(profile);
     return onSnapshot(query(collection(db, "tasks"), where("status", "==", "pending")), (snap) => {
       setPendingTaskCount(
         snap.docs.filter((d) => visibleStages.includes((d.data() as Task).stage)).length,
@@ -1869,7 +1836,21 @@ const STAGE_LABELS: Record<TaskStage, string> = {
   production: "Production",
   stock: "Stock",
   commercialisation: "Commercialisation",
+  kyc: "Vérification KYC",
+  "order-confirm": "Confirmation commandes",
+  "order-fulfill": "Livraison commandes",
+  invite: "Suivi des invitations",
 };
+
+// Groups related stages under a shared heading (sprint 37) — with 7
+// possible stages now, one flat row of cards read as an undifferentiated
+// wall. Each group is its own domain: the appro→vente funnel, storefront
+// order handling, and account-related follow-ups (KYC, invites).
+const STAGE_GROUPS: { label: string; stages: TaskStage[] }[] = [
+  { label: "Chaîne de production", stages: ["production", "stock", "commercialisation"] },
+  { label: "Commandes boutique partenaires", stages: ["order-confirm", "order-fulfill"] },
+  { label: "Comptes & accès", stages: ["kyc", "invite"] },
+];
 
 /**
  * Minimal stand-in for EntryForm's field rendering (sprint 35) — used
@@ -1946,22 +1927,69 @@ function TachesSection() {
 
   // A poste-scoped account only sees the stage(s) it actually owns — matches
   // sprint 17's data scoping. Admin, unscoped, and "Personnalisé" staff see
-  // everything, same as every other section.
-  const visibleStages: TaskStage[] =
-    profile?.poste === "Directeur de Production"
-      ? ["production", "stock"]
-      : profile?.poste === "Chargée de Commercialisation"
-        ? ["commercialisation"]
-        : ["production", "stock", "commercialisation"];
+  // everything, same as every other section. See visibleTaskStages for the
+  // firestore.rules read-access reasoning behind each stage's cutoff.
+  const visibleStages = visibleTaskStages(profile);
+  const canSeeKyc = visibleStages.includes("kyc");
+  const canSeeOrders =
+    visibleStages.includes("order-confirm") || visibleStages.includes("order-fulfill");
+  const canSeeInvites = visibleStages.includes("invite");
 
-  // A task can drive real record creation only when its source still
-  // resolves to a real, current record — false for tasks created before
-  // sprint 32 (no sourceId at all) and for a source since deleted.
+  // These three collections back kyc/order-*/invite tasks but aren't part
+  // of useErp()'s state (that only covers the appro→...→commercialisation
+  // domain) — same local-subscription pattern BoutiquesCard/OrdersCard/
+  // InviteCard already use for themselves. Gated on the account actually
+  // being able to see the corresponding stage(s), so a poste-scoped
+  // Directeur de Production (no firestore.rules read access on `orders`)
+  // never opens a listener that would just fail with permission-denied.
+  const [boutiques, setBoutiques] = useState<Boutique[]>([]);
+  useEffect(() => {
+    if (!canSeeKyc) return;
+    return onSnapshot(query(collection(db, "users"), where("role", "==", "partner")), (snap) =>
+      setBoutiques(snap.docs.map((d) => ({ uid: d.id, ...(d.data() as Omit<Boutique, "uid">) }))),
+    );
+  }, [canSeeKyc]);
+
+  const [orders, setOrders] = useState<StorefrontOrder[]>([]);
+  useEffect(() => {
+    if (!canSeeOrders) return;
+    return onSnapshot(query(collection(db, "orders"), orderBy("createdAt", "desc")), (snap) =>
+      setOrders(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<StorefrontOrder, "id">) }))),
+    );
+  }, [canSeeOrders]);
+
+  const [invites, setInvites] = useState<Invite[]>([]);
+  useEffect(() => {
+    if (!canSeeInvites) return;
+    return onSnapshot(query(collection(db, "invites"), orderBy("createdAt", "desc")), (snap) =>
+      setInvites(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Invite, "id">) }))),
+    );
+  }, [canSeeInvites]);
+
+  // A task can drive its real completion action only when its source still
+  // resolves to a real, current record in the expected state — false for
+  // tasks created before sprint 32 (no sourceId at all), for a since-
+  // deleted source, and for an order that was already confirmed/fulfilled/
+  // cancelled directly via OrdersCard's own buttons instead of through this
+  // task. "invite" never auto-links: there's no new record to create, only
+  // a status to flip, so it always uses the plain legacyComplete fallback.
   const canAutoLink = (task: Task): boolean => {
     if (!task.sourceId) return false;
-    return task.stage === "production"
-      ? computed.appro.some((a) => a.id === task.sourceId)
-      : computed.production.some((r) => r.id === task.sourceId);
+    switch (task.stage) {
+      case "production":
+        return computed.appro.some((a) => a.id === task.sourceId);
+      case "stock":
+      case "commercialisation":
+        return computed.production.some((r) => r.id === task.sourceId);
+      case "kyc":
+        return boutiques.some((b) => b.uid === task.sourceId);
+      case "order-confirm":
+        return orders.some((o) => o.id === task.sourceId && o.status === "pending");
+      case "order-fulfill":
+        return orders.some((o) => o.id === task.sourceId && o.status === "confirmed");
+      case "invite":
+        return false;
+    }
   };
 
   // Fallback for tasks that can't drive record creation (sprint 35) —
@@ -2024,6 +2052,13 @@ function TachesSection() {
           newLot.label,
           newLot.id,
         );
+      } else if (task.stage === "order-confirm") {
+        createTask(
+          "order-fulfill",
+          `Livrer la commande de ${task.sourceLabel}`,
+          task.sourceLabel,
+          task.sourceId,
+        );
       }
     } catch (err) {
       toast.error(
@@ -2032,6 +2067,36 @@ function TachesSection() {
           : "Mise à jour impossible.",
       );
     }
+  };
+
+  // Same batch write as OrdersCard's own "Marquer livrée" action — an
+  // "order-fulfill" task's completion is that exact same action, just
+  // reached from the task instead of the Commandes table directly.
+  const fulfillOrder = async (order: StorefrontOrder) => {
+    const batch = writeBatch(db);
+    batch.update(doc(db, "orders", order.id), {
+      status: "fulfilled",
+      fulfilledAt: new Date().toISOString(),
+    });
+    const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
+    order.items.forEach((item, idx) => {
+      const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
+      batch.set(doc(db, "ventes", `VTE-ORD-${order.id}-${idx}`), {
+        id: `VTE-ORD-${order.id}-${idx}`,
+        numero,
+        date: order.createdAt.slice(0, 10),
+        idClient: order.partnerId,
+        client: order.partnerName,
+        canal: "Grossiste" as Canal,
+        format: (FORMATS.includes(item.format as Format) ? item.format : "500 ml") as Format,
+        quantite: item.quantity,
+        prixUnitaire: item.unitPrice,
+        remise: 0,
+        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
+        commerciale: "Boutique partenaire",
+      });
+    });
+    await batch.commit();
   };
 
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -2102,49 +2167,103 @@ function TachesSection() {
         },
       ];
     }
-    const lot = task.sourceId ? computed.production.find((r) => r.id === task.sourceId) : undefined;
-    // Defaulting "Format" to whichever this lot actually produced the most
-    // of — a lot with zero 500ml bottles shouldn't default to selling
-    // 500ml. Prix unitaire is derived from that same format, not a
-    // hardcoded 500ml price that silently stays wrong if the format is
-    // ever changed without noticing.
-    const dominantFormat: Format = !lot
-      ? "500 ml"
-      : lot.q500 >= lot.q330 && lot.q500 >= lot.q300
+    if (task.stage === "commercialisation") {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      // Defaulting "Format" to whichever this lot actually produced the most
+      // of — a lot with zero 500ml bottles shouldn't default to selling
+      // 500ml. Prix unitaire is derived from that same format, not a
+      // hardcoded 500ml price that silently stays wrong if the format is
+      // ever changed without noticing.
+      const dominantFormat: Format = !lot
         ? "500 ml"
-        : lot.q330 >= lot.q300
-          ? "330 ml"
-          : "300 ml";
-    return [
-      { name: "numero", label: "N° vente" },
-      { name: "date", label: "Date", type: "date", default: todayIso },
-      {
-        name: "idClient",
-        label: "Client",
-        type: "select",
-        required: true,
-        selectOptions: state.clients.length
-          ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
-          : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
-      },
-      { name: "canal", label: "Canal", type: "select", options: CANAUX, default: "Restaurant" },
-      {
-        name: "format",
-        label: "Format",
-        type: "select",
-        options: FORMATS,
-        default: dominantFormat,
-      },
-      { name: "quantite", label: "Quantité", type: "number", default: 0 },
-      {
-        name: "prixUnitaire",
-        label: "Prix unitaire FC",
-        type: "number",
-        default: prixFormat(state.parametres, dominantFormat),
-      },
-      { name: "remise", label: "Remise FC", type: "number", default: 0 },
-      { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-    ];
+        : lot.q500 >= lot.q330 && lot.q500 >= lot.q300
+          ? "500 ml"
+          : lot.q330 >= lot.q300
+            ? "330 ml"
+            : "300 ml";
+      return [
+        { name: "numero", label: "N° vente" },
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        {
+          name: "idClient",
+          label: "Client",
+          type: "select",
+          required: true,
+          selectOptions: state.clients.length
+            ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
+            : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
+        },
+        { name: "canal", label: "Canal", type: "select", options: CANAUX, default: "Restaurant" },
+        {
+          name: "format",
+          label: "Format",
+          type: "select",
+          options: FORMATS,
+          default: dominantFormat,
+        },
+        { name: "quantite", label: "Quantité", type: "number", default: 0 },
+        {
+          name: "prixUnitaire",
+          label: "Prix unitaire FC",
+          type: "number",
+          default: prixFormat(state.parametres, dominantFormat),
+        },
+        { name: "remise", label: "Remise FC", type: "number", default: 0 },
+        { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+      ];
+    }
+    if (task.stage === "order-confirm") {
+      return [
+        {
+          name: "deliveryDate",
+          label: "Date de livraison (optionnel)",
+          type: "date",
+          default: "",
+        },
+      ];
+    }
+    // kyc, order-fulfill, invite: nothing to type in — the completion modal
+    // shows a read-only summary instead of TaskCompletionFields, and the
+    // action itself (verify / fulfill / dismiss) needs no extra input.
+    return [];
+  };
+
+  // What the read-only completion summary shows for stages with no form
+  // (kyc, order-fulfill) — same source data BoutiquesCard/OrdersCard
+  // already surface in their own detail modals, just reused here so
+  // staff can verify/fulfill without leaving the task.
+  const completionSummaryFor = (task: Task): { label: string; value: string }[] => {
+    if (task.stage === "kyc") {
+      const b = boutiques.find((x) => x.uid === task.sourceId);
+      if (!b) return [];
+      return [
+        { label: "Boutique", value: b.displayName },
+        { label: "Responsable", value: b.contactName || "—" },
+        { label: "Téléphone", value: b.phone ? `+${b.phone}` : "—" },
+        {
+          label: "Adresse",
+          value: b.address
+            ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}`
+            : "—",
+        },
+        { label: "N° CNI/RCCM", value: b.idNumber || "—" },
+      ];
+    }
+    if (task.stage === "order-fulfill") {
+      const o = orders.find((x) => x.id === task.sourceId);
+      if (!o) return [];
+      return [
+        { label: "Partenaire", value: o.partnerName },
+        { label: "Articles", value: o.items.map((i) => `${i.quantity}× ${i.name}`).join(", ") },
+        { label: "Total", value: fcFormat(o.total) },
+        ...(o.deliveryDate
+          ? [{ label: "Livraison prévue", value: formatDateOnly(o.deliveryDate) }]
+          : []),
+      ];
+    }
+    return [];
   };
 
   const openCompletion = (task: Task) => {
@@ -2196,7 +2315,7 @@ function TachesSection() {
         productionIds: [task.sourceId!],
       });
       await finishTask(task);
-    } else {
+    } else if (task.stage === "commercialisation") {
       const client = state.clients.find((c) => c.id === v.idClient);
       addRow("ventes", {
         id: newId("VTE"),
@@ -2215,6 +2334,45 @@ function TachesSection() {
         productionIds: [task.sourceId!],
       });
       await finishTask(task);
+    } else if (task.stage === "kyc") {
+      try {
+        await updateDoc(doc(db, "users", task.sourceId!), { verified: true });
+        await finishTask(task);
+      } catch (err) {
+        toast.error(
+          err instanceof Error
+            ? `Vérification impossible : ${err.message}`
+            : "Vérification impossible.",
+        );
+      }
+    } else if (task.stage === "order-confirm") {
+      try {
+        await updateDoc(doc(db, "orders", task.sourceId!), {
+          status: "confirmed",
+          ...(v.deliveryDate ? { deliveryDate: v.deliveryDate } : {}),
+        });
+        await finishTask(task);
+      } catch (err) {
+        toast.error(
+          err instanceof Error
+            ? `Confirmation de la commande impossible : ${err.message}`
+            : "Confirmation de la commande impossible.",
+        );
+      }
+    } else if (task.stage === "order-fulfill") {
+      const order = orders.find((o) => o.id === task.sourceId);
+      if (order) {
+        try {
+          await fulfillOrder(order);
+          await finishTask(task);
+        } catch (err) {
+          toast.error(
+            err instanceof Error
+              ? `Livraison impossible : ${err.message}`
+              : "Livraison impossible.",
+          );
+        }
+      }
     }
     setCompletionBusy(false);
     setCompletingTask(null);
@@ -2234,13 +2392,31 @@ function TachesSection() {
         })
       : "—";
 
-  const NEXT_ACTION: Record<TaskStage, string> = {
-    production:
-      "Marquer cette tâche terminée ouvre l'enregistrement du lot produit à partir de cette réception. Une fois enregistré, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour ce lot.",
-    stock:
-      "Marquer cette tâche terminée ouvre l'enregistrement de la sortie de stock pour ce lot — dernière étape du suivi Stock.",
-    commercialisation:
-      "Marquer cette tâche terminée ouvre l'enregistrement de la vente pour ce lot — dernière étape du suivi Commercialisation.",
+  // Per-task, not per-stage (two "production" tasks for two different
+  // réceptions used to show identical boilerplate) — names the task's own
+  // source, and reflects the actual fallback when its source no longer
+  // resolves (canAutoLink false) instead of describing a form that won't
+  // actually open.
+  const nextActionFor = (task: Task): string => {
+    if (!canAutoLink(task)) {
+      return "L'enregistrement source de cette tâche n'est plus disponible : la marquer terminée se contente de la clôturer, sans ouvrir de formulaire.";
+    }
+    switch (task.stage) {
+      case "production":
+        return `Marquer cette tâche terminée ouvre l'enregistrement du lot produit à partir de la réception ${task.sourceLabel}. Une fois enregistré, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour ce lot.`;
+      case "stock":
+        return `Marquer cette tâche terminée ouvre l'enregistrement de la sortie de stock pour le lot ${task.sourceLabel} — dernière étape du suivi Stock pour ce lot.`;
+      case "commercialisation":
+        return `Marquer cette tâche terminée ouvre l'enregistrement de la vente pour le lot ${task.sourceLabel} — dernière étape du suivi Commercialisation pour ce lot.`;
+      case "kyc":
+        return `Marquer cette tâche terminée ouvre la fiche de vérification de ${task.sourceLabel} et la marque vérifiée.`;
+      case "order-confirm":
+        return `Marquer cette tâche terminée confirme la commande de ${task.sourceLabel} (avec une date de livraison optionnelle) et crée automatiquement la tâche de livraison correspondante.`;
+      case "order-fulfill":
+        return `Marquer cette tâche terminée enregistre la commande de ${task.sourceLabel} comme livrée et crée les ventes correspondantes.`;
+      case "invite":
+        return `Marquer cette tâche terminée la clôture simplement, une fois que ${task.sourceLabel} a rejoint l'équipe.`;
+    }
   };
 
   // What led to this task existing, in order (sprint 35). A "production"
@@ -2255,7 +2431,7 @@ function TachesSection() {
     const steps: { label: string; value: string }[] = [];
     if (task.stage === "production") {
       steps.push({ label: "Réception reçue", value: task.sourceLabel });
-    } else {
+    } else if (task.stage === "stock" || task.stage === "commercialisation") {
       const lot = task.sourceId
         ? computed.production.find((r) => r.id === task.sourceId)
         : undefined;
@@ -2276,6 +2452,20 @@ function TachesSection() {
           ? `${task.sourceLabel} — ${formatDateTime(origin.completedAt)}`
           : task.sourceLabel,
       });
+    } else if (task.stage === "order-fulfill") {
+      const confirm = tasks.find(
+        (t) => t.stage === "order-confirm" && t.sourceId === task.sourceId,
+      );
+      steps.push({
+        label: "Commande confirmée",
+        value: confirm?.completedAt
+          ? `${task.sourceLabel} — ${formatDateTime(confirm.completedAt)}`
+          : task.sourceLabel,
+      });
+    } else {
+      // kyc, order-confirm, invite: single-step chains — the task itself
+      // is the whole history, so no intermediate step to show.
+      steps.push({ label: "Concerne", value: task.sourceLabel });
     }
     steps.push({
       label: task.status === "done" ? "Cette tâche, terminée" : "Cette tâche, en attente",
@@ -2336,61 +2526,74 @@ function TachesSection() {
         </div>
       )}
 
-      <div
-        className={`grid gap-4 ${
-          visibleStages.length === 1
-            ? ""
-            : visibleStages.length === 2
-              ? "sm:grid-cols-2"
-              : "sm:grid-cols-2 xl:grid-cols-3"
-        }`}
-      >
-        {visibleStages.map((stage) => {
-          const stageTasks = pending.filter((t) => t.stage === stage);
+      <div className="space-y-6">
+        {STAGE_GROUPS.map((group) => {
+          const stages = group.stages.filter((s) => visibleStages.includes(s));
+          if (stages.length === 0) return null;
           return (
-            <Card key={stage} title={STAGE_LABELS[stage]}>
-              {stageTasks.length === 0 ? (
-                <p className="py-6 text-center text-sm text-muted-foreground">
-                  Rien à faire ici pour le moment.
-                </p>
-              ) : (
-                <ul className="space-y-2">
-                  {stageTasks.map((t) => (
-                    <li
-                      key={t.id}
-                      onClick={() => setSelectedTask(t)}
-                      className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
-                    >
-                      <span className="text-sm text-foreground">{t.title}</span>
-                      {canAutoLink(t) ? (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openCompletion(t);
-                          }}
-                          aria-label="Marquer terminé"
-                          title="Marquer terminé"
-                          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
-                        >
-                          <Check className="h-4 w-4" aria-hidden />
-                        </button>
+            <div key={group.label} className="space-y-3">
+              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                {group.label}
+              </h3>
+              <div
+                className={`grid gap-4 ${
+                  stages.length === 1
+                    ? ""
+                    : stages.length === 2
+                      ? "sm:grid-cols-2"
+                      : "sm:grid-cols-2 xl:grid-cols-3"
+                }`}
+              >
+                {stages.map((stage) => {
+                  const stageTasks = pending.filter((t) => t.stage === stage);
+                  return (
+                    <Card key={stage} title={STAGE_LABELS[stage]}>
+                      {stageTasks.length === 0 ? (
+                        <p className="py-6 text-center text-sm text-muted-foreground">
+                          Rien à faire ici pour le moment.
+                        </p>
                       ) : (
-                        <ConfirmButton
-                          onConfirm={() => legacyComplete(t)}
-                          confirmLabel="Confirmer ?"
-                          ariaLabel="Marquer terminé"
-                          confirmAriaLabel="Confirmer la tâche terminée"
-                          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
-                          confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
-                        >
-                          <Check className="h-4 w-4" aria-hidden />
-                        </ConfirmButton>
+                        <ul className="space-y-2">
+                          {stageTasks.map((t) => (
+                            <li
+                              key={t.id}
+                              onClick={() => setSelectedTask(t)}
+                              className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
+                            >
+                              <span className="text-sm text-foreground">{t.title}</span>
+                              {canAutoLink(t) ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openCompletion(t);
+                                  }}
+                                  aria-label="Marquer terminé"
+                                  title="Marquer terminé"
+                                  className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                                >
+                                  <Check className="h-4 w-4" aria-hidden />
+                                </button>
+                              ) : (
+                                <ConfirmButton
+                                  onConfirm={() => legacyComplete(t)}
+                                  confirmLabel="Confirmer ?"
+                                  ariaLabel="Marquer terminé"
+                                  confirmAriaLabel="Confirmer la tâche terminée"
+                                  className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                                  confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
+                                >
+                                  <Check className="h-4 w-4" aria-hidden />
+                                </ConfirmButton>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Card>
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
           );
         })}
       </div>
@@ -2421,7 +2624,7 @@ function TachesSection() {
             },
             {
               label: "Prochaine étape",
-              value: NEXT_ACTION[selectedTask.stage],
+              value: nextActionFor(selectedTask),
               description: "Ce qui se passe automatiquement une fois cette tâche marquée terminée.",
             },
           ]}
@@ -2446,15 +2649,35 @@ function TachesSection() {
                   ? "Enregistrez le lot produit à partir de cette réception."
                   : completingTask.stage === "stock"
                     ? "Enregistrez la sortie de stock pour ce lot."
-                    : "Enregistrez la vente pour ce lot."}
+                    : completingTask.stage === "commercialisation"
+                      ? "Enregistrez la vente pour ce lot."
+                      : completingTask.stage === "kyc"
+                        ? "Vérifiez les informations ci-dessous, puis confirmez la vérification KYC."
+                        : completingTask.stage === "order-confirm"
+                          ? "Confirmez la commande, avec une date de livraison optionnelle."
+                          : "Confirmez la livraison — les ventes correspondantes seront enregistrées automatiquement."}
               </p>
             </div>
             <div className="max-h-[55vh] overflow-y-auto px-5 py-5">
-              <TaskCompletionFields
-                fields={completionFieldsFor(completingTask)}
-                values={completionValues}
-                setValues={setCompletionValues}
-              />
+              {completionFieldsFor(completingTask).length > 0 ? (
+                <TaskCompletionFields
+                  fields={completionFieldsFor(completingTask)}
+                  values={completionValues}
+                  setValues={setCompletionValues}
+                />
+              ) : (
+                <dl className="space-y-2 text-sm">
+                  {completionSummaryFor(completingTask).map((f) => (
+                    <div
+                      key={f.label}
+                      className="flex justify-between gap-3 border-b border-border/50 pb-1.5"
+                    >
+                      <dt className="text-muted-foreground">{f.label}</dt>
+                      <dd className="text-right font-medium text-foreground">{f.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-border/70 px-5 py-4">
               <button
@@ -2469,7 +2692,13 @@ function TachesSection() {
                 disabled={completionBusy}
                 className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
               >
-                {completionBusy ? "Enregistrement…" : "Enregistrer et terminer"}
+                {completionBusy
+                  ? "Enregistrement…"
+                  : completingTask.stage === "kyc"
+                    ? "Vérifier et terminer"
+                    : completingTask.stage === "order-fulfill"
+                      ? "Marquer livrée et terminer"
+                      : "Enregistrer et terminer"}
               </button>
             </div>
           </div>
@@ -2487,6 +2716,17 @@ function ApproSection() {
   const [selectedProducteur, setSelectedProducteur] = useState<
     (typeof state.producteurs)[number] | null
   >(null);
+  // Reverse lookup: which "production" task, if any, tracks this réception
+  // (see TachesSection) — surfaced on the record itself so staff don't have
+  // to go hunting through Tâches to find out.
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "production")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
+  const taskLabel = (t?: Task) =>
+    t ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}` : "Aucune";
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -2698,6 +2938,11 @@ function ApproSection() {
               description:
                 "Calculé automatiquement : valeur d'achat + transport + autres frais — ce montant alimente les coûts d'exploitation en Finances.",
             },
+            {
+              label: "Tâche liée",
+              value: taskLabel(linkedTasks.find((t) => t.sourceId === selectedAppro.id)),
+              description: "Tâche de production créée pour cette réception (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -2839,6 +3084,18 @@ function ProductionSection() {
   const p = state.parametres;
   const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
   const breakdowns = buildBreakdowns(computed);
+  // Reverse lookup: a produced lot spawns both a "stock" and a
+  // "commercialisation" task (see TachesSection's finishTask) — show both
+  // on the lot itself.
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "tasks"), where("stage", "in", ["stock", "commercialisation"])),
+      (snap) => setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
+  const taskLabel = (t?: Task) =>
+    t ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}` : "Aucune";
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -3118,6 +3375,22 @@ function ProductionSection() {
               value: fcFormat(selectedLot.valeurProduction),
               description:
                 "Calculé automatiquement à partir des prix de vente par format définis dans Paramètres ERP.",
+            },
+            {
+              label: "Tâche Stock liée",
+              value: taskLabel(
+                linkedTasks.find((t) => t.stage === "stock" && t.sourceId === selectedLot.id),
+              ),
+              description: "Tâche de sortie de stock créée pour ce lot (onglet Tâches).",
+            },
+            {
+              label: "Tâche Commercialisation liée",
+              value: taskLabel(
+                linkedTasks.find(
+                  (t) => t.stage === "commercialisation" && t.sourceId === selectedLot.id,
+                ),
+              ),
+              description: "Tâche de mise en vente créée pour ce lot (onglet Tâches).",
             },
           ]}
         />
@@ -4105,6 +4378,13 @@ function OrdersCard() {
   const [orders, setOrders] = useState<StorefrontOrder[]>([]);
   const [confirmDates, setConfirmDates] = useState<Record<string, string>>({});
   const [selectedOrder, setSelectedOrder] = useState<StorefrontOrder | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "tasks"), where("stage", "in", ["order-confirm", "order-fulfill"])),
+      (snap) => setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
@@ -4323,6 +4603,17 @@ function OrdersCard() {
                   },
                 ]
               : []),
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedOrder.id);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description:
+                "Tâche de confirmation ou de livraison créée pour cette commande (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -5696,6 +5987,14 @@ function InviteCard() {
   const [menus, setMenus] = useState<string[]>([]);
   const [allMenus, setAllMenus] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+
+  useEffect(() => {
+    if (profile?.role !== "admin") return;
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "invite")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, [profile?.role]);
 
   useEffect(() => {
     if (profile?.role !== "admin") return;
@@ -5734,6 +6033,12 @@ function InviteCard() {
         createdBy: profile.uid,
         createdAt: new Date().toISOString(),
       });
+      createTask(
+        "invite",
+        `Confirmer que ${email.trim()} a rejoint l'équipe`,
+        email.trim(),
+        inviteRef.id,
+      );
       setEmail("");
       setMenus([]);
       setAllMenus(false);
@@ -5933,6 +6238,16 @@ function InviteCard() {
                 ? "Cette invitation a déjà été utilisée pour créer un compte — elle ne peut plus être révoquée ni réutilisée."
                 : "Pas encore utilisée — peut être révoquée (supprimée) ci-dessous si elle n'est plus nécessaire.",
             },
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedInvite.id);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description: "Tâche de suivi créée à l'envoi de l'invitation (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -5963,6 +6278,12 @@ function BoutiquesCard() {
   const [boutiques, setBoutiques] = useState<Boutique[]>([]);
   const [unverifiedOnly, setUnverifiedOnly] = useState(false);
   const [selectedBoutique, setSelectedBoutique] = useState<Boutique | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "kyc")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "partner"));
@@ -6087,6 +6408,16 @@ function BoutiquesCard() {
               value: selectedBoutique.verified ? "Vérifié" : "Non vérifié",
               description:
                 "Bascule via le bouton du tableau, pas ici — confirmation informationnelle par téléphone (sprint 16), ne bloque jamais la commande.",
+            },
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedBoutique.uid);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description: "Tâche de vérification KYC créée à l'inscription (onglet Tâches).",
             },
           ]}
         />
