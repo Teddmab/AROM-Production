@@ -1967,17 +1967,31 @@ function TachesSection() {
   }, [canSeeInvites]);
 
   // A task can drive its real completion action only when its source still
-  // resolves to a real, current record in the expected state — false for
-  // tasks created before sprint 32 (no sourceId at all), for a since-
-  // deleted source, and for an order that was already confirmed/fulfilled/
-  // cancelled directly via OrdersCard's own buttons instead of through this
-  // task. "invite" never auto-links: there's no new record to create, only
-  // a status to flip, so it always uses the plain legacyComplete fallback.
+  // "production" tasks are the original task type (sprint 26), predating
+  // sourceId tracking (sprint 32) — a task created before that sprint has
+  // no sourceId at all, even though its réception may still exist right
+  // now. Falls back to matching sourceLabel against the réception's own
+  // numéro so a legacy task doesn't lose auto-linking just because it
+  // predates the field — but only when sourceId is absent entirely: a task
+  // that DOES have a sourceId trusts it, and correctly treats a deleted
+  // source as gone even if some other réception happens to share its
+  // numéro string.
+  const resolveApproFor = (task: Task): (typeof computed.appro)[number] | undefined =>
+    task.sourceId
+      ? computed.appro.find((a) => a.id === task.sourceId)
+      : computed.appro.find((a) => a.numero === task.sourceLabel);
+
+  // A task can drive its real completion action only when its source still
+  // resolves to a real, current record in the expected state — false for a
+  // since-deleted source, and for an order that was already confirmed/
+  // fulfilled/cancelled directly via OrdersCard's own buttons instead of
+  // through this task. "invite" never auto-links: there's no new record to
+  // create, only a status to flip, so it always uses the plain
+  // legacyComplete fallback.
   const canAutoLink = (task: Task): boolean => {
+    if (task.stage === "production") return !!resolveApproFor(task);
     if (!task.sourceId) return false;
     switch (task.stage) {
-      case "production":
-        return computed.appro.some((a) => a.id === task.sourceId);
       case "stock":
       case "commercialisation":
         return computed.production.some((r) => r.id === task.sourceId);
@@ -2112,7 +2126,7 @@ function TachesSection() {
       // "PDR-001" and their lots "PDR_001" in practice, so the réception's
       // own numero is a reasonable starting point for "N° lot", and kg
       // utilisés naturally starts at the full kg received.
-      const appro = task.sourceId ? computed.appro.find((a) => a.id === task.sourceId) : undefined;
+      const appro = resolveApproFor(task);
       return [
         { name: "lot", label: "N° lot", default: task.sourceLabel },
         { name: "date", label: "Date", type: "date", default: todayIso },
@@ -2285,6 +2299,12 @@ function TachesSection() {
     const v = completionValues;
     if (task.stage === "production") {
       const newLotId = newId("PRO");
+      // resolveApproFor, not task.sourceId directly — a legacy task (no
+      // sourceId, matched by numéro instead) would otherwise write
+      // `undefined` into a required link field. Safe to assert non-null:
+      // this branch only runs when canAutoLink(task) was already true,
+      // which for "production" means resolveApproFor(task) resolved.
+      const appro = resolveApproFor(task)!;
       addRow("productions", {
         id: newLotId,
         lot: v.lot,
@@ -2298,7 +2318,7 @@ function TachesSection() {
         responsable: profile.displayName || profile.email || "Équipe production",
         ...(profile.uid ? { staffUid: profile.uid } : {}),
         statut: v.statut,
-        approvisionnementIds: [task.sourceId!],
+        approvisionnementIds: [appro.id],
       });
       await finishTask(task, { id: newLotId, label: v.lot });
     } else if (task.stage === "stock") {
