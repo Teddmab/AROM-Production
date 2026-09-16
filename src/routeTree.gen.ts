@@ -16,6 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as StorefrontIndexRouteImport } from './routes/storefront/index'
 import { Route as StorefrontSignupRouteImport } from './routes/storefront/signup'
 import { Route as StorefrontProfileRouteImport } from './routes/storefront/profile'
+import { Route as ApiInventoryQcReleaseRouteImport } from './routes/api/inventory/qc-release'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -52,6 +53,11 @@ const StorefrontProfileRoute = StorefrontProfileRouteImport.update({
   path: '/storefront/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiInventoryQcReleaseRoute = ApiInventoryQcReleaseRouteImport.update({
+  id: '/api/inventory/qc-release',
+  path: '/api/inventory/qc-release',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +67,7 @@ export interface FileRoutesByFullPath {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +77,7 @@ export interface FileRoutesByTo {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront': typeof StorefrontIndexRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +88,7 @@ export interface FileRoutesById {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +100,7 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
+    | '/api/inventory/qc-release'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +110,7 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront'
+    | '/api/inventory/qc-release'
   id:
     | '__root__'
     | '/'
@@ -109,6 +120,7 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
+    | '/api/inventory/qc-release'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +131,7 @@ export interface RootRouteChildren {
   StorefrontProfileRoute: typeof StorefrontProfileRoute
   StorefrontSignupRoute: typeof StorefrontSignupRoute
   StorefrontIndexRoute: typeof StorefrontIndexRoute
+  ApiInventoryQcReleaseRoute: typeof ApiInventoryQcReleaseRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +185,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof StorefrontProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/inventory/qc-release': {
+      id: '/api/inventory/qc-release'
+      path: '/api/inventory/qc-release'
+      fullPath: '/api/inventory/qc-release'
+      preLoaderRoute: typeof ApiInventoryQcReleaseRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +203,7 @@ const rootRouteChildren: RootRouteChildren = {
   StorefrontProfileRoute: StorefrontProfileRoute,
   StorefrontSignupRoute: StorefrontSignupRoute,
   StorefrontIndexRoute: StorefrontIndexRoute,
+  ApiInventoryQcReleaseRoute: ApiInventoryQcReleaseRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
