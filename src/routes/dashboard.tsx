@@ -1228,7 +1228,7 @@ function buildBreakdowns(computed: ErpComputed) {
     : [];
   const stockActuel: DetailField["breakdown"] = [
     {
-      label: "Bouteilles produites (Production)",
+      label: "Bouteilles libérées (contrôle qualité)",
       value: String(computed.stockPF.reduce((a, s) => a + s.produites, 0)),
     },
     {
@@ -3502,7 +3502,7 @@ function StockSection() {
           label="Stock produits finis"
           realise={computed.stockPF.reduce((a, s) => a + s.stock, 0)}
           unit="bt"
-          description="Calculé automatiquement : bouteilles produites − vendues, tous formats confondus."
+          description="Bouteilles libérées par le contrôle qualité (mobile) − vendues, tous formats confondus. Un lot en attente de contrôle, en quarantaine ou rejeté n'y contribue jamais."
           breakdown={breakdowns.stockActuel}
         />
       </div>
@@ -3715,7 +3715,12 @@ function StockSection() {
         />
       )}
 
-      <Card title="Stock produits finis (production − ventes)">
+      <Card title="Stock produits finis (production libérée − ventes)">
+        <p className="mb-3 text-xs text-muted-foreground">
+          Bouteilles libérées par le contrôle qualité (application mobile) moins les ventes — un lot
+          encore en attente de contrôle, en quarantaine ou rejeté n&rsquo;y contribue jamais, quel
+          que soit le nombre de bouteilles conditionnées.
+        </p>
         <Table
           onRowClick={(i) => setSelectedStockPF(computed.stockPF[i])}
           headers={["Format", "Produites", "Vendues", "Stock", "Valeur stock"]}
@@ -4085,7 +4090,7 @@ function CatalogueCard() {
                     {computed.stockPF.find((s) => s.format === p.format)?.stock ?? 0} bouteilles
                   </span>{" "}
                   <span className="text-muted-foreground/70">
-                    (calculé : production − ventes, format {p.format})
+                    (libéré par le contrôle qualité − ventes, format {p.format})
                   </span>
                 </p>
                 <label className="block text-[11px] font-medium text-muted-foreground">
@@ -5414,7 +5419,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           unit="bt"
           secondary={`Valeur ${fcWithUsd(valeurStockFinis)}`}
           pct={null}
-          description="Bouteilles produites non encore vendues (produites − vendues)."
+          description="Bouteilles libérées par le contrôle qualité, non encore vendues — un lot en attente de contrôle, en quarantaine ou rejeté n'y contribue jamais."
           breakdown={breakdowns.stockActuel}
           expanded={expandedStage === "stock"}
           onToggle={() => toggle("stock")}

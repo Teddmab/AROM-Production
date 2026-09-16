@@ -23,7 +23,8 @@ export type Collections =
   | "clients"
   | "ventes"
   | "marketing"
-  | "charges";
+  | "charges"
+  | "qualityControls";
 
 const COLLECTIONS: Collections[] = [
   "producteurs",
@@ -34,6 +35,11 @@ const COLLECTIONS: Collections[] = [
   "ventes",
   "marketing",
   "charges",
+  // Web ERP correction, 2026-09: computeErp's stockPF gating needs the
+  // release status of each production. Read-only — no dashboard section
+  // adds/edits these (quality control is mobile-only); this listener only
+  // feeds ErpState, never wired into addRow/removeRow for this key.
+  "qualityControls",
 ];
 
 // Cached in Firestore at config/exchangeRate so every session shares one
