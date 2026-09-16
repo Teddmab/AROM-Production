@@ -12,7 +12,6 @@ import {
   setDoc,
   updateDoc,
   where,
-  writeBatch,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
@@ -54,6 +53,12 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  cancelOrderTrusted,
+  confirmOrderTrusted,
+  fulfilOrderTrusted,
+  orderReservationErrorMessage,
+} from "@/lib/inventory/orderReservationClient";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -2083,34 +2088,13 @@ function TachesSection() {
     }
   };
 
-  // Same batch write as OrdersCard's own "Marquer livrée" action — an
-  // "order-fulfill" task's completion is that exact same action, just
-  // reached from the task instead of the Commandes table directly.
+  // Sprint 08, Steps C/D: same trusted route as OrdersCard's own "Marquer
+  // livrée" action — an "order-fulfill" task's completion is that exact
+  // same action, just reached from the task instead of the Commandes
+  // table directly, so it must close the same overselling gap.
   const fulfillOrder = async (order: StorefrontOrder) => {
-    const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), {
-      status: "fulfilled",
-      fulfilledAt: new Date().toISOString(),
-    });
-    const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
-    order.items.forEach((item, idx) => {
-      const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
-      batch.set(doc(db, "ventes", `VTE-ORD-${order.id}-${idx}`), {
-        id: `VTE-ORD-${order.id}-${idx}`,
-        numero,
-        date: order.createdAt.slice(0, 10),
-        idClient: order.partnerId,
-        client: order.partnerName,
-        canal: "Grossiste" as Canal,
-        format: (FORMATS.includes(item.format as Format) ? item.format : "500 ml") as Format,
-        quantite: item.quantity,
-        prixUnitaire: item.unitPrice,
-        remise: 0,
-        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
-        commerciale: "Boutique partenaire",
-      });
-    });
-    await batch.commit();
+    const outcome = await fulfilOrderTrusted(order.id);
+    if (outcome.status !== "success") throw new Error(orderReservationErrorMessage(outcome));
   };
 
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -2367,10 +2351,11 @@ function TachesSection() {
       }
     } else if (task.stage === "order-confirm") {
       try {
-        await updateDoc(doc(db, "orders", task.sourceId!), {
-          status: "confirmed",
-          ...(v.deliveryDate ? { deliveryDate: v.deliveryDate } : {}),
-        });
+        const outcome = await confirmOrderTrusted(task.sourceId!);
+        if (outcome.status !== "success") throw new Error(orderReservationErrorMessage(outcome));
+        if (v.deliveryDate) {
+          await updateDoc(doc(db, "orders", task.sourceId!), { deliveryDate: v.deliveryDate });
+        }
         await finishTask(task);
       } catch (err) {
         toast.error(
@@ -4423,54 +4408,50 @@ function OrdersCard() {
     );
   }, []);
 
+  // Sprint 08, Steps C/D: confirm/fulfil/confirmed-cancel now go through the
+  // trusted `/api/inventory/*` routes — they reserve/deduct real finished-
+  // product stock, which a direct client write can no longer prove safe
+  // (see automation-engine.md's "Trusted write boundary"). Cancelling a
+  // still-`pending` order is unchanged: nothing is reserved yet, so a
+  // direct status write stays safe and simple (same carve-out the approved
+  // architecture gives partners cancelling their own pending order).
   const setStatus = (id: string, status: StorefrontOrder["status"]) =>
     updateDoc(doc(db, "orders", id), { status }).catch((err) =>
       toast.error(`Mise à jour de la commande impossible : ${err.message}`),
     );
 
-  const confirmWithDeliveryDate = (id: string) =>
-    updateDoc(doc(db, "orders", id), {
-      status: "confirmed",
-      ...(confirmDates[id] ? { deliveryDate: confirmDates[id] } : {}),
-    }).catch((err) => toast.error(`Mise à jour de la commande impossible : ${err.message}`));
-
-  const fulfillAndConvert = async (order: StorefrontOrder) => {
-    const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), {
-      status: "fulfilled",
-      fulfilledAt: new Date().toISOString(),
-    });
-    const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
-    order.items.forEach((item, idx) => {
-      const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
-      batch.set(doc(db, "ventes", `VTE-ORD-${order.id}-${idx}`), {
-        id: `VTE-ORD-${order.id}-${idx}`,
-        numero,
-        date: order.createdAt.slice(0, 10),
-        idClient: order.partnerId,
-        client: order.partnerName,
-        canal: "Grossiste" as Canal,
-        format: (FORMATS.includes(item.format as Format) ? item.format : "500 ml") as Format,
-        quantite: item.quantity,
-        prixUnitaire: item.unitPrice,
-        remise: 0,
-        // Mobile money is already settled by checkout time (payment.status
-        // "completed"); cash on delivery is collected the moment the order
-        // is marked "livrée" — either way the full line amount is encaissé
-        // here. Orders without a `payment` field predate this flow, so we
-        // can't assume cash changed hands and leave encaisse at 0.
-        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
-        commerciale: "Boutique partenaire",
-      });
-    });
-    try {
-      await batch.commit();
-      toast.success("Commande livrée, ventes enregistrées.");
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? `Conversion impossible : ${err.message}` : "Conversion impossible.",
+  const confirmWithDeliveryDate = async (id: string) => {
+    const outcome = await confirmOrderTrusted(id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    if (confirmDates[id]) {
+      await updateDoc(doc(db, "orders", id), { deliveryDate: confirmDates[id] }).catch((err) =>
+        toast.error(
+          `Commande confirmée, mais la date de livraison n'a pas pu être enregistrée : ${err.message}`,
+        ),
       );
     }
+    toast.success("Commande confirmée, stock réservé.");
+  };
+
+  const cancelConfirmedOrder = async (id: string) => {
+    const outcome = await cancelOrderTrusted(id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    toast.success("Commande annulée, réservation libérée.");
+  };
+
+  const fulfillAndConvert = async (order: StorefrontOrder) => {
+    const outcome = await fulfilOrderTrusted(order.id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    toast.success("Commande livrée, ventes enregistrées.");
   };
 
   return (
@@ -4550,7 +4531,7 @@ function OrdersCard() {
                   Marquer livrée
                 </ConfirmButton>
                 <ConfirmButton
-                  onConfirm={() => setStatus(o.id, "cancelled")}
+                  onConfirm={() => cancelConfirmedOrder(o.id)}
                   confirmLabel="Confirmer ?"
                   ariaLabel="Annuler la commande"
                   confirmAriaLabel="Confirmer l'annulation de la commande"
