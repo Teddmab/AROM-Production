@@ -1,0 +1,88 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Route } from "./create-checkout";
+import { verifyMombongoCaller } from "@/lib/auth/verifyMombongoCaller";
+import { createMombongoCheckout } from "@/lib/payments/mombongo";
+import { createExternalInvoiceCheckoutRequestFixture } from "@/lib/payments/mombongoContract";
+
+vi.mock("@/lib/auth/verifyMombongoCaller", () => ({ verifyMombongoCaller: vi.fn() }));
+vi.mock("@/lib/payments/mombongo", () => ({ createMombongoCheckout: vi.fn() }));
+
+function request(body: unknown) {
+  return new Request("http://localhost/api/mombongo/create-checkout", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function post(req: Request) {
+  const handlers = (
+    Route as unknown as {
+      options: { server: { handlers: { POST: (ctx: { request: Request }) => Promise<Response> } } };
+    }
+  ).options.server.handlers;
+  return handlers.POST({ request: req });
+}
+
+const validBody = {
+  producerInvoiceId: "inv1",
+  mombongoInvoiceId: "mb1",
+  method: createExternalInvoiceCheckoutRequestFixture.method,
+  phone: createExternalInvoiceCheckoutRequestFixture.phone,
+  operator: createExternalInvoiceCheckoutRequestFixture.operator,
+};
+
+beforeEach(() => {
+  vi.mocked(verifyMombongoCaller).mockReset();
+  vi.mocked(createMombongoCheckout).mockReset();
+});
+
+describe("POST /api/mombongo/create-checkout", () => {
+  it("rejects an unauthorized caller with 401", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue(null);
+    expect((await post(request(validBody))).status).toBe(401);
+    expect(createMombongoCheckout).not.toHaveBeenCalled();
+  });
+
+  it("rejects mobile_money without phone/operator with 400", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    const res = await post(
+      request({ producerInvoiceId: "inv1", mombongoInvoiceId: "mb1", method: "mobile_money" }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("maps already_in_progress/not_found/provider_error/error to 409/404/502/502", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+
+    vi.mocked(createMombongoCheckout).mockResolvedValue({
+      status: "already_in_progress",
+      httpStatus: 409,
+      message: "x",
+    });
+    expect((await post(request(validBody))).status).toBe(409);
+
+    vi.mocked(createMombongoCheckout).mockResolvedValue({
+      status: "not_found",
+      httpStatus: 404,
+      message: "x",
+    });
+    expect((await post(request(validBody))).status).toBe(404);
+
+    vi.mocked(createMombongoCheckout).mockResolvedValue({
+      status: "provider_error",
+      httpStatus: 502,
+      message: "x",
+    });
+    expect((await post(request(validBody))).status).toBe(502);
+  });
+
+  it("maps success to 200", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(createMombongoCheckout).mockResolvedValue({
+      status: "checkout_created",
+      providerRef: "pr1",
+    });
+    expect((await post(request(validBody))).status).toBe(200);
+  });
+});
