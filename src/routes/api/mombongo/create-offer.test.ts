@@ -54,10 +54,68 @@ describe("POST /api/mombongo/create-offer", () => {
       status: "accepted",
       offerDocId: "d1",
       mombongoOfferId: "mb1",
+      alreadyExisted: false,
+      offer: {
+        id: "d1",
+        listingId: "l1",
+        mombongoOfferId: "mb1",
+        offerQuantityKg: 1,
+        offerPricePerKgCdf: 1,
+        message: null,
+        commodity: null,
+        province: null,
+        territory: null,
+        quality: null,
+        status: "pending",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        createdByUid: "u1",
+      },
     });
     await post(request(createExternalHarvestOfferRequestFixture));
     expect(createMombongoOffer).toHaveBeenCalledWith(
       expect.objectContaining({ createdByUid: "u1" }),
+    );
+  });
+
+  it("passes through the optional commodity/province/territory/quality display fields", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(createMombongoOffer).mockResolvedValue({
+      status: "accepted",
+      offerDocId: "d1",
+      mombongoOfferId: "mb1",
+      alreadyExisted: false,
+      offer: {
+        id: "d1",
+        listingId: "l1",
+        mombongoOfferId: "mb1",
+        offerQuantityKg: 1,
+        offerPricePerKgCdf: 1,
+        message: null,
+        commodity: "Ananas",
+        province: "Kongo Central",
+        territory: "Madimba",
+        quality: "A",
+        status: "pending",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        createdByUid: "u1",
+      },
+    });
+    await post(
+      request({
+        ...createExternalHarvestOfferRequestFixture,
+        commodity: "Ananas",
+        province: "Kongo Central",
+        territory: "Madimba",
+        quality: "A",
+      }),
+    );
+    expect(createMombongoOffer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commodity: "Ananas",
+        province: "Kongo Central",
+        territory: "Madimba",
+        quality: "A",
+      }),
     );
   });
 });

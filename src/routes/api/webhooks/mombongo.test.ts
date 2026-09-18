@@ -220,6 +220,30 @@ describe("POST /api/webhooks/mombongo — event: invoice_issued", () => {
     });
   });
 
+  it("zero matching pending offers: the invoice is still created, no offer is touched", async () => {
+    const res = await post(request(JSON.stringify(invoiceIssuedEventFixture), "sig"));
+    expect(res.status).toBe(200);
+    expect(setDocCalls).toHaveLength(1); // the harvestInvoices doc only
+    expect(updateDocCalls).toHaveLength(0);
+  });
+
+  it("multiple matching pending offers: ambiguous, so the invoice is still valid but no offer is touched", async () => {
+    setDocs({
+      "harvestOffers/offer_1": {
+        exists: true,
+        data: { listingId: invoiceIssuedEventFixture.listingId, status: "pending" },
+      },
+      "harvestOffers/offer_2": {
+        exists: true,
+        data: { listingId: invoiceIssuedEventFixture.listingId, status: "pending" },
+      },
+    });
+    const res = await post(request(JSON.stringify(invoiceIssuedEventFixture), "sig"));
+    expect(res.status).toBe(200);
+    expect(setDocCalls).toHaveLength(1); // the harvestInvoices doc only
+    expect(updateDocCalls).toHaveLength(0); // neither offer_1 nor offer_2 is guessed at
+  });
+
   it("is idempotent under repeated delivery: a second delivery does not re-create or re-touch offers", async () => {
     await post(request(JSON.stringify(invoiceIssuedEventFixture), "sig"));
     setDocCalls.length = 0;

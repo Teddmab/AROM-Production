@@ -17,6 +17,10 @@ export const Route = createFileRoute("/api/mombongo/create-offer")({
           offerQuantityKg?: number;
           offerPricePerKgCdf?: number;
           message?: string;
+          commodity?: string;
+          province?: string;
+          territory?: string;
+          quality?: "A" | "B" | "C";
         } | null;
         if (!body?.listingId || !body.offerQuantityKg || !body.offerPricePerKgCdf) {
           return Response.json({ error: "missing_fields" }, { status: 400 });
@@ -28,6 +32,10 @@ export const Route = createFileRoute("/api/mombongo/create-offer")({
             offerQuantityKg: body.offerQuantityKg,
             offerPricePerKgCdf: body.offerPricePerKgCdf,
             message: body.message,
+            commodity: body.commodity,
+            province: body.province,
+            territory: body.territory,
+            quality: body.quality,
             createdByUid: caller.uid,
           });
           const status = result.status === "rejected" ? 400 : result.status === "error" ? 502 : 200;
