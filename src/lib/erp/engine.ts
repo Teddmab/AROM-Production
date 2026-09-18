@@ -4,11 +4,38 @@ import {
   type Approvisionnement,
   type Vente,
   type Format,
+  type QualityControl,
   prixFormat,
 } from "./model";
 
 const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 const safeDiv = (a: number, b: number) => (b === 0 ? 0 : a / b);
+
+/**
+ * The head/authoritative control for each productionId — the one control
+ * nobody else's `resolvesId` points at (a fresh control with no resolution
+ * yet, or the resolution itself once one exists). Mirrors AROM-Mobile's
+ * qualityRepository.ts's headControlsByProduction and AROM-Backend's
+ * report-finished-stock-eligibility.mjs exactly — same logic, three
+ * independent implementations (no shared package across these repos), kept
+ * in sync by hand. A production with no control at all simply has no entry
+ * here (correctly excluded from sellable stock — see computeErp's own use
+ * of this below).
+ */
+function headControlsByProduction(controls: QualityControl[]): Map<string, QualityControl> {
+  const byProductionId = new Map<string, QualityControl[]>();
+  for (const c of controls) {
+    const list = byProductionId.get(c.productionId) ?? [];
+    list.push(c);
+    byProductionId.set(c.productionId, list);
+  }
+  const heads = new Map<string, QualityControl>();
+  for (const [productionId, group] of byProductionId) {
+    const head = group.find((c) => !group.some((other) => other.resolvesId === c.id));
+    if (head) heads.set(productionId, head);
+  }
+  return heads;
+}
 
 /* ---------- Lignes calculées ---------- */
 
@@ -123,6 +150,7 @@ export function computeErp(state: ErpState): ErpComputed {
   const appro = state.approvisionnements.map(calcAppro);
   const production = state.productions.map((r) => calcProduction(r, p));
   const ventes = state.ventes.map(calcVente);
+  const headControls = headControlsByProduction(state.qualityControls);
 
   const kgAchetes = sum(appro.map((r) => r.qteRecueKg));
   const kgTransformes = sum(production.map((r) => r.kgUtilises));
@@ -157,9 +185,38 @@ export function computeErp(state: ErpState): ErpComputed {
     commissionCommerciale;
   const resultatBrut = ca - totalCouts;
 
+  // Web ERP correction (2026-09): this used to sum every production's
+  // q500/q330/q300 regardless of quality-control decision, so a
+  // quarantined or rejected lot's bottles counted as sellable stock —
+  // reported and fixed. Now gated by the SAME head-control logic
+  // AROM-Mobile's qualitySync.ts uses to decide whether a release is
+  // authoritative (headControlsByProduction above): a production counts
+  // toward `produites` only when its own head control's decision is
+  // exactly "liberer" — never for a production with no control yet, one
+  // still in quarantine, or one rejected.
+  //
+  // This is a QC-gated PROJECTION computed from productions +
+  // qualityControls — it does NOT read the Firestore `stockPF` ledger
+  // itself. It is equivalent to summing that ledger only for what's
+  // currently supported: production receipts ("Entrée" rows), which is
+  // the only thing either side writes today. It is NOT a durable "single
+  // source of truth" — the moment outbound movements (order fulfilment
+  // Sortie), damage, or manual corrections exist as real `stockPF` rows,
+  // this projection will diverge from the ledger's real on-hand balance,
+  // since it only ever re-derives "produites" from packaging fields and
+  // has no way to know about a Sortie/Ajustement it never reads. Whichever
+  // batch implements outbound movements must migrate this to real
+  // aggregation over the `stockPF` collection (see AROM-Documentation/
+  // automation-engine.md's "Next lifecycle" section) rather than extending
+  // this projection further.
+  const releasedProductionIds = new Set(
+    production.filter((r) => headControls.get(r.id)?.decision === "liberer").map((r) => r.id),
+  );
   const stockPF = (["500 ml", "330 ml", "300 ml"] as Format[]).map((f) => {
     const produites = sum(
-      production.map((r) => (f === "500 ml" ? r.q500 : f === "330 ml" ? r.q330 : r.q300)),
+      production
+        .filter((r) => releasedProductionIds.has(r.id))
+        .map((r) => (f === "500 ml" ? r.q500 : f === "330 ml" ? r.q330 : r.q300)),
     );
     const vendues = sum(ventes.filter((v) => v.format === f).map((v) => v.quantite));
     const stock = produites - vendues;

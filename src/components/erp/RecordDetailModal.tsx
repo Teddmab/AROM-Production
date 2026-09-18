@@ -16,6 +16,8 @@ export interface DetailField {
     key: string;
     type: "text" | "number" | "date" | "select";
     options?: readonly string[];
+    /** For a select where the value isn't the label (e.g. a real record id). Takes precedence over `options`. */
+    selectOptions?: { value: string; label: string }[];
     /** Raw editable value, as a string (numbers included) — mirrors EntryForm's convention. */
     value: string;
   };
@@ -122,11 +124,17 @@ export function RecordDetailModal({
                     onChange={(e) => setValues((v) => ({ ...v, [f.edit!.key]: e.target.value }))}
                     className="mt-1.5 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
                   >
-                    {f.edit.options?.map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
+                    {f.edit.selectOptions
+                      ? f.edit.selectOptions.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))
+                      : f.edit.options?.map((o) => (
+                          <option key={o} value={o}>
+                            {o}
+                          </option>
+                        ))}
                   </select>
                 ) : (
                   <input

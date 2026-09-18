@@ -12,13 +12,13 @@ import {
   setDoc,
   updateDoc,
   where,
-  writeBatch,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
-import { ErpProvider, useErp, newId } from "@/lib/erp/store";
+import { ErpProvider, useErp, newId, type Collections } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
+import { createTask, visibleTaskStages, type Task, type TaskStage } from "@/lib/erp/tasks";
 import { db, storage } from "@/lib/firebase/config";
 import {
   CANAUX,
@@ -30,6 +30,7 @@ import {
   prixFormat,
   usdFormat,
   type Canal,
+  type Client,
   type Format,
   type Parametres,
   type Qualite,
@@ -39,6 +40,8 @@ import { ImportButton } from "@/components/erp/ImportButton";
 import type { ImportLog } from "@/lib/erp/import";
 import type { SiteContent, SiteVideo } from "@/lib/site-content";
 import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
+import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
+import { ConfirmButton } from "@/components/erp/ConfirmButton";
 import { RequireRole } from "@/lib/firebase/require-role";
 import { useAuth, canAccessMenu, STAFF_POSTES, type StaffPoste } from "@/lib/firebase/auth";
 import {
@@ -50,6 +53,12 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  cancelOrderTrusted,
+  confirmOrderTrusted,
+  fulfilOrderTrusted,
+  orderReservationErrorMessage,
+} from "@/lib/inventory/orderReservationClient";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -146,47 +155,21 @@ const ALL_MENU_OPTIONS: { id: string; label: string }[] = SECTIONS.flatMap((s) =
 ]);
 
 /**
- * Workflow tasks (sprint 26): "Inviter un membre" led to "have I implemented
- * the task feature" — the answer was no, so this adds it. Approvisionnement
- * → Production → {Stock, Commercialisation} is a chain of manual hand-offs,
- * not an automatic one — a Production lot has no field linking it back to
- * the réception(s) it consumed (sprint 20's deliberate call: AROM pools raw
- * ananas in shared storage, batches aren't physically traceable), so a task
- * can't be auto-completed by detecting a matching downstream record. Staff
- * click "Marquer terminé" once they've actually done the work; completing a
- * "production" task fires off its "stock" and "commercialisation" follow-ups
- * in the same action.
+ * Workflow tasks (sprint 26, extended sprint 37): "Inviter un membre" led to
+ * "have I implemented the task feature" — the answer was no, so this added
+ * it. Approvisionnement → Production → {Stock, Commercialisation} is a
+ * chain of manual hand-offs, not an automatic one — a Production lot has no
+ * field linking it back to the réception(s) it consumed (sprint 20's
+ * deliberate call: AROM pools raw ananas in shared storage, batches aren't
+ * physically traceable), so a task can't be auto-completed by detecting a
+ * matching downstream record. Staff click "Marquer terminé" once they've
+ * actually done the work; completing a "production" task fires off its
+ * "stock" and "commercialisation" follow-ups in the same action. Sprint 37
+ * extended this same pattern to KYC verification, order fulfillment, and
+ * invite follow-up — see src/lib/erp/tasks.ts, where Task/TaskStage/
+ * createTask now live so CheckoutSheet.tsx and auth.tsx can spawn tasks
+ * from outside the dashboard too.
  */
-type TaskStage = "production" | "stock" | "commercialisation";
-interface Task {
-  id: string;
-  stage: TaskStage;
-  title: string;
-  /** The originating réception's numéro — carried through every task spawned from it, so the chain reads as one story even though the underlying records don't link to each other. */
-  sourceLabel: string;
-  status: "pending" | "done";
-  createdAt: string;
-  completedAt?: string;
-  completedBy?: string;
-}
-
-function createTask(stage: TaskStage, title: string, sourceLabel: string) {
-  const id = newId("TASK");
-  setDoc(doc(db, "tasks", id), {
-    id,
-    stage,
-    title,
-    sourceLabel,
-    status: "pending",
-    createdAt: new Date().toISOString(),
-  } satisfies Task).catch((err) =>
-    toast.error(
-      err instanceof Error
-        ? `Création de tâche impossible : ${err.message}`
-        : "Création de tâche impossible.",
-    ),
-  );
-}
 
 function DashboardRoute() {
   return (
@@ -223,12 +206,7 @@ function Dashboard() {
   const [pendingTaskCount, setPendingTaskCount] = useState(0);
   useEffect(() => {
     if (!canAccessMenu(profile, "taches")) return;
-    const visibleStages: TaskStage[] =
-      profile?.poste === "Directeur de Production"
-        ? ["production", "stock"]
-        : profile?.poste === "Chargée de Commercialisation"
-          ? ["commercialisation"]
-          : ["production", "stock", "commercialisation"];
+    const visibleStages = visibleTaskStages(profile);
     return onSnapshot(query(collection(db, "tasks"), where("status", "==", "pending")), (snap) => {
       setPendingTaskCount(
         snap.docs.filter((d) => visibleStages.includes((d.data() as Task).stage)).length,
@@ -732,10 +710,21 @@ function Status({
 type FieldDef = {
   name: string;
   label: string;
-  type?: "text" | "number" | "date" | "select";
+  type?: "text" | "number" | "date" | "select" | "multiselect";
   options?: readonly string[];
+  /** For type "select" where the value isn't the label (e.g. a real record id). Takes precedence over `options`. */
+  selectOptions?: { value: string; label: string }[];
+  /** For type "multiselect": the pickable records, richer than a plain option string. */
+  multiOptions?: { value: string; label: string }[];
   default?: string | number;
+  /** Blocks submit (with a toast) while empty. Used for required source links. */
+  required?: boolean;
 };
+
+// Multiselect values are stored as a single comma-joined string inside the
+// same Record<string,string> as every other field, then split back into an
+// array at the call site — keeps EntryForm's onSubmit signature unchanged.
+const MULTI_SEP = ",";
 
 function EntryForm({
   fields,
@@ -744,7 +733,11 @@ function EntryForm({
 }: {
   fields: FieldDef[];
   submitLabel: string;
-  onSubmit: (values: Record<string, string>) => void;
+  // Returning `false` blocks the submit (form stays open, values kept) —
+  // used when validity depends on more than one field (e.g. a required
+  // link that only applies for a given "type" selection), which a static
+  // per-field `required` flag can't express.
+  onSubmit: (values: Record<string, string>) => void | false;
 }) {
   const [open, setOpen] = useState(false);
   const initial = () => Object.fromEntries(fields.map((f) => [f.name, String(f.default ?? "")]));
@@ -765,7 +758,12 @@ function EntryForm({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit(values);
+        const missing = fields.find((f) => f.required && !values[f.name]);
+        if (missing) {
+          toast.error(`${missing.label} requis.`);
+          return;
+        }
+        if (onSubmit(values) === false) return;
         setValues(initial());
         setOpen(false);
       }}
@@ -775,18 +773,31 @@ function EntryForm({
         {fields.map((f) => (
           <label key={f.name} className="text-xs font-medium text-muted-foreground">
             {f.label}
+            {f.required ? <span className="text-destructive"> *</span> : null}
             {f.type === "select" ? (
               <select
                 value={values[f.name]}
                 onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
                 className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
               >
-                {f.options?.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
+                {f.selectOptions
+                  ? f.selectOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))
+                  : f.options?.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
               </select>
+            ) : f.type === "multiselect" ? (
+              <MultiSelectCombobox
+                options={f.multiOptions ?? []}
+                value={values[f.name] ? values[f.name].split(MULTI_SEP) : []}
+                onChange={(ids) => setValues((v) => ({ ...v, [f.name]: ids.join(MULTI_SEP) }))}
+              />
             ) : (
               <input
                 type={f.type ?? "text"}
@@ -856,6 +867,260 @@ function DeleteButton({ onClick }: { onClick: (e: MouseEvent) => void }) {
       {confirming ? "Confirmer ?" : "Suppr."}
     </button>
   );
+}
+
+interface DependentRule {
+  collection: Collections;
+  field: string;
+  isArray: boolean;
+  /** Plural, human-readable — e.g. "lot(s) de production". */
+  label: string;
+  recordLabel: (r: Record<string, unknown>) => string;
+}
+
+/**
+ * Which collections reference which — required links (sprints 30-32) mean
+ * deleting a parent now leaves a dangling id in every child that pointed
+ * to it, unless something resolves it first (sprint 34). Only lists
+ * collections that actually have real dependents; ventes/stockMP/marketing/
+ * charges are always leaves here, so their DeleteButton stays untouched.
+ */
+const DEPENDENTS_RULES: Partial<Record<Collections, DependentRule[]>> = {
+  approvisionnements: [
+    {
+      collection: "productions",
+      field: "approvisionnementIds",
+      isArray: true,
+      label: "lot(s) de production",
+      recordLabel: (r) => `${r.lot} — ${r.date}`,
+    },
+    {
+      collection: "stockMP",
+      field: "approvisionnementIds",
+      isArray: true,
+      label: "mouvement(s) de stock",
+      recordLabel: (r) => `${r.type} du ${r.date}`,
+    },
+  ],
+  productions: [
+    {
+      collection: "ventes",
+      field: "productionIds",
+      isArray: true,
+      label: "vente(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+    {
+      collection: "stockMP",
+      field: "productionIds",
+      isArray: true,
+      label: "mouvement(s) de stock",
+      recordLabel: (r) => `${r.type} du ${r.date}`,
+    },
+  ],
+  producteurs: [
+    {
+      collection: "approvisionnements",
+      field: "idProducteur",
+      isArray: false,
+      label: "réception(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+  ],
+  clients: [
+    {
+      collection: "ventes",
+      field: "idClient",
+      isArray: false,
+      label: "vente(s)",
+      recordLabel: (r) => `${r.numero} — ${r.date}`,
+    },
+  ],
+};
+
+// How to label a record of each parent collection — used for the deleted
+// record's own name in the modal title, and for the "reassign to" options.
+const PARENT_RECORD_LABEL: Partial<Record<Collections, (r: Record<string, unknown>) => string>> = {
+  approvisionnements: (r) => `${r.numero} — ${r.date}`,
+  productions: (r) => `${r.lot} — ${r.date}`,
+  producteurs: (r) => String(r.nom),
+  clients: (r) => String(r.nom),
+};
+
+/**
+ * Cascade-aware delete (sprint 34) — before actually removing a record that
+ * has real dependents, asks per dependent group whether to delete those
+ * too or reassign them to a different existing record of the same parent
+ * type. No "just unlink" option: links are required now, so leaving a
+ * child with none would recreate the standalone-record problem sprints
+ * 30-32 closed. Falls straight through to a plain delete when there are no
+ * dependents, so it's a drop-in replacement for `removeRow` in a
+ * DeleteButton/RecordDetailModal onDelete.
+ */
+function useCascadeDelete() {
+  const { state, removeRow } = useErp();
+  const [pending, setPending] = useState<{
+    collection: Collections;
+    id: string;
+    label: string;
+    groups: { rule: DependentRule; ids: string[]; labels: string[] }[];
+  } | null>(null);
+  const [choices, setChoices] = useState<Record<number, "delete" | "reassign">>({});
+  const [reassignTo, setReassignTo] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const requestDelete = (targetCollection: Collections, id: string) => {
+    const rules = DEPENDENTS_RULES[targetCollection] ?? [];
+    const groups = rules
+      .map((rule) => {
+        const rows = state[rule.collection] as unknown as Record<string, unknown>[];
+        const matches = rows.filter((r) =>
+          rule.isArray
+            ? ((r[rule.field] as string[] | undefined) ?? []).includes(id)
+            : r[rule.field] === id,
+        );
+        return {
+          rule,
+          ids: matches.map((r) => r.id as string),
+          labels: matches.map((r) => rule.recordLabel(r)),
+        };
+      })
+      .filter((g) => g.ids.length > 0);
+    if (groups.length === 0) {
+      removeRow(targetCollection, id);
+      return;
+    }
+    const parentRows = state[targetCollection] as unknown as Record<string, unknown>[];
+    const parent = parentRows.find((r) => r.id === id);
+    const label = parent ? (PARENT_RECORD_LABEL[targetCollection]?.(parent) ?? id) : id;
+    setPending({ collection: targetCollection, id, label, groups });
+    setChoices({});
+    setReassignTo({});
+  };
+
+  const resolve = async () => {
+    if (!pending) return;
+    const missingReassign = pending.groups.some(
+      (g, i) => (choices[i] ?? "delete") === "reassign" && !reassignTo[i],
+    );
+    if (missingReassign) {
+      toast.error("Choisissez l'enregistrement de remplacement pour chaque groupe rattaché.");
+      return;
+    }
+    setBusy(true);
+    try {
+      for (let i = 0; i < pending.groups.length; i++) {
+        const g = pending.groups[i];
+        const choice = choices[i] ?? "delete";
+        if (choice === "delete") {
+          for (const childId of g.ids) {
+            await deleteDoc(doc(db, g.rule.collection, childId));
+          }
+        } else {
+          const newParentId = reassignTo[i];
+          const rows = state[g.rule.collection] as unknown as Record<string, unknown>[];
+          for (const childId of g.ids) {
+            const child = rows.find((r) => r.id === childId);
+            if (!child) continue;
+            if (g.rule.isArray) {
+              const cur = ((child[g.rule.field] as string[]) ?? []).filter((v) => v !== pending.id);
+              await updateDoc(doc(db, g.rule.collection, childId), {
+                [g.rule.field]: [...cur, newParentId],
+              });
+            } else {
+              await updateDoc(doc(db, g.rule.collection, childId), { [g.rule.field]: newParentId });
+            }
+          }
+        }
+      }
+      removeRow(pending.collection, pending.id);
+      setPending(null);
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Suppression impossible : ${err.message}`
+          : "Suppression impossible.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cascadeModal = pending ? (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4"
+      onClick={() => !busy && setPending(null)}
+    >
+      <div
+        className="w-full max-w-lg rounded-t-3xl bg-background pb-[env(safe-area-inset-bottom)] shadow-2xl sm:rounded-3xl sm:pb-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-border/70 px-5 py-4">
+          <h2 className="font-display text-[19px] font-bold text-primary">
+            Supprimer « {pending.label} » ?
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            D'autres enregistrements y sont rattachés — choisissez quoi faire pour chacun avant de
+            continuer.
+          </p>
+        </div>
+        <div className="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-5">
+          {pending.groups.map((g, i) => (
+            <div key={i} className="rounded-xl border border-border/70 p-3">
+              <p className="text-sm font-semibold text-foreground">
+                {g.ids.length} {g.rule.label}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">{g.labels.join(", ")}</p>
+              <select
+                value={choices[i] ?? "delete"}
+                onChange={(e) =>
+                  setChoices((c) => ({ ...c, [i]: e.target.value as "delete" | "reassign" }))
+                }
+                className="mt-2 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+              >
+                <option value="delete">Supprimer aussi</option>
+                <option value="reassign">Rattacher à un autre enregistrement</option>
+              </select>
+              {choices[i] === "reassign" && (
+                <select
+                  value={reassignTo[i] ?? ""}
+                  onChange={(e) => setReassignTo((r) => ({ ...r, [i]: e.target.value }))}
+                  className="mt-2 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+                >
+                  <option value="">— Choisir —</option>
+                  {(state[pending.collection] as unknown as Record<string, unknown>[])
+                    .filter((r) => r.id !== pending.id)
+                    .map((r) => (
+                      <option key={r.id as string} value={r.id as string}>
+                        {PARENT_RECORD_LABEL[pending.collection]?.(r) ?? (r.id as string)}
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-border/70 px-5 py-4">
+          <button
+            onClick={() => setPending(null)}
+            disabled={busy}
+            className="rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground disabled:opacity-50"
+          >
+            Annuler
+          </button>
+          <button
+            onClick={resolve}
+            disabled={busy}
+            className="rounded-lg bg-destructive px-4 py-2 text-xs font-semibold text-destructive-foreground disabled:opacity-50"
+          >
+            {busy ? "Suppression…" : "Confirmer la suppression"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return { requestDelete, cascadeModal };
 }
 
 /**
@@ -968,7 +1233,7 @@ function buildBreakdowns(computed: ErpComputed) {
     : [];
   const stockActuel: DetailField["breakdown"] = [
     {
-      label: "Bouteilles produites (Production)",
+      label: "Bouteilles libérées (contrôle qualité)",
       value: String(computed.stockPF.reduce((a, s) => a + s.produites, 0)),
     },
     {
@@ -1576,13 +1841,86 @@ const STAGE_LABELS: Record<TaskStage, string> = {
   production: "Production",
   stock: "Stock",
   commercialisation: "Commercialisation",
+  kyc: "Vérification KYC",
+  "order-confirm": "Confirmation commandes",
+  "order-fulfill": "Livraison commandes",
+  invite: "Suivi des invitations",
 };
+
+// Groups related stages under a shared heading (sprint 37) — with 7
+// possible stages now, one flat row of cards read as an undifferentiated
+// wall. Each group is its own domain: the appro→vente funnel, storefront
+// order handling, and account-related follow-ups (KYC, invites).
+const STAGE_GROUPS: { label: string; stages: TaskStage[] }[] = [
+  { label: "Chaîne de production", stages: ["production", "stock", "commercialisation"] },
+  { label: "Commandes boutique partenaires", stages: ["order-confirm", "order-fulfill"] },
+  { label: "Comptes & accès", stages: ["kyc", "invite"] },
+];
+
+/**
+ * Minimal stand-in for EntryForm's field rendering (sprint 35) — used
+ * inside the task-completion modal, which needs the fields shown
+ * immediately (no "+ X" collapse toggle, no internal open state) rather
+ * than embedded in a page. Only the field types the completion forms
+ * actually use (no multiselect: the source link is fixed by which task is
+ * being completed, never shown as an editable field here).
+ */
+function TaskCompletionFields({
+  fields,
+  values,
+  setValues,
+}: {
+  fields: FieldDef[];
+  values: Record<string, string>;
+  setValues: (fn: (v: Record<string, string>) => Record<string, string>) => void;
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {fields.map((f) => (
+        <label key={f.name} className="text-xs font-medium text-muted-foreground">
+          {f.label}
+          {f.required ? <span className="text-destructive"> *</span> : null}
+          {f.type === "select" ? (
+            <select
+              value={values[f.name]}
+              onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+              className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            >
+              {f.selectOptions
+                ? f.selectOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))
+                : f.options?.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+            </select>
+          ) : (
+            <input
+              type={f.type ?? "text"}
+              step="any"
+              value={values[f.name]}
+              onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+              className="mt-1 w-full rounded-lg border border-border bg-card px-2.5 py-2 text-sm text-foreground"
+            />
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
 
 function TachesSection() {
   const { profile } = useAuth();
-  const { state } = useErp();
+  const { state, computed, addRow } = useErp();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [completingTask, setCompletingTask] = useState<Task | null>(null);
+  const [completionValues, setCompletionValues] = useState<Record<string, string>>({});
+  const [completionBusy, setCompletionBusy] = useState(false);
 
   useEffect(() => {
     return onSnapshot(
@@ -1594,15 +1932,90 @@ function TachesSection() {
 
   // A poste-scoped account only sees the stage(s) it actually owns — matches
   // sprint 17's data scoping. Admin, unscoped, and "Personnalisé" staff see
-  // everything, same as every other section.
-  const visibleStages: TaskStage[] =
-    profile?.poste === "Directeur de Production"
-      ? ["production", "stock"]
-      : profile?.poste === "Chargée de Commercialisation"
-        ? ["commercialisation"]
-        : ["production", "stock", "commercialisation"];
+  // everything, same as every other section. See visibleTaskStages for the
+  // firestore.rules read-access reasoning behind each stage's cutoff.
+  const visibleStages = visibleTaskStages(profile);
+  const canSeeKyc = visibleStages.includes("kyc");
+  const canSeeOrders =
+    visibleStages.includes("order-confirm") || visibleStages.includes("order-fulfill");
+  const canSeeInvites = visibleStages.includes("invite");
 
-  const complete = async (task: Task) => {
+  // These three collections back kyc/order-*/invite tasks but aren't part
+  // of useErp()'s state (that only covers the appro→...→commercialisation
+  // domain) — same local-subscription pattern BoutiquesCard/OrdersCard/
+  // InviteCard already use for themselves. Gated on the account actually
+  // being able to see the corresponding stage(s), so a poste-scoped
+  // Directeur de Production (no firestore.rules read access on `orders`)
+  // never opens a listener that would just fail with permission-denied.
+  const [boutiques, setBoutiques] = useState<Boutique[]>([]);
+  useEffect(() => {
+    if (!canSeeKyc) return;
+    return onSnapshot(query(collection(db, "users"), where("role", "==", "partner")), (snap) =>
+      setBoutiques(snap.docs.map((d) => ({ uid: d.id, ...(d.data() as Omit<Boutique, "uid">) }))),
+    );
+  }, [canSeeKyc]);
+
+  const [orders, setOrders] = useState<StorefrontOrder[]>([]);
+  useEffect(() => {
+    if (!canSeeOrders) return;
+    return onSnapshot(query(collection(db, "orders"), orderBy("createdAt", "desc")), (snap) =>
+      setOrders(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<StorefrontOrder, "id">) }))),
+    );
+  }, [canSeeOrders]);
+
+  const [invites, setInvites] = useState<Invite[]>([]);
+  useEffect(() => {
+    if (!canSeeInvites) return;
+    return onSnapshot(query(collection(db, "invites"), orderBy("createdAt", "desc")), (snap) =>
+      setInvites(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Invite, "id">) }))),
+    );
+  }, [canSeeInvites]);
+
+  // A task can drive its real completion action only when its source still
+  // "production" tasks are the original task type (sprint 26), predating
+  // sourceId tracking (sprint 32) — a task created before that sprint has
+  // no sourceId at all, even though its réception may still exist right
+  // now. Falls back to matching sourceLabel against the réception's own
+  // numéro so a legacy task doesn't lose auto-linking just because it
+  // predates the field — but only when sourceId is absent entirely: a task
+  // that DOES have a sourceId trusts it, and correctly treats a deleted
+  // source as gone even if some other réception happens to share its
+  // numéro string.
+  const resolveApproFor = (task: Task): (typeof computed.appro)[number] | undefined =>
+    task.sourceId
+      ? computed.appro.find((a) => a.id === task.sourceId)
+      : computed.appro.find((a) => a.numero === task.sourceLabel);
+
+  // A task can drive its real completion action only when its source still
+  // resolves to a real, current record in the expected state — false for a
+  // since-deleted source, and for an order that was already confirmed/
+  // fulfilled/cancelled directly via OrdersCard's own buttons instead of
+  // through this task. "invite" never auto-links: there's no new record to
+  // create, only a status to flip, so it always uses the plain
+  // legacyComplete fallback.
+  const canAutoLink = (task: Task): boolean => {
+    if (task.stage === "production") return !!resolveApproFor(task);
+    if (!task.sourceId) return false;
+    switch (task.stage) {
+      case "stock":
+      case "commercialisation":
+        return computed.production.some((r) => r.id === task.sourceId);
+      case "kyc":
+        return boutiques.some((b) => b.uid === task.sourceId);
+      case "order-confirm":
+        return orders.some((o) => o.id === task.sourceId && o.status === "pending");
+      case "order-fulfill":
+        return orders.some((o) => o.id === task.sourceId && o.status === "confirmed");
+      case "invite":
+        return false;
+    }
+  };
+
+  // Fallback for tasks that can't drive record creation (sprint 35) —
+  // exactly the old behaviour: flip status, and for a "production" task
+  // spawn follow-ups that just carry the same (possibly stale) source
+  // forward, since there's no real new lot to point them at.
+  const legacyComplete = async (task: Task) => {
     if (!profile) return;
     try {
       await updateDoc(doc(db, "tasks", task.id), {
@@ -1611,11 +2024,17 @@ function TachesSection() {
         completedBy: profile.uid,
       });
       if (task.stage === "production") {
-        createTask("stock", `Ranger en stock le lot issu de ${task.sourceLabel}`, task.sourceLabel);
+        createTask(
+          "stock",
+          `Ranger en stock le lot issu de ${task.sourceLabel}`,
+          task.sourceLabel,
+          task.sourceId,
+        );
         createTask(
           "commercialisation",
           `Mettre en vente le lot issu de ${task.sourceLabel}`,
           task.sourceLabel,
+          task.sourceId,
         );
       }
     } catch (err) {
@@ -1625,6 +2044,343 @@ function TachesSection() {
           : "Mise à jour impossible.",
       );
     }
+  };
+
+  // Marks a task done after its completion form actually created the real
+  // record (sprint 35). For a completed "production" task, the follow-up
+  // Stock/Commercialisation tasks now point at the real new lot — not the
+  // réception — so their own completion forms link to it correctly.
+  const finishTask = async (task: Task, newLot?: { id: string; label: string }) => {
+    if (!profile) return;
+    try {
+      await updateDoc(doc(db, "tasks", task.id), {
+        status: "done",
+        completedAt: new Date().toISOString(),
+        completedBy: profile.uid,
+      });
+      if (task.stage === "production" && newLot) {
+        createTask(
+          "stock",
+          `Enregistrer la sortie de stock du lot ${newLot.label}`,
+          newLot.label,
+          newLot.id,
+        );
+        createTask(
+          "commercialisation",
+          `Mettre en vente le lot ${newLot.label}`,
+          newLot.label,
+          newLot.id,
+        );
+      } else if (task.stage === "order-confirm") {
+        createTask(
+          "order-fulfill",
+          `Livrer la commande de ${task.sourceLabel}`,
+          task.sourceLabel,
+          task.sourceId,
+        );
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Mise à jour impossible : ${err.message}`
+          : "Mise à jour impossible.",
+      );
+    }
+  };
+
+  // Sprint 08, Steps C/D: same trusted route as OrdersCard's own "Marquer
+  // livrée" action — an "order-fulfill" task's completion is that exact
+  // same action, just reached from the task instead of the Commandes
+  // table directly, so it must close the same overselling gap.
+  const fulfillOrder = async (order: StorefrontOrder) => {
+    const outcome = await fulfilOrderTrusted(order.id);
+    if (outcome.status !== "success") throw new Error(orderReservationErrorMessage(outcome));
+  };
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  // What each stage's completion form actually creates — the source link
+  // itself (réception/lot) is fixed by which task is being completed, so
+  // it's never shown as an editable field here.
+  const completionFieldsFor = (task: Task): FieldDef[] => {
+    if (task.stage === "production") {
+      // Both already on record the moment this task exists — carrying them
+      // forward saves re-typing a number staff already entered once (and a
+      // real chance of transcribing it wrong): réceptions are named
+      // "PDR-001" and their lots "PDR_001" in practice, so the réception's
+      // own numero is a reasonable starting point for "N° lot", and kg
+      // utilisés naturally starts at the full kg received.
+      const appro = resolveApproFor(task);
+      return [
+        { name: "lot", label: "N° lot", default: task.sourceLabel },
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        {
+          name: "kgUtilises",
+          label: "Kg ananas utilisés",
+          type: "number",
+          default: appro?.qteRecueKg ?? 0,
+        },
+        { name: "volumeJusL", label: "Volume jus (L)", type: "number", default: 0 },
+        { name: "q500", label: "500 ml produits", type: "number", default: 0 },
+        { name: "q330", label: "330 ml produits", type: "number", default: 0 },
+        { name: "q300", label: "300 ml produits", type: "number", default: 0 },
+        { name: "rejets", label: "Rejets", type: "number", default: 0 },
+        {
+          name: "statut",
+          label: "Statut lot",
+          type: "select",
+          options: ["En cours", "Terminé"],
+          default: "Terminé",
+        },
+      ];
+    }
+    if (task.stage === "stock") {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      // The lot's own kgUtilises was entered one step earlier (completing
+      // the production task) — that's exactly the quantity now leaving raw
+      // stock, so it's the right starting point, not a fresh 0. Coût
+      // unitaire carries forward the last real movement's cost (same
+      // "dernierCout" the Stock KPI itself uses) instead of a stale
+      // hardcoded figure.
+      const dernierCout = state.stockMP.length
+        ? state.stockMP[state.stockMP.length - 1].coutUnitaire
+        : 1044;
+      return [
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        { name: "produit", label: "Produit", default: "Ananas" },
+        { name: "unite", label: "Unité", default: "Pièce" },
+        {
+          name: "sortie",
+          label: "Quantité sortie",
+          type: "number",
+          default: lot?.kgUtilises ?? 0,
+        },
+        { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: dernierCout },
+        {
+          name: "observation",
+          label: "Observation",
+          default: `Transformation lot ${task.sourceLabel}`,
+        },
+      ];
+    }
+    if (task.stage === "commercialisation") {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      // Defaulting "Format" to whichever this lot actually produced the most
+      // of — a lot with zero 500ml bottles shouldn't default to selling
+      // 500ml. Prix unitaire is derived from that same format, not a
+      // hardcoded 500ml price that silently stays wrong if the format is
+      // ever changed without noticing.
+      const dominantFormat: Format = !lot
+        ? "500 ml"
+        : lot.q500 >= lot.q330 && lot.q500 >= lot.q300
+          ? "500 ml"
+          : lot.q330 >= lot.q300
+            ? "330 ml"
+            : "300 ml";
+      return [
+        { name: "numero", label: "N° vente" },
+        { name: "date", label: "Date", type: "date", default: todayIso },
+        {
+          name: "idClient",
+          label: "Client",
+          type: "select",
+          required: true,
+          selectOptions: state.clients.length
+            ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
+            : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
+        },
+        { name: "canal", label: "Canal", type: "select", options: CANAUX, default: "Restaurant" },
+        {
+          name: "format",
+          label: "Format",
+          type: "select",
+          options: FORMATS,
+          default: dominantFormat,
+        },
+        { name: "quantite", label: "Quantité", type: "number", default: 0 },
+        {
+          name: "prixUnitaire",
+          label: "Prix unitaire FC",
+          type: "number",
+          default: prixFormat(state.parametres, dominantFormat),
+        },
+        { name: "remise", label: "Remise FC", type: "number", default: 0 },
+        { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+      ];
+    }
+    if (task.stage === "order-confirm") {
+      return [
+        {
+          name: "deliveryDate",
+          label: "Date de livraison (optionnel)",
+          type: "date",
+          default: "",
+        },
+      ];
+    }
+    // kyc, order-fulfill, invite: nothing to type in — the completion modal
+    // shows a read-only summary instead of TaskCompletionFields, and the
+    // action itself (verify / fulfill / dismiss) needs no extra input.
+    return [];
+  };
+
+  // What the read-only completion summary shows for stages with no form
+  // (kyc, order-fulfill) — same source data BoutiquesCard/OrdersCard
+  // already surface in their own detail modals, just reused here so
+  // staff can verify/fulfill without leaving the task.
+  const completionSummaryFor = (task: Task): { label: string; value: string }[] => {
+    if (task.stage === "kyc") {
+      const b = boutiques.find((x) => x.uid === task.sourceId);
+      if (!b) return [];
+      return [
+        { label: "Boutique", value: b.displayName },
+        { label: "Responsable", value: b.contactName || "—" },
+        { label: "Téléphone", value: b.phone ? `+${b.phone}` : "—" },
+        {
+          label: "Adresse",
+          value: b.address
+            ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}`
+            : "—",
+        },
+        { label: "N° CNI/RCCM", value: b.idNumber || "—" },
+      ];
+    }
+    if (task.stage === "order-fulfill") {
+      const o = orders.find((x) => x.id === task.sourceId);
+      if (!o) return [];
+      return [
+        { label: "Partenaire", value: o.partnerName },
+        { label: "Articles", value: o.items.map((i) => `${i.quantity}× ${i.name}`).join(", ") },
+        { label: "Total", value: fcFormat(o.total) },
+        ...(o.deliveryDate
+          ? [{ label: "Livraison prévue", value: formatDateOnly(o.deliveryDate) }]
+          : []),
+      ];
+    }
+    return [];
+  };
+
+  const openCompletion = (task: Task) => {
+    const fields = completionFieldsFor(task);
+    setCompletionValues(Object.fromEntries(fields.map((f) => [f.name, String(f.default ?? "")])));
+    setCompletingTask(task);
+  };
+
+  const submitCompletion = async () => {
+    if (!completingTask || !profile) return;
+    const task = completingTask;
+    const fields = completionFieldsFor(task);
+    const missing = fields.find((f) => f.required && !completionValues[f.name]);
+    if (missing) {
+      toast.error(`${missing.label} requis.`);
+      return;
+    }
+    setCompletionBusy(true);
+    const v = completionValues;
+    if (task.stage === "production") {
+      const newLotId = newId("PRO");
+      // resolveApproFor, not task.sourceId directly — a legacy task (no
+      // sourceId, matched by numéro instead) would otherwise write
+      // `undefined` into a required link field. Safe to assert non-null:
+      // this branch only runs when canAutoLink(task) was already true,
+      // which for "production" means resolveApproFor(task) resolved.
+      const appro = resolveApproFor(task)!;
+      addRow("productions", {
+        id: newLotId,
+        lot: v.lot,
+        date: v.date,
+        kgUtilises: n(v.kgUtilises),
+        volumeJusL: n(v.volumeJusL),
+        q500: n(v.q500),
+        q330: n(v.q330),
+        q300: n(v.q300),
+        rejets: n(v.rejets),
+        responsable: profile.displayName || profile.email || "Équipe production",
+        ...(profile.uid ? { staffUid: profile.uid } : {}),
+        statut: v.statut,
+        approvisionnementIds: [appro.id],
+      });
+      await finishTask(task, { id: newLotId, label: v.lot });
+    } else if (task.stage === "stock") {
+      addRow("stockMP", {
+        id: newId("MP"),
+        date: v.date,
+        produit: v.produit,
+        unite: v.unite,
+        type: "Sortie",
+        entree: 0,
+        sortie: n(v.sortie),
+        coutUnitaire: n(v.coutUnitaire),
+        observation: v.observation,
+        productionIds: [task.sourceId!],
+      });
+      await finishTask(task);
+    } else if (task.stage === "commercialisation") {
+      const client = state.clients.find((c) => c.id === v.idClient);
+      addRow("ventes", {
+        id: newId("VTE"),
+        numero: v.numero,
+        date: v.date,
+        idClient: v.idClient,
+        client: client?.nom ?? "",
+        canal: v.canal as Canal,
+        format: v.format as Format,
+        quantite: n(v.quantite),
+        prixUnitaire: n(v.prixUnitaire) || prixFormat(state.parametres, v.format as Format),
+        remise: n(v.remise),
+        encaisse: n(v.encaisse),
+        commerciale: profile.displayName || profile.email || "Équipe commerciale",
+        ...(profile.uid ? { staffUid: profile.uid } : {}),
+        productionIds: [task.sourceId!],
+      });
+      await finishTask(task);
+    } else if (task.stage === "kyc") {
+      try {
+        await updateDoc(doc(db, "users", task.sourceId!), { verified: true });
+        await finishTask(task);
+      } catch (err) {
+        toast.error(
+          err instanceof Error
+            ? `Vérification impossible : ${err.message}`
+            : "Vérification impossible.",
+        );
+      }
+    } else if (task.stage === "order-confirm") {
+      try {
+        const outcome = await confirmOrderTrusted(task.sourceId!);
+        if (outcome.status !== "success") throw new Error(orderReservationErrorMessage(outcome));
+        if (v.deliveryDate) {
+          await updateDoc(doc(db, "orders", task.sourceId!), { deliveryDate: v.deliveryDate });
+        }
+        await finishTask(task);
+      } catch (err) {
+        toast.error(
+          err instanceof Error
+            ? `Confirmation de la commande impossible : ${err.message}`
+            : "Confirmation de la commande impossible.",
+        );
+      }
+    } else if (task.stage === "order-fulfill") {
+      const order = orders.find((o) => o.id === task.sourceId);
+      if (order) {
+        try {
+          await fulfillOrder(order);
+          await finishTask(task);
+        } catch (err) {
+          toast.error(
+            err instanceof Error
+              ? `Livraison impossible : ${err.message}`
+              : "Livraison impossible.",
+          );
+        }
+      }
+    }
+    setCompletionBusy(false);
+    setCompletingTask(null);
   };
 
   const pending = tasks.filter((t) => t.status === "pending");
@@ -1641,31 +2397,80 @@ function TachesSection() {
         })
       : "—";
 
-  const NEXT_ACTION: Record<TaskStage, string> = {
-    production:
-      "Une fois cette tâche terminée, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour la même réception.",
-    stock:
-      "Dernière étape du suivi Stock pour cette réception — aucune tâche n'est créée après celle-ci.",
-    commercialisation:
-      "Dernière étape du suivi Commercialisation pour cette réception — aucune tâche n'est créée après celle-ci.",
+  // Per-task, not per-stage (two "production" tasks for two different
+  // réceptions used to show identical boilerplate) — names the task's own
+  // source, and reflects the actual fallback when its source no longer
+  // resolves (canAutoLink false) instead of describing a form that won't
+  // actually open.
+  const nextActionFor = (task: Task): string => {
+    if (!canAutoLink(task)) {
+      return "L'enregistrement source de cette tâche n'est plus disponible : la marquer terminée se contente de la clôturer, sans ouvrir de formulaire.";
+    }
+    switch (task.stage) {
+      case "production":
+        return `Marquer cette tâche terminée ouvre l'enregistrement du lot produit à partir de la réception ${task.sourceLabel}. Une fois enregistré, une tâche Stock et une tâche Commercialisation sont créées automatiquement pour ce lot.`;
+      case "stock":
+        return `Marquer cette tâche terminée ouvre l'enregistrement de la sortie de stock pour le lot ${task.sourceLabel} — dernière étape du suivi Stock pour ce lot.`;
+      case "commercialisation":
+        return `Marquer cette tâche terminée ouvre l'enregistrement de la vente pour le lot ${task.sourceLabel} — dernière étape du suivi Commercialisation pour ce lot.`;
+      case "kyc":
+        return `Marquer cette tâche terminée ouvre la fiche de vérification de ${task.sourceLabel} et la marque vérifiée.`;
+      case "order-confirm":
+        return `Marquer cette tâche terminée confirme la commande de ${task.sourceLabel} (avec une date de livraison optionnelle) et crée automatiquement la tâche de livraison correspondante.`;
+      case "order-fulfill":
+        return `Marquer cette tâche terminée enregistre la commande de ${task.sourceLabel} comme livrée et crée les ventes correspondantes.`;
+      case "invite":
+        return `Marquer cette tâche terminée la clôture simplement, une fois que ${task.sourceLabel} a rejoint l'équipe.`;
+    }
   };
 
-  // What led to this task existing, in order — for "stock"/"commercialisation"
-  // tasks that's the originating "production" task's own completion (they
-  // don't share a Firestore reference to each other, only the same
-  // `sourceLabel`, so the lineage is reconstructed by matching on it).
+  // What led to this task existing, in order (sprint 35). A "production"
+  // task's own source is the réception. A "stock"/"commercialisation"
+  // task's source is now the real production lot it was spawned for — its
+  // origin production task is found by walking the lot's own
+  // approvisionnementIds back to a matching réception, not by matching
+  // sourceId/sourceLabel directly against each other (they're different
+  // records now). Resolves to "—" gracefully for legacy tasks or a since-
+  // deleted source, rather than guessing.
   const buildHistory = (task: Task): DetailField["breakdown"] => {
-    const steps: { label: string; value: string }[] = [
-      { label: "Réception reçue", value: task.sourceLabel },
-    ];
-    if (task.stage !== "production") {
+    const steps: { label: string; value: string }[] = [];
+    if (task.stage === "production") {
+      steps.push({ label: "Réception reçue", value: task.sourceLabel });
+    } else if (task.stage === "stock" || task.stage === "commercialisation") {
+      const lot = task.sourceId
+        ? computed.production.find((r) => r.id === task.sourceId)
+        : undefined;
+      const approIds = lot?.approvisionnementIds ?? [];
+      const approNumeros = approIds
+        .map((id) => computed.appro.find((a) => a.id === id)?.numero)
+        .filter((v): v is string => Boolean(v));
+      steps.push({
+        label: "Réception(s) source",
+        value: approNumeros.length ? approNumeros.join(", ") : "—",
+      });
       const origin = tasks.find(
-        (t) => t.stage === "production" && t.sourceLabel === task.sourceLabel,
+        (t) => t.stage === "production" && !!t.sourceId && approIds.includes(t.sourceId),
       );
       steps.push({
-        label: "Production terminée",
-        value: origin?.completedAt ? formatDateTime(origin.completedAt) : "—",
+        label: "Lot produit",
+        value: origin?.completedAt
+          ? `${task.sourceLabel} — ${formatDateTime(origin.completedAt)}`
+          : task.sourceLabel,
       });
+    } else if (task.stage === "order-fulfill") {
+      const confirm = tasks.find(
+        (t) => t.stage === "order-confirm" && t.sourceId === task.sourceId,
+      );
+      steps.push({
+        label: "Commande confirmée",
+        value: confirm?.completedAt
+          ? `${task.sourceLabel} — ${formatDateTime(confirm.completedAt)}`
+          : task.sourceLabel,
+      });
+    } else {
+      // kyc, order-confirm, invite: single-step chains — the task itself
+      // is the whole history, so no intermediate step to show.
+      steps.push({ label: "Concerne", value: task.sourceLabel });
     }
     steps.push({
       label: task.status === "done" ? "Cette tâche, terminée" : "Cette tâche, en attente",
@@ -1680,10 +2485,12 @@ function TachesSection() {
   // réception whose task was already completed is correctly left alone;
   // only réceptions with zero task lineage get backfilled.
   const backfillMissingTasks = () => {
-    const covered = new Set(
-      tasks.filter((t) => t.stage === "production").map((t) => t.sourceLabel),
+    const productionTasks = tasks.filter((t) => t.stage === "production");
+    const coveredLabels = new Set(productionTasks.map((t) => t.sourceLabel));
+    const coveredIds = new Set(productionTasks.map((t) => t.sourceId).filter(Boolean));
+    const missing = state.approvisionnements.filter(
+      (a) => !coveredLabels.has(a.numero) && !coveredIds.has(a.id),
     );
-    const missing = state.approvisionnements.filter((a) => !covered.has(a.numero));
     if (missing.length === 0) {
       toast.info("Aucune tâche manquante — tout est déjà suivi.");
       return;
@@ -1693,6 +2500,7 @@ function TachesSection() {
         "production",
         `Transformer la réception ${a.numero} (${a.qteRecueKg} kg)`,
         a.numero,
+        a.id,
       );
     });
     toast.success(
@@ -1710,57 +2518,87 @@ function TachesSection() {
 
       {profile?.role === "admin" && (
         <div className="flex justify-end">
-          <button
-            onClick={backfillMissingTasks}
+          <ConfirmButton
+            onConfirm={backfillMissingTasks}
+            confirmLabel="Confirmer ?"
+            ariaLabel="Générer les tâches manquantes"
+            confirmAriaLabel="Confirmer la génération des tâches manquantes"
             className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/5"
+            confirmClassName="rounded-lg border border-warning bg-warning/10 px-3 py-1.5 text-xs font-semibold text-foreground transition"
           >
             Générer les tâches manquantes
-          </button>
+          </ConfirmButton>
         </div>
       )}
 
-      <div
-        className={`grid gap-4 ${
-          visibleStages.length === 1
-            ? ""
-            : visibleStages.length === 2
-              ? "sm:grid-cols-2"
-              : "sm:grid-cols-2 xl:grid-cols-3"
-        }`}
-      >
-        {visibleStages.map((stage) => {
-          const stageTasks = pending.filter((t) => t.stage === stage);
+      <div className="space-y-6">
+        {STAGE_GROUPS.map((group) => {
+          const stages = group.stages.filter((s) => visibleStages.includes(s));
+          if (stages.length === 0) return null;
           return (
-            <Card key={stage} title={STAGE_LABELS[stage]}>
-              {stageTasks.length === 0 ? (
-                <p className="py-6 text-center text-sm text-muted-foreground">
-                  Rien à faire ici pour le moment.
-                </p>
-              ) : (
-                <ul className="space-y-2">
-                  {stageTasks.map((t) => (
-                    <li
-                      key={t.id}
-                      onClick={() => setSelectedTask(t)}
-                      className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
-                    >
-                      <span className="text-sm text-foreground">{t.title}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          complete(t);
-                        }}
-                        aria-label="Marquer terminé"
-                        title="Marquer terminé"
-                        className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
-                      >
-                        <Check className="h-4 w-4" aria-hidden />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Card>
+            <div key={group.label} className="space-y-3">
+              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                {group.label}
+              </h3>
+              <div
+                className={`grid gap-4 ${
+                  stages.length === 1
+                    ? ""
+                    : stages.length === 2
+                      ? "sm:grid-cols-2"
+                      : "sm:grid-cols-2 xl:grid-cols-3"
+                }`}
+              >
+                {stages.map((stage) => {
+                  const stageTasks = pending.filter((t) => t.stage === stage);
+                  return (
+                    <Card key={stage} title={STAGE_LABELS[stage]}>
+                      {stageTasks.length === 0 ? (
+                        <p className="py-6 text-center text-sm text-muted-foreground">
+                          Rien à faire ici pour le moment.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {stageTasks.map((t) => (
+                            <li
+                              key={t.id}
+                              onClick={() => setSelectedTask(t)}
+                              className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 transition hover:border-primary/40"
+                            >
+                              <span className="text-sm text-foreground">{t.title}</span>
+                              {canAutoLink(t) ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openCompletion(t);
+                                  }}
+                                  aria-label="Marquer terminé"
+                                  title="Marquer terminé"
+                                  className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                                >
+                                  <Check className="h-4 w-4" aria-hidden />
+                                </button>
+                              ) : (
+                                <ConfirmButton
+                                  onConfirm={() => legacyComplete(t)}
+                                  confirmLabel="Confirmer ?"
+                                  ariaLabel="Marquer terminé"
+                                  confirmAriaLabel="Confirmer la tâche terminée"
+                                  className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border text-primary transition hover:border-primary hover:bg-primary/5"
+                                  confirmClassName="shrink-0 rounded-lg border border-warning bg-warning/10 px-2.5 py-1.5 text-xs font-semibold text-foreground transition"
+                                >
+                                  <Check className="h-4 w-4" aria-hidden />
+                                </ConfirmButton>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
           );
         })}
       </div>
@@ -1791,23 +2629,109 @@ function TachesSection() {
             },
             {
               label: "Prochaine étape",
-              value: NEXT_ACTION[selectedTask.stage],
+              value: nextActionFor(selectedTask),
               description: "Ce qui se passe automatiquement une fois cette tâche marquée terminée.",
             },
           ]}
         />
+      )}
+
+      {completingTask && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4"
+          onClick={() => !completionBusy && setCompletingTask(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl bg-background pb-[env(safe-area-inset-bottom)] shadow-2xl sm:rounded-3xl sm:pb-0"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-border/70 px-5 py-4">
+              <h2 className="font-display text-[19px] font-bold text-primary">
+                {completingTask.title}
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {completingTask.stage === "production"
+                  ? "Enregistrez le lot produit à partir de cette réception."
+                  : completingTask.stage === "stock"
+                    ? "Enregistrez la sortie de stock pour ce lot."
+                    : completingTask.stage === "commercialisation"
+                      ? "Enregistrez la vente pour ce lot."
+                      : completingTask.stage === "kyc"
+                        ? "Vérifiez les informations ci-dessous, puis confirmez la vérification KYC."
+                        : completingTask.stage === "order-confirm"
+                          ? "Confirmez la commande, avec une date de livraison optionnelle."
+                          : "Confirmez la livraison — les ventes correspondantes seront enregistrées automatiquement."}
+              </p>
+            </div>
+            <div className="max-h-[55vh] overflow-y-auto px-5 py-5">
+              {completionFieldsFor(completingTask).length > 0 ? (
+                <TaskCompletionFields
+                  fields={completionFieldsFor(completingTask)}
+                  values={completionValues}
+                  setValues={setCompletionValues}
+                />
+              ) : (
+                <dl className="space-y-2 text-sm">
+                  {completionSummaryFor(completingTask).map((f) => (
+                    <div
+                      key={f.label}
+                      className="flex justify-between gap-3 border-b border-border/50 pb-1.5"
+                    >
+                      <dt className="text-muted-foreground">{f.label}</dt>
+                      <dd className="text-right font-medium text-foreground">{f.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-border/70 px-5 py-4">
+              <button
+                onClick={() => setCompletingTask(null)}
+                disabled={completionBusy}
+                className="rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground disabled:opacity-50"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={submitCompletion}
+                disabled={completionBusy}
+                className="rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
+              >
+                {completionBusy
+                  ? "Enregistrement…"
+                  : completingTask.stage === "kyc"
+                    ? "Vérifier et terminer"
+                    : completingTask.stage === "order-fulfill"
+                      ? "Marquer livrée et terminer"
+                      : "Enregistrer et terminer"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
 function ApproSection() {
-  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { state, computed, addRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const p = state.parametres;
   const [selectedAppro, setSelectedAppro] = useState<(typeof computed.appro)[number] | null>(null);
   const [selectedProducteur, setSelectedProducteur] = useState<
     (typeof state.producteurs)[number] | null
   >(null);
+  // Reverse lookup: which "production" task, if any, tracks this réception
+  // (see TachesSection) — surfaced on the record itself so staff don't have
+  // to go hunting through Tâches to find out.
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "production")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
+  const taskLabel = (t?: Task) =>
+    t ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}` : "Aucune";
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -1848,8 +2772,9 @@ function ApproSection() {
                 },
               ]}
               onSubmit={(v) => {
+                const approId = newId("APP");
                 addRow("approvisionnements", {
-                  id: newId("APP"),
+                  id: approId,
                   numero: v.numero,
                   date: v.date,
                   idProducteur: v.idProducteur,
@@ -1867,6 +2792,7 @@ function ApproSection() {
                   "production",
                   `Transformer la réception ${v.numero} (${n(v.qteRecueKg)} kg)`,
                   v.numero,
+                  approId,
                 );
               }}
             />
@@ -1904,7 +2830,7 @@ function ApproSection() {
             <DeleteButton
               onClick={(e) => {
                 e.stopPropagation();
-                removeRow("approvisionnements", r.id);
+                requestDelete("approvisionnements", r.id);
               }}
             />,
           ])}
@@ -1921,7 +2847,7 @@ function ApproSection() {
             setSelectedAppro(null);
           }}
           onDelete={() => {
-            removeRow("approvisionnements", selectedAppro.id);
+            requestDelete("approvisionnements", selectedAppro.id);
             setSelectedAppro(null);
           }}
           fields={[
@@ -2017,6 +2943,11 @@ function ApproSection() {
               description:
                 "Calculé automatiquement : valeur d'achat + transport + autres frais — ce montant alimente les coûts d'exploitation en Finances.",
             },
+            {
+              label: "Tâche liée",
+              value: taskLabel(linkedTasks.find((t) => t.sourceId === selectedAppro.id)),
+              description: "Tâche de production créée pour cette réception (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -2087,7 +3018,7 @@ function ApproSection() {
             setSelectedProducteur(null);
           }}
           onDelete={() => {
-            removeRow("producteurs", selectedProducteur.id);
+            requestDelete("producteurs", selectedProducteur.id);
             setSelectedProducteur(null);
           }}
           fields={[
@@ -2146,16 +3077,30 @@ function ApproSection() {
       )}
 
       <ExportBar section="appro" />
+      {cascadeModal}
     </div>
   );
 }
 
 function ProductionSection() {
-  const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { state, computed, addRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedLot, setSelectedLot] = useState<(typeof computed.production)[number] | null>(null);
   const breakdowns = buildBreakdowns(computed);
+  // Reverse lookup: a produced lot spawns both a "stock" and a
+  // "commercialisation" task (see TachesSection's finishTask) — show both
+  // on the lot itself.
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "tasks"), where("stage", "in", ["stock", "commercialisation"])),
+      (snap) => setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
+  const taskLabel = (t?: Task) =>
+    t ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}` : "Aucune";
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -2218,6 +3163,16 @@ function ProductionSection() {
                   options: ["En cours", "Terminé"],
                   default: "Terminé",
                 },
+                {
+                  name: "approvisionnementIds",
+                  label: "Réceptions sources",
+                  type: "multiselect",
+                  required: true,
+                  multiOptions: computed.appro.map((r) => ({
+                    value: r.id,
+                    label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
+                  })),
+                },
               ]}
               onSubmit={(v) =>
                 addRow("productions", {
@@ -2237,6 +3192,9 @@ function ProductionSection() {
                   responsable: profile?.displayName || profile?.email || "Équipe production",
                   ...(profile?.uid ? { staffUid: profile.uid } : {}),
                   statut: v.statut,
+                  approvisionnementIds: v.approvisionnementIds
+                    ? v.approvisionnementIds.split(",")
+                    : [],
                 })
               }
             />
@@ -2278,7 +3236,7 @@ function ProductionSection() {
             <DeleteButton
               onClick={(e) => {
                 e.stopPropagation();
-                removeRow("productions", r.id);
+                requestDelete("productions", r.id);
               }}
             />,
           ])}
@@ -2317,7 +3275,7 @@ function ProductionSection() {
             setSelectedLot(null);
           }}
           onDelete={() => {
-            removeRow("productions", selectedLot.id);
+            requestDelete("productions", selectedLot.id);
             setSelectedLot(null);
           }}
           fields={[
@@ -2381,6 +3339,16 @@ function ProductionSection() {
               },
             },
             {
+              label: "Réceptions sources",
+              value: selectedLot.approvisionnementIds?.length
+                ? selectedLot.approvisionnementIds
+                    .map((id) => computed.appro.find((a) => a.id === id)?.numero ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Réception(s) d'ananas ayant alimenté ce lot, sélectionnées à la saisie — sert à remonter la chaîne appro → production → vente.",
+            },
+            {
               label: "Responsable",
               value: selectedLot.responsable,
               description:
@@ -2413,11 +3381,28 @@ function ProductionSection() {
               description:
                 "Calculé automatiquement à partir des prix de vente par format définis dans Paramètres ERP.",
             },
+            {
+              label: "Tâche Stock liée",
+              value: taskLabel(
+                linkedTasks.find((t) => t.stage === "stock" && t.sourceId === selectedLot.id),
+              ),
+              description: "Tâche de sortie de stock créée pour ce lot (onglet Tâches).",
+            },
+            {
+              label: "Tâche Commercialisation liée",
+              value: taskLabel(
+                linkedTasks.find(
+                  (t) => t.stage === "commercialisation" && t.sourceId === selectedLot.id,
+                ),
+              ),
+              description: "Tâche de mise en vente créée pour ce lot (onglet Tâches).",
+            },
           ]}
         />
       )}
 
       <ExportBar section="production" />
+      {cascadeModal}
     </div>
   );
 }
@@ -2437,6 +3422,32 @@ function StockSection() {
     return { m, cumul };
   });
   const breakdowns = buildBreakdowns(computed);
+
+  // Traçabilité par lot : remonte appro → production, puis attribue les
+  // ventes qui référencent ce lot. Une vente reliée à plusieurs lots compte
+  // dans chacun — c'est une vue de traçabilité, pas une répartition
+  // comptable exacte (le KPI/Finances agrégé reste la source de vérité).
+  const traceRows = computed.production.map((r) => {
+    const approRows = computed.appro.filter((a) => (r.approvisionnementIds ?? []).includes(a.id));
+    const kgSources = approRows.length
+      ? approRows.reduce((acc, a) => acc + a.qteRecueKg, 0)
+      : r.kgUtilises;
+    const ventesLiees = computed.ventes.filter((v) => v.productionIds?.includes(r.id));
+    const bouteillesVendues = ventesLiees.reduce((acc, v) => acc + v.quantite, 0);
+    return {
+      id: r.id,
+      lot: r.lot,
+      date: r.date,
+      approNumeros: approRows.map((a) => a.numero),
+      kgSources,
+      totalBouteilles: r.totalBouteilles,
+      bouteillesVendues,
+      stockRestant: Math.max(r.totalBouteilles - bouteillesVendues, 0),
+      ventesNumeros: ventesLiees.map((v) => v.numero),
+    };
+  });
+  const [selectedTraceLot, setSelectedTraceLot] = useState<(typeof traceRows)[number] | null>(null);
+
   return (
     <div className="space-y-6">
       <SectionHeader eyebrow="Module ERP 03" title="Stocks" responsable="Production / Magasin" />
@@ -2476,7 +3487,7 @@ function StockSection() {
           label="Stock produits finis"
           realise={computed.stockPF.reduce((a, s) => a + s.stock, 0)}
           unit="bt"
-          description="Calculé automatiquement : bouteilles produites − vendues, tous formats confondus."
+          description="Bouteilles libérées par le contrôle qualité (mobile) − vendues, tous formats confondus. Un lot en attente de contrôle, en quarantaine ou rejeté n'y contribue jamais."
           breakdown={breakdowns.stockActuel}
         />
       </div>
@@ -2503,8 +3514,38 @@ function StockSection() {
                 { name: "sortie", label: "Quantité sortie", type: "number", default: 0 },
                 { name: "coutUnitaire", label: "Coût unitaire FC", type: "number", default: 1044 },
                 { name: "observation", label: "Observation" },
+                {
+                  name: "approvisionnementIds",
+                  label: "Réceptions sources (si Entrée)",
+                  type: "multiselect",
+                  multiOptions: computed.appro.map((r) => ({
+                    value: r.id,
+                    label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
+                  })),
+                },
+                {
+                  name: "productionIds",
+                  label: "Lots destination (si Sortie)",
+                  type: "multiselect",
+                  multiOptions: computed.production.map((r) => ({
+                    value: r.id,
+                    label: `${r.lot} — ${r.date}`,
+                  })),
+                },
               ]}
-              onSubmit={(v) =>
+              onSubmit={(v) => {
+                // Required, but only for the movement type it applies to —
+                // a static per-field `required` can't express that, so it's
+                // checked here (EntryForm treats a `false` return as "block
+                // submit, keep the form open").
+                if (v.type === "Entrée" && !v.approvisionnementIds) {
+                  toast.error("Réceptions sources requises pour un mouvement d'entrée.");
+                  return false;
+                }
+                if (v.type === "Sortie" && !v.productionIds) {
+                  toast.error("Lot(s) destination requis pour un mouvement de sortie.");
+                  return false;
+                }
                 addRow("stockMP", {
                   id: newId("MP"),
                   date: v.date,
@@ -2515,8 +3556,12 @@ function StockSection() {
                   sortie: n(v.sortie),
                   coutUnitaire: n(v.coutUnitaire),
                   observation: v.observation,
-                })
-              }
+                  approvisionnementIds: v.approvisionnementIds
+                    ? v.approvisionnementIds.split(",")
+                    : [],
+                  productionIds: v.productionIds ? v.productionIds.split(",") : [],
+                });
+              }}
             />
           </div>
         }
@@ -2626,6 +3671,26 @@ function StockSection() {
               },
             },
             {
+              label: "Réceptions sources",
+              value: selectedMouvement.m.approvisionnementIds?.length
+                ? selectedMouvement.m.approvisionnementIds
+                    .map((id) => computed.appro.find((a) => a.id === id)?.numero ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Réception(s) d'ananas à l'origine de ce mouvement d'entrée, sélectionnées à la saisie.",
+            },
+            {
+              label: "Lots destination",
+              value: selectedMouvement.m.productionIds?.length
+                ? selectedMouvement.m.productionIds
+                    .map((id) => computed.production.find((r) => r.id === id)?.lot ?? id)
+                    .join(", ")
+                : "—",
+              description:
+                "Lot(s) de production alimentés par ce mouvement de sortie, sélectionnés à la saisie.",
+            },
+            {
               label: "Stock cumulé",
               value: selectedMouvement.cumul,
               description:
@@ -2635,7 +3700,12 @@ function StockSection() {
         />
       )}
 
-      <Card title="Stock produits finis (production − ventes)">
+      <Card title="Stock produits finis (production libérée − ventes)">
+        <p className="mb-3 text-xs text-muted-foreground">
+          Bouteilles libérées par le contrôle qualité (application mobile) moins les ventes — un lot
+          encore en attente de contrôle, en quarantaine ou rejeté n&rsquo;y contribue jamais, quel
+          que soit le nombre de bouteilles conditionnées.
+        </p>
         <Table
           onRowClick={(i) => setSelectedStockPF(computed.stockPF[i])}
           headers={["Format", "Produites", "Vendues", "Stock", "Valeur stock"]}
@@ -2703,6 +3773,81 @@ function StockSection() {
         />
       )}
 
+      <Card title="Traçabilité par lot (appro → production → vente)">
+        <Table
+          onRowClick={(i) => setSelectedTraceLot(traceRows[i])}
+          headers={[
+            "Lot",
+            "Réceptions sources",
+            "Kg sources",
+            "Bouteilles produites",
+            "Bouteilles vendues (liées)",
+            "Stock restant (estimé)",
+          ]}
+          rows={traceRows.map((t) => [
+            t.lot,
+            t.approNumeros.length ? t.approNumeros.join(", ") : "—",
+            t.kgSources,
+            t.totalBouteilles,
+            t.bouteillesVendues,
+            t.stockRestant,
+          ])}
+        />
+      </Card>
+
+      {selectedTraceLot && (
+        <RecordDetailModal
+          title={`Traçabilité — Lot ${selectedTraceLot.lot}`}
+          subtitle={selectedTraceLot.date}
+          onClose={() => setSelectedTraceLot(null)}
+          fields={[
+            {
+              label: "Réceptions sources",
+              value: selectedTraceLot.approNumeros.length
+                ? selectedTraceLot.approNumeros.join(", ")
+                : "—",
+              description:
+                "Réceptions Approvisionnement liées à ce lot (saisies sur la fiche de production).",
+            },
+            {
+              label: "Kg sources",
+              value: selectedTraceLot.kgSources,
+              description:
+                "Somme des kg reçus sur les réceptions liées ; si aucune réception n'est liée (lot créé avant le sprint 30), affiche les kg utilisés du lot.",
+            },
+            {
+              label: "Bouteilles produites",
+              value: selectedTraceLot.totalBouteilles,
+              description: "Total conditionné pour ce lot, tous formats confondus.",
+            },
+            {
+              label: "Ventes liées",
+              value: selectedTraceLot.ventesNumeros.length
+                ? selectedTraceLot.ventesNumeros.join(", ")
+                : "—",
+              description: "Ventes du Journal des ventes ayant sélectionné ce lot comme source.",
+            },
+            {
+              label: "Bouteilles vendues (liées)",
+              value: selectedTraceLot.bouteillesVendues,
+              description:
+                "Somme des quantités des ventes liées. Estimation de traçabilité : une vente reliée à plusieurs lots compte dans chacun, donc ce chiffre peut différer du détail exact de répartition. Le stock produits finis agrégé ci-dessus reste la source de vérité comptable.",
+            },
+            {
+              label: "Stock restant (estimé)",
+              value: selectedTraceLot.stockRestant,
+              description:
+                "Calculé automatiquement : bouteilles produites − bouteilles vendues (liées).",
+              breakdown: [
+                { label: "Produites", value: String(selectedTraceLot.totalBouteilles) },
+                { label: "− Vendues (liées)", value: `− ${selectedTraceLot.bouteillesVendues}` },
+                { label: "= Stock restant (estimé)", value: String(selectedTraceLot.stockRestant) },
+              ],
+            },
+          ]}
+        />
+      )}
+
       <ExportBar section="stock" />
     </div>
   );
@@ -2716,9 +3861,22 @@ interface Product {
   active: boolean;
   imageUrl?: string;
   description?: string;
+  /**
+   * Lots de production (`Production.id`) rattachés à ce produit du catalogue
+   * (sprint 32) — optionnel, contrairement aux liens Production/Vente/Stock :
+   * un produit catalogue est une fiche de vente (nom/format/prix) qui peut
+   * légitimement exister avant qu'un lot ne soit produit.
+   */
+  productionIds?: string[];
 }
 
-type ProductDraft = { name: string; format: Format; price: string; description: string };
+type ProductDraft = {
+  name: string;
+  format: Format;
+  price: string;
+  description: string;
+  productionIds: string[];
+};
 
 function ProductPhoto({
   product,
@@ -2764,6 +3922,7 @@ function ProductPhoto({
  * editing here never touches order history — see sprints/01).
  */
 function CatalogueCard() {
+  const { computed } = useErp();
   const [products, setProducts] = useState<Product[]>([]);
   const [drafts, setDrafts] = useState<Record<string, ProductDraft>>({});
   const [uploadingId, setUploadingId] = useState<string | null>(null);
@@ -2785,6 +3944,7 @@ function CatalogueCard() {
                 format: p.format,
                 price: String(p.price),
                 description: p.description ?? "",
+                productionIds: p.productionIds ?? [],
               };
           }
           return next;
@@ -2800,6 +3960,7 @@ function CatalogueCard() {
       format: p.format,
       price: String(p.price),
       description: p.description ?? "",
+      productionIds: p.productionIds ?? [],
     };
 
   const setDraft = (id: string, patch: Partial<ProductDraft>) =>
@@ -2812,6 +3973,7 @@ function CatalogueCard() {
       format: draft.format,
       price: n(draft.price),
       description: draft.description.trim(),
+      productionIds: draft.productionIds,
     })
       .then(() => toast.success("Produit enregistré."))
       .catch((err) => toast.error(`Enregistrement impossible : ${err.message}`));
@@ -2907,6 +4069,26 @@ function CatalogueCard() {
                     className="w-1/2 rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground"
                   />
                 </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Stock disponible :{" "}
+                  <span className="font-semibold text-foreground">
+                    {computed.stockPF.find((s) => s.format === p.format)?.stock ?? 0} bouteilles
+                  </span>{" "}
+                  <span className="text-muted-foreground/70">
+                    (libéré par le contrôle qualité − ventes, format {p.format})
+                  </span>
+                </p>
+                <label className="block text-[11px] font-medium text-muted-foreground">
+                  Lots de production liés (optionnel)
+                  <MultiSelectCombobox
+                    options={computed.production.map((r) => ({
+                      value: r.id,
+                      label: `${r.lot} — ${r.date}`,
+                    }))}
+                    value={draft.productionIds}
+                    onChange={(ids) => setDraft(p.id, { productionIds: ids })}
+                  />
+                </label>
                 <textarea
                   value={draft.description}
                   onChange={(e) => setDraft(p.id, { description: e.target.value })}
@@ -2915,20 +4097,27 @@ function CatalogueCard() {
                   className="w-full resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/70"
                 />
                 <div className="flex items-center justify-between gap-2 pt-1">
-                  <button
-                    onClick={() => toggleActive(p)}
+                  <ConfirmButton
+                    onConfirm={() => toggleActive(p)}
+                    ariaLabel={p.active ? "Marquer inactif" : "Marquer actif"}
+                    confirmAriaLabel="Confirmer le changement de statut"
                     className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
                       p.active ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
                     }`}
+                    confirmClassName="rounded-full bg-warning/20 px-2.5 py-1 text-[11px] font-semibold text-foreground"
                   >
                     {p.active ? "Actif" : "Inactif"}
-                  </button>
-                  <button
-                    onClick={() => saveProduct(p)}
+                  </ConfirmButton>
+                  <ConfirmButton
+                    onConfirm={() => saveProduct(p)}
+                    confirmLabel="Confirmer ?"
+                    ariaLabel="Enregistrer"
+                    confirmAriaLabel="Confirmer l'enregistrement"
                     className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+                    confirmClassName="rounded-lg bg-destructive px-3 py-1.5 text-xs font-semibold text-destructive-foreground"
                   >
                     Enregistrer
-                  </button>
+                  </ConfirmButton>
                 </div>
               </div>
             </div>
@@ -2982,40 +4171,34 @@ interface StorefrontOrder {
  * write idempotent if it's ever retried.
  */
 
-interface Promo {
-  active: boolean;
+interface Promotion {
+  id: string;
   headline: string;
   description: string;
   productId: string;
   startDate: string;
   endDate: string;
+  active: boolean;
 }
 
-const EMPTY_PROMO: Promo = {
-  active: false,
-  headline: "",
-  description: "",
-  productId: "",
-  startDate: "",
-  endDate: "",
-};
-
 /**
- * Single active-or-not promo (sprint 06) — a `config/promo` singleton,
- * mirroring the existing `config/parametres` pattern. Deliberately no
- * rotation/scheduling queue: v1 ships with exactly one promo, matching
- * how a small operation actually runs a promotion.
+ * Real collection (sprint 32) — replaces the old `config/promo` singleton,
+ * which silently overwrote itself on every save with no history and never
+ * showed up as a "record" anywhere. Only one promotion is meant to be
+ * `active` (diffusée) at a time — the storefront banner picks whichever
+ * active one is currently inside its date window — so activating one here
+ * auto-deactivates the others.
  */
-function PromoCard() {
-  const [promo, setPromo] = useState<Promo>(EMPTY_PROMO);
+function PromotionsCard() {
+  const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [products, setProducts] = useState<{ id: string; name: string }[]>([]);
-  const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState<Promotion | null>(null);
 
   useEffect(() => {
     return onSnapshot(
-      doc(db, "config", "promo"),
-      (snap) => setPromo(snap.exists() ? { ...EMPTY_PROMO, ...snap.data() } : EMPTY_PROMO),
-      (err) => toast.error(`Synchronisation "promo" impossible : ${err.message}`),
+      query(collection(db, "promotions"), orderBy("startDate", "desc")),
+      (snap) => setPromotions(snap.docs.map((d) => d.data() as Promotion)),
+      (err) => toast.error(`Synchronisation "promotions" impossible : ${err.message}`),
     );
   }, []);
 
@@ -3025,81 +4208,178 @@ function PromoCard() {
     });
   }, []);
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      await setDoc(doc(db, "config", "promo"), promo);
-      toast.success("Promotion enregistrée.");
-    } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? `Enregistrement impossible : ${err.message}`
-          : "Enregistrement impossible.",
-      );
-    } finally {
-      setSaving(false);
-    }
+  const productOptions = [
+    { value: "", label: "Aucun produit lié" },
+    ...products.map((p) => ({ value: p.id, label: p.name })),
+  ];
+  const productName = (id: string) => products.find((p) => p.id === id)?.name ?? "—";
+
+  const today = new Date().toISOString().slice(0, 10);
+  const lifecycle = (p: Promotion): "Terminée" | "À venir" | "En cours" =>
+    p.endDate && today > p.endDate
+      ? "Terminée"
+      : p.startDate && today < p.startDate
+        ? "À venir"
+        : "En cours";
+
+  const deactivateOthers = (exceptId: string) =>
+    Promise.all(
+      promotions
+        .filter((p) => p.active && p.id !== exceptId)
+        .map((p) => updateDoc(doc(db, "promotions", p.id), { active: false })),
+    );
+
+  const createPromotion = (v: Record<string, string>) => {
+    const id = newId("PROMO");
+    const active = v.active === "Oui";
+    const write = () =>
+      setDoc(doc(db, "promotions", id), {
+        id,
+        headline: v.headline,
+        description: v.description,
+        productId: v.productId,
+        startDate: v.startDate,
+        endDate: v.endDate,
+        active,
+      } satisfies Promotion).catch((err) => toast.error(`Création impossible : ${err.message}`));
+    if (active) deactivateOthers(id).then(write);
+    else write();
   };
 
   return (
-    <Card title="Promotion boutique">
-      <div className="space-y-3">
-        <label className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <input
-            type="checkbox"
-            checked={promo.active}
-            onChange={(e) => setPromo((p) => ({ ...p, active: e.target.checked }))}
-            className="h-4 w-4 rounded border-border"
-          />
-          Promotion active
-        </label>
-        <input
-          value={promo.headline}
-          onChange={(e) => setPromo((p) => ({ ...p, headline: e.target.value }))}
-          placeholder="Titre (ex. -10% sur les bouteilles 500 ml)"
-          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+    <Card
+      title="Promotions"
+      action={
+        <EntryForm
+          submitLabel="Nouvelle promotion"
+          fields={[
+            { name: "headline", label: "Titre" },
+            { name: "description", label: "Description" },
+            {
+              name: "productId",
+              label: "Produit lié",
+              type: "select",
+              selectOptions: productOptions,
+            },
+            { name: "startDate", label: "Début", type: "date" },
+            { name: "endDate", label: "Fin", type: "date" },
+            {
+              name: "active",
+              label: "Diffusée sur la boutique",
+              type: "select",
+              options: ["Oui", "Non"],
+              default: "Oui",
+            },
+          ]}
+          onSubmit={createPromotion}
         />
-        <textarea
-          value={promo.description}
-          onChange={(e) => setPromo((p) => ({ ...p, description: e.target.value }))}
-          placeholder="Description (optionnel)"
-          rows={2}
-          className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+      }
+    >
+      <Table
+        onRowClick={(i) => setSelected(promotions[i])}
+        headers={["Titre", "Produit", "Début", "Fin", "Diffusée", "Statut", ""]}
+        rows={promotions.map((p) => [
+          p.headline || "—",
+          productName(p.productId),
+          p.startDate || "—",
+          p.endDate || "—",
+          p.active ? "Oui" : "Non",
+          lifecycle(p),
+          <DeleteButton
+            onClick={(e) => {
+              e.stopPropagation();
+              deleteDoc(doc(db, "promotions", p.id)).catch((err) =>
+                toast.error(`Suppression impossible : ${err.message}`),
+              );
+            }}
+          />,
+        ])}
+      />
+      {promotions.length === 0 && (
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          Aucune promotion. Ajoutez la première avec « Nouvelle promotion ».
+        </p>
+      )}
+      {selected && (
+        <RecordDetailModal
+          title={selected.headline || "Promotion"}
+          subtitle={`${selected.startDate || "—"} → ${selected.endDate || "—"}`}
+          onClose={() => setSelected(null)}
+          onSave={async (patch) => {
+            const finalPatch: Record<string, unknown> = { ...patch };
+            if (patch.active === "Oui" || patch.active === "Non") {
+              const nextActive = patch.active === "Oui";
+              finalPatch.active = nextActive;
+              if (nextActive) await deactivateOthers(selected.id);
+            }
+            updateDoc(doc(db, "promotions", selected.id), finalPatch).catch((err) =>
+              toast.error(`Enregistrement impossible : ${err.message}`),
+            );
+            setSelected(null);
+          }}
+          onDelete={() => {
+            deleteDoc(doc(db, "promotions", selected.id)).catch((err) =>
+              toast.error(`Suppression impossible : ${err.message}`),
+            );
+            setSelected(null);
+          }}
+          fields={[
+            {
+              label: "Titre",
+              value: selected.headline || "—",
+              description: "Titre affiché sur le bandeau promo de la boutique partenaire.",
+              edit: { key: "headline", type: "text", value: selected.headline },
+            },
+            {
+              label: "Description",
+              value: selected.description || "—",
+              description: "Texte secondaire optionnel affiché sous le titre.",
+              edit: { key: "description", type: "text", value: selected.description },
+            },
+            {
+              label: "Produit lié",
+              value: productName(selected.productId),
+              description: "Un clic sur le bandeau ouvre cette fiche produit dans la boutique.",
+              edit: {
+                key: "productId",
+                type: "select",
+                selectOptions: productOptions,
+                value: selected.productId,
+              },
+            },
+            {
+              label: "Début",
+              value: selected.startDate || "—",
+              description: "Première date où cette promotion apparaît comme « En cours ».",
+              edit: { key: "startDate", type: "date", value: selected.startDate },
+            },
+            {
+              label: "Fin",
+              value: selected.endDate || "—",
+              description: "Dernière date où cette promotion apparaît comme « En cours ».",
+              edit: { key: "endDate", type: "date", value: selected.endDate },
+            },
+            {
+              label: "Diffusée sur la boutique",
+              value: selected.active ? "Oui" : "Non",
+              description:
+                "Une seule promotion diffusée à la fois — en activer une désactive automatiquement les autres.",
+              edit: {
+                key: "active",
+                type: "select",
+                options: ["Oui", "Non"],
+                value: selected.active ? "Oui" : "Non",
+              },
+            },
+            {
+              label: "Statut",
+              value: lifecycle(selected),
+              description:
+                "Calculé automatiquement à partir des dates de début/fin par rapport à aujourd'hui.",
+            },
+          ]}
         />
-        <div className="grid gap-3 sm:grid-cols-3">
-          <select
-            value={promo.productId}
-            onChange={(e) => setPromo((p) => ({ ...p, productId: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          >
-            <option value="">Aucun produit lié</option>
-            {products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <input
-            type="date"
-            value={promo.startDate}
-            onChange={(e) => setPromo((p) => ({ ...p, startDate: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          />
-          <input
-            type="date"
-            value={promo.endDate}
-            onChange={(e) => setPromo((p) => ({ ...p, endDate: e.target.value }))}
-            className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
-          />
-        </div>
-        <button
-          onClick={save}
-          disabled={saving}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60"
-        >
-          {saving ? "Enregistrement…" : "Enregistrer"}
-        </button>
-      </div>
+      )}
     </Card>
   );
 }
@@ -3108,6 +4388,13 @@ function OrdersCard() {
   const [orders, setOrders] = useState<StorefrontOrder[]>([]);
   const [confirmDates, setConfirmDates] = useState<Record<string, string>>({});
   const [selectedOrder, setSelectedOrder] = useState<StorefrontOrder | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(
+      query(collection(db, "tasks"), where("stage", "in", ["order-confirm", "order-fulfill"])),
+      (snap) => setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
@@ -3121,54 +4408,50 @@ function OrdersCard() {
     );
   }, []);
 
+  // Sprint 08, Steps C/D: confirm/fulfil/confirmed-cancel now go through the
+  // trusted `/api/inventory/*` routes — they reserve/deduct real finished-
+  // product stock, which a direct client write can no longer prove safe
+  // (see automation-engine.md's "Trusted write boundary"). Cancelling a
+  // still-`pending` order is unchanged: nothing is reserved yet, so a
+  // direct status write stays safe and simple (same carve-out the approved
+  // architecture gives partners cancelling their own pending order).
   const setStatus = (id: string, status: StorefrontOrder["status"]) =>
     updateDoc(doc(db, "orders", id), { status }).catch((err) =>
       toast.error(`Mise à jour de la commande impossible : ${err.message}`),
     );
 
-  const confirmWithDeliveryDate = (id: string) =>
-    updateDoc(doc(db, "orders", id), {
-      status: "confirmed",
-      ...(confirmDates[id] ? { deliveryDate: confirmDates[id] } : {}),
-    }).catch((err) => toast.error(`Mise à jour de la commande impossible : ${err.message}`));
-
-  const fulfillAndConvert = async (order: StorefrontOrder) => {
-    const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), {
-      status: "fulfilled",
-      fulfilledAt: new Date().toISOString(),
-    });
-    const base = `CMD-${order.id.slice(-6).toUpperCase()}`;
-    order.items.forEach((item, idx) => {
-      const numero = order.items.length > 1 ? `${base}-${idx + 1}` : base;
-      batch.set(doc(db, "ventes", `VTE-ORD-${order.id}-${idx}`), {
-        id: `VTE-ORD-${order.id}-${idx}`,
-        numero,
-        date: order.createdAt.slice(0, 10),
-        idClient: order.partnerId,
-        client: order.partnerName,
-        canal: "Grossiste" as Canal,
-        format: (FORMATS.includes(item.format as Format) ? item.format : "500 ml") as Format,
-        quantite: item.quantity,
-        prixUnitaire: item.unitPrice,
-        remise: 0,
-        // Mobile money is already settled by checkout time (payment.status
-        // "completed"); cash on delivery is collected the moment the order
-        // is marked "livrée" — either way the full line amount is encaissé
-        // here. Orders without a `payment` field predate this flow, so we
-        // can't assume cash changed hands and leave encaisse at 0.
-        encaisse: order.payment ? item.quantity * item.unitPrice : 0,
-        commerciale: "Boutique partenaire",
-      });
-    });
-    try {
-      await batch.commit();
-      toast.success("Commande livrée, ventes enregistrées.");
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? `Conversion impossible : ${err.message}` : "Conversion impossible.",
+  const confirmWithDeliveryDate = async (id: string) => {
+    const outcome = await confirmOrderTrusted(id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    if (confirmDates[id]) {
+      await updateDoc(doc(db, "orders", id), { deliveryDate: confirmDates[id] }).catch((err) =>
+        toast.error(
+          `Commande confirmée, mais la date de livraison n'a pas pu être enregistrée : ${err.message}`,
+        ),
       );
     }
+    toast.success("Commande confirmée, stock réservé.");
+  };
+
+  const cancelConfirmedOrder = async (id: string) => {
+    const outcome = await cancelOrderTrusted(id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    toast.success("Commande annulée, réservation libérée.");
+  };
+
+  const fulfillAndConvert = async (order: StorefrontOrder) => {
+    const outcome = await fulfilOrderTrusted(order.id);
+    if (outcome.status !== "success") {
+      toast.error(orderReservationErrorMessage(outcome));
+      return;
+    }
+    toast.success("Commande livrée, ventes enregistrées.");
   };
 
   return (
@@ -3224,29 +4507,38 @@ function OrdersCard() {
                   >
                     Confirmer
                   </button>
-                  <button
-                    onClick={() => setStatus(o.id, "cancelled")}
+                  <ConfirmButton
+                    onConfirm={() => setStatus(o.id, "cancelled")}
+                    confirmLabel="Confirmer ?"
+                    ariaLabel="Annuler la commande"
+                    confirmAriaLabel="Confirmer l'annulation de la commande"
                     className="text-xs font-semibold text-destructive hover:underline"
                   >
                     Annuler
-                  </button>
+                  </ConfirmButton>
                 </div>
               </>
             )}
             {o.status === "confirmed" && (
               <div className="flex gap-3">
-                <button
-                  onClick={() => fulfillAndConvert(o)}
+                <ConfirmButton
+                  onConfirm={() => fulfillAndConvert(o)}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Marquer livrée"
+                  confirmAriaLabel="Confirmer la livraison"
                   className="text-xs font-semibold text-success hover:underline"
                 >
                   Marquer livrée
-                </button>
-                <button
-                  onClick={() => setStatus(o.id, "cancelled")}
+                </ConfirmButton>
+                <ConfirmButton
+                  onConfirm={() => cancelConfirmedOrder(o.id)}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Annuler la commande"
+                  confirmAriaLabel="Confirmer l'annulation de la commande"
                   className="text-xs font-semibold text-destructive hover:underline"
                 >
                   Annuler
-                </button>
+                </ConfirmButton>
               </div>
             )}
           </div>,
@@ -3317,6 +4609,17 @@ function OrdersCard() {
                   },
                 ]
               : []),
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedOrder.id);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description:
+                "Tâche de confirmation ou de livraison créée pour cette commande (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -3332,11 +4635,38 @@ function CommercialisationSection({
   onTabChange: (tab: string) => void;
 }) {
   const { state, computed, addRow, removeRow, fcPerUsd } = useErp();
+  const { requestDelete, cascadeModal } = useCascadeDelete();
   const { profile } = useAuth();
   const p = state.parametres;
   const [selectedVente, setSelectedVente] = useState<(typeof computed.ventes)[number] | null>(null);
   const [selectedCanal, setSelectedCanal] = useState<Canal | null>(null);
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const breakdowns = buildBreakdowns(computed);
+
+  // Promotion → commercialisation: a vente reads as "sous promotion" when the
+  // currently-diffusée promotion's linked catalogue product shares its
+  // format and the vente falls inside the promo's date window (if set).
+  const [activePromo, setActivePromo] = useState<Promotion | null>(null);
+  const [promoProducts, setPromoProducts] = useState<{ id: string; format: Format }[]>([]);
+  useEffect(() => {
+    return onSnapshot(collection(db, "promotions"), (snap) =>
+      setActivePromo(snap.docs.map((d) => d.data() as Promotion).find((p) => p.active) ?? null),
+    );
+  }, []);
+  useEffect(() => {
+    return onSnapshot(collection(db, "products"), (snap) =>
+      setPromoProducts(snap.docs.map((d) => d.data() as { id: string; format: Format })),
+    );
+  }, []);
+  const promoFormat = activePromo
+    ? promoProducts.find((pr) => pr.id === activePromo.productId)?.format
+    : undefined;
+  const isSousPromotion = (v: { format: Format; date: string }) =>
+    !!promoFormat &&
+    v.format === promoFormat &&
+    (!activePromo?.startDate || v.date >= activePromo.startDate) &&
+    (!activePromo?.endDate || v.date <= activePromo.endDate);
+
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -3399,7 +4729,19 @@ function CommercialisationSection({
                   fields={[
                     { name: "numero", label: "N° vente", default: "V-001" },
                     { name: "date", label: "Date", type: "date", default: "2026-07-20" },
-                    { name: "client", label: "Client" },
+                    {
+                      name: "idClient",
+                      label: "Client",
+                      type: "select",
+                      required: true,
+                      // An empty <select> with zero <option>s looks broken
+                      // rather than blocked — show an explanatory (still
+                      // unselectable) placeholder instead when there's
+                      // nothing real to pick from yet.
+                      selectOptions: state.clients.length
+                        ? state.clients.map((c) => ({ value: c.id, label: c.nom }))
+                        : [{ value: "", label: "— Aucun client, créez-en un d'abord —" }],
+                    },
                     {
                       name: "canal",
                       label: "Canal",
@@ -3423,14 +4765,24 @@ function CommercialisationSection({
                     },
                     { name: "remise", label: "Remise FC", type: "number", default: 0 },
                     { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
+                    {
+                      name: "productionIds",
+                      label: "Lots sources",
+                      type: "multiselect",
+                      required: true,
+                      multiOptions: computed.production.map((r) => ({
+                        value: r.id,
+                        label: `${r.lot} — ${r.date}`,
+                      })),
+                    },
                   ]}
                   onSubmit={(v) =>
                     addRow("ventes", {
                       id: newId("VTE"),
                       numero: v.numero,
                       date: v.date,
-                      idClient: v.client,
-                      client: v.client,
+                      idClient: v.idClient,
+                      client: state.clients.find((c) => c.id === v.idClient)?.nom ?? "",
                       canal: v.canal as Canal,
                       format: v.format as Format,
                       quantite: n(v.quantite),
@@ -3441,12 +4793,20 @@ function CommercialisationSection({
                       // matching note in ProductionSection.
                       commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
                       ...(profile?.uid ? { staffUid: profile.uid } : {}),
+                      productionIds: v.productionIds ? v.productionIds.split(",") : [],
                     })
                   }
                 />
               </div>
             }
           >
+            {state.clients.length === 0 && (
+              <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+                <strong>Aucun client enregistré.</strong> Chaque vente doit être rattachée à un
+                client réel — créez-en un d'abord dans le Registre clients (plus bas sur cette
+                page), sinon « Nouvelle vente » restera bloquée sur « Client requis. ».
+              </p>
+            )}
             <Table
               onRowClick={(i) => setSelectedVente(computed.ventes[i])}
               headers={[
@@ -3461,6 +4821,7 @@ function CommercialisationSection({
                 "Encaissé",
                 "Solde dû",
                 "Statut",
+                "Promo",
                 "",
               ]}
               rows={computed.ventes.map((v) => [
@@ -3475,6 +4836,11 @@ function CommercialisationSection({
                 fcFormat(v.encaisse),
                 fcFormat(v.soldeDu),
                 v.statutPaiement,
+                isSousPromotion(v) ? (
+                  <span className="badge-status bg-warning/20 text-warning">Sous promo</span>
+                ) : (
+                  "—"
+                ),
                 <DeleteButton
                   onClick={(e) => {
                     e.stopPropagation();
@@ -3491,7 +4857,11 @@ function CommercialisationSection({
               subtitle={selectedVente.date}
               onClose={() => setSelectedVente(null)}
               onSave={(patch) => {
-                updateDoc(doc(db, "ventes", selectedVente.id), patch);
+                const finalPatch = { ...patch };
+                if (typeof patch.idClient === "string") {
+                  finalPatch.client = state.clients.find((c) => c.id === patch.idClient)?.nom ?? "";
+                }
+                updateDoc(doc(db, "ventes", selectedVente.id), finalPatch);
                 setSelectedVente(null);
               }}
               onDelete={() => {
@@ -3514,10 +4884,15 @@ function CommercialisationSection({
                 },
                 {
                   label: "Client",
-                  value: selectedVente.client,
+                  value: selectedVente.client || "—",
                   description:
-                    "Nom du client — texte libre, non relié au Registre clients interne.",
-                  edit: { key: "client", type: "text", value: selectedVente.client },
+                    "Client réel du Registre clients (sprint 32) — sert au calcul des clients actifs.",
+                  edit: {
+                    key: "idClient",
+                    type: "select",
+                    selectOptions: state.clients.map((c) => ({ value: c.id, label: c.nom })),
+                    value: selectedVente.idClient,
+                  },
                 },
                 {
                   label: "Canal",
@@ -3571,6 +4946,22 @@ function CommercialisationSection({
                   edit: { key: "encaisse", type: "number", value: String(selectedVente.encaisse) },
                 },
                 {
+                  label: "Promotion",
+                  value: isSousPromotion(selectedVente) ? "Sous promo" : "—",
+                  description:
+                    "Calculé automatiquement : la promotion active (Paramètres ERP) s'applique quand son format et sa fenêtre de dates couvrent cette vente.",
+                },
+                {
+                  label: "Lots sources",
+                  value: selectedVente.productionIds?.length
+                    ? selectedVente.productionIds
+                        .map((id) => computed.production.find((r) => r.id === id)?.lot ?? id)
+                        .join(", ")
+                    : "—",
+                  description:
+                    "Lot(s) de production ayant fourni les bouteilles vendues, sélectionnés à la saisie — sert à remonter la chaîne production → vente.",
+                },
+                {
                   label: "Commerciale",
                   value: selectedVente.commerciale,
                   description:
@@ -3590,6 +4981,143 @@ function CommercialisationSection({
                   label: "Statut paiement",
                   value: selectedVente.statutPaiement,
                   description: "Calculé automatiquement à partir du solde dû.",
+                },
+              ]}
+            />
+          )}
+
+          <Card
+            title="Registre clients"
+            action={
+              <EntryForm
+                submitLabel="Nouveau client"
+                fields={[
+                  { name: "nom", label: "Nom" },
+                  {
+                    name: "categorie",
+                    label: "Canal",
+                    type: "select",
+                    options: CANAUX,
+                    default: "Restaurant",
+                  },
+                  { name: "contact", label: "Contact" },
+                  { name: "zone", label: "Zone" },
+                  {
+                    name: "premierContact",
+                    label: "Premier contact",
+                    type: "date",
+                    default: "2026-07-20",
+                  },
+                  {
+                    name: "statut",
+                    label: "Statut",
+                    type: "select",
+                    options: ["Actif", "Inactif", "Prospect"],
+                    default: "Actif",
+                  },
+                ]}
+                onSubmit={(v) =>
+                  addRow("clients", {
+                    id: newId("CLI"),
+                    nom: v.nom,
+                    categorie: v.categorie as Canal,
+                    contact: v.contact,
+                    zone: v.zone,
+                    premierContact: v.premierContact,
+                    statut: v.statut,
+                  })
+                }
+              />
+            }
+          >
+            <Table
+              onRowClick={(i) => setSelectedClient(state.clients[i])}
+              headers={["Nom", "Canal", "Contact", "Zone", "Premier contact", "Statut", ""]}
+              rows={state.clients.map((c) => [
+                c.nom,
+                c.categorie,
+                c.contact || "—",
+                c.zone || "—",
+                c.premierContact || "—",
+                c.statut || "—",
+                <DeleteButton
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    requestDelete("clients", c.id);
+                  }}
+                />,
+              ])}
+            />
+            {state.clients.length === 0 && (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Aucun client. Ajoutez le premier avec « Nouveau client », ou importez un fichier.
+              </p>
+            )}
+          </Card>
+
+          {selectedClient && (
+            <RecordDetailModal
+              title={selectedClient.nom}
+              onClose={() => setSelectedClient(null)}
+              onSave={(patch) => {
+                updateDoc(doc(db, "clients", selectedClient.id), patch);
+                setSelectedClient(null);
+              }}
+              onDelete={() => {
+                requestDelete("clients", selectedClient.id);
+                setSelectedClient(null);
+              }}
+              fields={[
+                {
+                  label: "Nom",
+                  value: selectedClient.nom,
+                  description:
+                    "Nom du client — c'est ce nom qui apparaît partout où une vente le référence.",
+                  edit: { key: "nom", type: "text", value: selectedClient.nom },
+                },
+                {
+                  label: "Canal",
+                  value: selectedClient.categorie,
+                  description: "Circuit de vente habituel de ce client.",
+                  edit: {
+                    key: "categorie",
+                    type: "select",
+                    options: CANAUX,
+                    value: selectedClient.categorie,
+                  },
+                },
+                {
+                  label: "Contact",
+                  value: selectedClient.contact || "—",
+                  description: "Téléphone ou autre moyen de contact.",
+                  edit: { key: "contact", type: "text", value: selectedClient.contact },
+                },
+                {
+                  label: "Zone",
+                  value: selectedClient.zone || "—",
+                  description: "Zone géographique du client.",
+                  edit: { key: "zone", type: "text", value: selectedClient.zone },
+                },
+                {
+                  label: "Premier contact",
+                  value: selectedClient.premierContact || "—",
+                  description: "Date du premier contact commercial.",
+                  edit: {
+                    key: "premierContact",
+                    type: "date",
+                    value: selectedClient.premierContact,
+                  },
+                },
+                {
+                  label: "Statut",
+                  value: selectedClient.statut || "—",
+                  description: "État actuel de la relation commerciale.",
+                  edit: {
+                    key: "statut",
+                    type: "select",
+                    options: ["Actif", "Inactif", "Prospect"],
+                    value: selectedClient.statut,
+                  },
                 },
               ]}
             />
@@ -3664,6 +5192,7 @@ function CommercialisationSection({
       </Tabs>
 
       <ExportBar section="commercialisation" />
+      {cascadeModal}
     </div>
   );
 }
@@ -3677,7 +5206,7 @@ function PromotionSection() {
         responsable="Chargée de Commercialisation"
         subtitle="Bandeau promo affiché sur la boutique partenaire."
       />
-      <PromoCard />
+      <PromotionsCard />
     </div>
   );
 }
@@ -3871,7 +5400,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           unit="bt"
           secondary={`Valeur ${fcWithUsd(valeurStockFinis)}`}
           pct={null}
-          description="Bouteilles produites non encore vendues (produites − vendues)."
+          description="Bouteilles libérées par le contrôle qualité, non encore vendues — un lot en attente de contrôle, en quarantaine ou rejeté n'y contribue jamais."
           breakdown={breakdowns.stockActuel}
           expanded={expandedStage === "stock"}
           onToggle={() => toggle("stock")}
@@ -4464,6 +5993,14 @@ function InviteCard() {
   const [menus, setMenus] = useState<string[]>([]);
   const [allMenus, setAllMenus] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+
+  useEffect(() => {
+    if (profile?.role !== "admin") return;
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "invite")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, [profile?.role]);
 
   useEffect(() => {
     if (profile?.role !== "admin") return;
@@ -4502,6 +6039,12 @@ function InviteCard() {
         createdBy: profile.uid,
         createdAt: new Date().toISOString(),
       });
+      createTask(
+        "invite",
+        `Confirmer que ${email.trim()} a rejoint l'équipe`,
+        email.trim(),
+        inviteRef.id,
+      );
       setEmail("");
       setMenus([]);
       setAllMenus(false);
@@ -4701,6 +6244,16 @@ function InviteCard() {
                 ? "Cette invitation a déjà été utilisée pour créer un compte — elle ne peut plus être révoquée ni réutilisée."
                 : "Pas encore utilisée — peut être révoquée (supprimée) ci-dessous si elle n'est plus nécessaire.",
             },
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedInvite.id);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description: "Tâche de suivi créée à l'envoi de l'invitation (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -4731,6 +6284,12 @@ function BoutiquesCard() {
   const [boutiques, setBoutiques] = useState<Boutique[]>([]);
   const [unverifiedOnly, setUnverifiedOnly] = useState(false);
   const [selectedBoutique, setSelectedBoutique] = useState<Boutique | null>(null);
+  const [linkedTasks, setLinkedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    return onSnapshot(query(collection(db, "tasks"), where("stage", "==", "kyc")), (snap) =>
+      setLinkedTasks(snap.docs.map((d) => d.data() as Task)),
+    );
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "partner"));
@@ -4789,17 +6348,17 @@ function BoutiquesCard() {
           </div>,
           b.address ? `${b.address.quartier}, ${b.address.commune}, ${b.address.ville}` : "—",
           b.idNumber || "—",
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleVerified(b);
-            }}
+          <ConfirmButton
+            onConfirm={() => toggleVerified(b)}
+            ariaLabel={b.verified ? "Marquer non vérifié" : "Marquer vérifié"}
+            confirmAriaLabel="Confirmer le changement de statut"
             className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
               b.verified ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"
             }`}
+            confirmClassName="rounded-full bg-warning/20 px-2.5 py-1 text-[11px] font-semibold text-foreground"
           >
             {b.verified ? "Vérifié" : "Non vérifié"}
-          </button>,
+          </ConfirmButton>,
         ])}
       />
 
@@ -4856,6 +6415,16 @@ function BoutiquesCard() {
               description:
                 "Bascule via le bouton du tableau, pas ici — confirmation informationnelle par téléphone (sprint 16), ne bloque jamais la commande.",
             },
+            {
+              label: "Tâche liée",
+              value: (() => {
+                const t = linkedTasks.find((x) => x.sourceId === selectedBoutique.uid);
+                return t
+                  ? `${t.title} — ${t.status === "done" ? "Terminée" : "En attente"}`
+                  : "Aucune";
+              })(),
+              description: "Tâche de vérification KYC créée à l'inscription (onglet Tâches).",
+            },
           ]}
         />
       )}
@@ -4880,6 +6449,10 @@ interface StaffMember {
 function StaffCard() {
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [selectedStaff, setSelectedStaff] = useState<StaffMember | null>(null);
+  // Poste changes affect section access (rbac.md) — a bare onChange write
+  // was one accidental click away from re-scoping someone's account, so a
+  // change is now staged here and only committed via the "Appliquer" confirm.
+  const [pendingPoste, setPendingPoste] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "staff"));
@@ -4914,23 +6487,48 @@ function StaffCard() {
         onRowClick={(i) => setSelectedStaff(staff[i])}
         headers={["Nom", "E-mail", "Poste"]}
         empty="Aucun compte staff pour l'instant."
-        rows={staff.map((s) => [
-          s.displayName,
-          s.email,
-          <select
-            value={s.poste ?? ""}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => setPosteFor(s, e.target.value)}
-            className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
-          >
-            <option value="">— Non assigné (accès complet) —</option>
-            {STAFF_POSTES.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.value}
-              </option>
-            ))}
-          </select>,
-        ])}
+        rows={staff.map((s) => {
+          const current = s.poste ?? "";
+          const pending = pendingPoste[s.uid];
+          const dirty = pending !== undefined && pending !== current;
+          return [
+            s.displayName,
+            s.email,
+            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+              <select
+                value={pending ?? current}
+                onChange={(e) => setPendingPoste((p) => ({ ...p, [s.uid]: e.target.value }))}
+                className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground"
+              >
+                <option value="">— Non assigné (accès complet) —</option>
+                {STAFF_POSTES.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.value}
+                  </option>
+                ))}
+              </select>
+              {dirty && (
+                <ConfirmButton
+                  onConfirm={() => {
+                    setPosteFor(s, pending);
+                    setPendingPoste((p) => {
+                      const next = { ...p };
+                      delete next[s.uid];
+                      return next;
+                    });
+                  }}
+                  confirmLabel="Confirmer ?"
+                  ariaLabel="Appliquer le changement de poste"
+                  confirmAriaLabel="Confirmer le changement de poste"
+                  className="rounded-lg bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground"
+                  confirmClassName="rounded-lg bg-warning/20 px-2 py-1.5 text-xs font-semibold text-foreground"
+                >
+                  Appliquer
+                </ConfirmButton>
+              )}
+            </div>,
+          ];
+        })}
       />
 
       {selectedStaff && (

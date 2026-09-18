@@ -16,6 +16,16 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as StorefrontIndexRouteImport } from './routes/storefront/index'
 import { Route as StorefrontSignupRouteImport } from './routes/storefront/signup'
 import { Route as StorefrontProfileRouteImport } from './routes/storefront/profile'
+import { Route as ApiWebhooksMombongoRouteImport } from './routes/api/webhooks/mombongo'
+import { Route as ApiMombongoListingsRouteImport } from './routes/api/mombongo/listings'
+import { Route as ApiMombongoCreateOfferRouteImport } from './routes/api/mombongo/create-offer'
+import { Route as ApiMombongoCreateInvoiceRouteImport } from './routes/api/mombongo/create-invoice'
+import { Route as ApiMombongoCreateHarvestCheckoutRouteImport } from './routes/api/mombongo/create-harvest-checkout'
+import { Route as ApiMombongoCreateCheckoutRouteImport } from './routes/api/mombongo/create-checkout'
+import { Route as ApiInventoryQcReleaseRouteImport } from './routes/api/inventory/qc-release'
+import { Route as ApiInventoryFulfilOrderRouteImport } from './routes/api/inventory/fulfil-order'
+import { Route as ApiInventoryConfirmOrderRouteImport } from './routes/api/inventory/confirm-order'
+import { Route as ApiInventoryCancelOrderRouteImport } from './routes/api/inventory/cancel-order'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -52,6 +62,60 @@ const StorefrontProfileRoute = StorefrontProfileRouteImport.update({
   path: '/storefront/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiWebhooksMombongoRoute = ApiWebhooksMombongoRouteImport.update({
+  id: '/api/webhooks/mombongo',
+  path: '/api/webhooks/mombongo',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMombongoListingsRoute = ApiMombongoListingsRouteImport.update({
+  id: '/api/mombongo/listings',
+  path: '/api/mombongo/listings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMombongoCreateOfferRoute = ApiMombongoCreateOfferRouteImport.update({
+  id: '/api/mombongo/create-offer',
+  path: '/api/mombongo/create-offer',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMombongoCreateInvoiceRoute =
+  ApiMombongoCreateInvoiceRouteImport.update({
+    id: '/api/mombongo/create-invoice',
+    path: '/api/mombongo/create-invoice',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiMombongoCreateHarvestCheckoutRoute =
+  ApiMombongoCreateHarvestCheckoutRouteImport.update({
+    id: '/api/mombongo/create-harvest-checkout',
+    path: '/api/mombongo/create-harvest-checkout',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiMombongoCreateCheckoutRoute =
+  ApiMombongoCreateCheckoutRouteImport.update({
+    id: '/api/mombongo/create-checkout',
+    path: '/api/mombongo/create-checkout',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiInventoryQcReleaseRoute = ApiInventoryQcReleaseRouteImport.update({
+  id: '/api/inventory/qc-release',
+  path: '/api/inventory/qc-release',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiInventoryFulfilOrderRoute = ApiInventoryFulfilOrderRouteImport.update({
+  id: '/api/inventory/fulfil-order',
+  path: '/api/inventory/fulfil-order',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiInventoryConfirmOrderRoute =
+  ApiInventoryConfirmOrderRouteImport.update({
+    id: '/api/inventory/confirm-order',
+    path: '/api/inventory/confirm-order',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiInventoryCancelOrderRoute = ApiInventoryCancelOrderRouteImport.update({
+  id: '/api/inventory/cancel-order',
+  path: '/api/inventory/cancel-order',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +125,16 @@ export interface FileRoutesByFullPath {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
+  '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
+  '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
+  '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
+  '/api/mombongo/create-harvest-checkout': typeof ApiMombongoCreateHarvestCheckoutRoute
+  '/api/mombongo/create-invoice': typeof ApiMombongoCreateInvoiceRoute
+  '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
+  '/api/mombongo/listings': typeof ApiMombongoListingsRoute
+  '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +144,16 @@ export interface FileRoutesByTo {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront': typeof StorefrontIndexRoute
+  '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
+  '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
+  '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
+  '/api/mombongo/create-harvest-checkout': typeof ApiMombongoCreateHarvestCheckoutRoute
+  '/api/mombongo/create-invoice': typeof ApiMombongoCreateInvoiceRoute
+  '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
+  '/api/mombongo/listings': typeof ApiMombongoListingsRoute
+  '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +164,16 @@ export interface FileRoutesById {
   '/storefront/profile': typeof StorefrontProfileRoute
   '/storefront/signup': typeof StorefrontSignupRoute
   '/storefront/': typeof StorefrontIndexRoute
+  '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
+  '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
+  '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
+  '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
+  '/api/mombongo/create-harvest-checkout': typeof ApiMombongoCreateHarvestCheckoutRoute
+  '/api/mombongo/create-invoice': typeof ApiMombongoCreateInvoiceRoute
+  '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
+  '/api/mombongo/listings': typeof ApiMombongoListingsRoute
+  '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +185,16 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
+    | '/api/inventory/cancel-order'
+    | '/api/inventory/confirm-order'
+    | '/api/inventory/fulfil-order'
+    | '/api/inventory/qc-release'
+    | '/api/mombongo/create-checkout'
+    | '/api/mombongo/create-harvest-checkout'
+    | '/api/mombongo/create-invoice'
+    | '/api/mombongo/create-offer'
+    | '/api/mombongo/listings'
+    | '/api/webhooks/mombongo'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +204,16 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront'
+    | '/api/inventory/cancel-order'
+    | '/api/inventory/confirm-order'
+    | '/api/inventory/fulfil-order'
+    | '/api/inventory/qc-release'
+    | '/api/mombongo/create-checkout'
+    | '/api/mombongo/create-harvest-checkout'
+    | '/api/mombongo/create-invoice'
+    | '/api/mombongo/create-offer'
+    | '/api/mombongo/listings'
+    | '/api/webhooks/mombongo'
   id:
     | '__root__'
     | '/'
@@ -109,6 +223,16 @@ export interface FileRouteTypes {
     | '/storefront/profile'
     | '/storefront/signup'
     | '/storefront/'
+    | '/api/inventory/cancel-order'
+    | '/api/inventory/confirm-order'
+    | '/api/inventory/fulfil-order'
+    | '/api/inventory/qc-release'
+    | '/api/mombongo/create-checkout'
+    | '/api/mombongo/create-harvest-checkout'
+    | '/api/mombongo/create-invoice'
+    | '/api/mombongo/create-offer'
+    | '/api/mombongo/listings'
+    | '/api/webhooks/mombongo'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +243,16 @@ export interface RootRouteChildren {
   StorefrontProfileRoute: typeof StorefrontProfileRoute
   StorefrontSignupRoute: typeof StorefrontSignupRoute
   StorefrontIndexRoute: typeof StorefrontIndexRoute
+  ApiInventoryCancelOrderRoute: typeof ApiInventoryCancelOrderRoute
+  ApiInventoryConfirmOrderRoute: typeof ApiInventoryConfirmOrderRoute
+  ApiInventoryFulfilOrderRoute: typeof ApiInventoryFulfilOrderRoute
+  ApiInventoryQcReleaseRoute: typeof ApiInventoryQcReleaseRoute
+  ApiMombongoCreateCheckoutRoute: typeof ApiMombongoCreateCheckoutRoute
+  ApiMombongoCreateHarvestCheckoutRoute: typeof ApiMombongoCreateHarvestCheckoutRoute
+  ApiMombongoCreateInvoiceRoute: typeof ApiMombongoCreateInvoiceRoute
+  ApiMombongoCreateOfferRoute: typeof ApiMombongoCreateOfferRoute
+  ApiMombongoListingsRoute: typeof ApiMombongoListingsRoute
+  ApiWebhooksMombongoRoute: typeof ApiWebhooksMombongoRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +306,76 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof StorefrontProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/webhooks/mombongo': {
+      id: '/api/webhooks/mombongo'
+      path: '/api/webhooks/mombongo'
+      fullPath: '/api/webhooks/mombongo'
+      preLoaderRoute: typeof ApiWebhooksMombongoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/listings': {
+      id: '/api/mombongo/listings'
+      path: '/api/mombongo/listings'
+      fullPath: '/api/mombongo/listings'
+      preLoaderRoute: typeof ApiMombongoListingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/create-offer': {
+      id: '/api/mombongo/create-offer'
+      path: '/api/mombongo/create-offer'
+      fullPath: '/api/mombongo/create-offer'
+      preLoaderRoute: typeof ApiMombongoCreateOfferRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/create-invoice': {
+      id: '/api/mombongo/create-invoice'
+      path: '/api/mombongo/create-invoice'
+      fullPath: '/api/mombongo/create-invoice'
+      preLoaderRoute: typeof ApiMombongoCreateInvoiceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/create-harvest-checkout': {
+      id: '/api/mombongo/create-harvest-checkout'
+      path: '/api/mombongo/create-harvest-checkout'
+      fullPath: '/api/mombongo/create-harvest-checkout'
+      preLoaderRoute: typeof ApiMombongoCreateHarvestCheckoutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/create-checkout': {
+      id: '/api/mombongo/create-checkout'
+      path: '/api/mombongo/create-checkout'
+      fullPath: '/api/mombongo/create-checkout'
+      preLoaderRoute: typeof ApiMombongoCreateCheckoutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/inventory/qc-release': {
+      id: '/api/inventory/qc-release'
+      path: '/api/inventory/qc-release'
+      fullPath: '/api/inventory/qc-release'
+      preLoaderRoute: typeof ApiInventoryQcReleaseRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/inventory/fulfil-order': {
+      id: '/api/inventory/fulfil-order'
+      path: '/api/inventory/fulfil-order'
+      fullPath: '/api/inventory/fulfil-order'
+      preLoaderRoute: typeof ApiInventoryFulfilOrderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/inventory/confirm-order': {
+      id: '/api/inventory/confirm-order'
+      path: '/api/inventory/confirm-order'
+      fullPath: '/api/inventory/confirm-order'
+      preLoaderRoute: typeof ApiInventoryConfirmOrderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/inventory/cancel-order': {
+      id: '/api/inventory/cancel-order'
+      path: '/api/inventory/cancel-order'
+      fullPath: '/api/inventory/cancel-order'
+      preLoaderRoute: typeof ApiInventoryCancelOrderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +387,16 @@ const rootRouteChildren: RootRouteChildren = {
   StorefrontProfileRoute: StorefrontProfileRoute,
   StorefrontSignupRoute: StorefrontSignupRoute,
   StorefrontIndexRoute: StorefrontIndexRoute,
+  ApiInventoryCancelOrderRoute: ApiInventoryCancelOrderRoute,
+  ApiInventoryConfirmOrderRoute: ApiInventoryConfirmOrderRoute,
+  ApiInventoryFulfilOrderRoute: ApiInventoryFulfilOrderRoute,
+  ApiInventoryQcReleaseRoute: ApiInventoryQcReleaseRoute,
+  ApiMombongoCreateCheckoutRoute: ApiMombongoCreateCheckoutRoute,
+  ApiMombongoCreateHarvestCheckoutRoute: ApiMombongoCreateHarvestCheckoutRoute,
+  ApiMombongoCreateInvoiceRoute: ApiMombongoCreateInvoiceRoute,
+  ApiMombongoCreateOfferRoute: ApiMombongoCreateOfferRoute,
+  ApiMombongoListingsRoute: ApiMombongoListingsRoute,
+  ApiWebhooksMombongoRoute: ApiWebhooksMombongoRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

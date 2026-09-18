@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { LogOut, Minus, Plus, ShoppingBag, Truck, User } from "lucide-react";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/firebase/auth";
@@ -94,8 +94,12 @@ function Storefront() {
   }, []);
 
   useEffect(() => {
-    return onSnapshot(doc(db, "config", "promo"), (snap) => {
-      setPromo(snap.exists() ? (snap.data() as Promo) : null);
+    // Sprint 32: promotions are a real collection now (history, not a
+    // self-overwriting singleton) — the banner shows whichever one is
+    // currently flagged "diffusée" (at most one, enforced on the admin side).
+    return onSnapshot(collection(db, "promotions"), (snap) => {
+      const active = snap.docs.map((d) => d.data() as Promo).find((p) => p.active);
+      setPromo(active ?? null);
     });
   }, []);
 

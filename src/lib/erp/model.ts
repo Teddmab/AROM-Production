@@ -46,6 +46,22 @@ export interface Producteur {
   prixConvenu: number;
   statut: string;
   observations: string;
+  /**
+   * Evidence photo (MOB-04B), uploaded by the mobile app once an
+   * agent-created producer has synced — a Storage download URL under
+   * producteurs/{id}/, see AROM-Backend/storage.rules. Optional: absent on
+   * producers seeded or created from the web dashboard.
+   */
+  photoUrl?: string;
+  /**
+   * Audit trail (MOB-04B) for producers created from the field — the
+   * creating account's uid/poste and a creation timestamp, stamped by the
+   * mobile app, never client-editable beyond creation. Absent on producers
+   * seeded or created before this sprint.
+   */
+  createdByUid?: string;
+  createdByPoste?: string;
+  createdAt?: string;
 }
 
 export interface Approvisionnement {
@@ -62,6 +78,13 @@ export interface Approvisionnement {
   transport: number;
   autresFrais: number;
   qualite: Qualite;
+  /**
+   * Evidence photo (MOB-04), uploaded by the mobile app once a reception
+   * has synced — a Storage download URL under approvisionnements/{id}/,
+   * see AROM-Backend/storage.rules. Optional: older records and any
+   * reception saved without a photo have none.
+   */
+  photoUrl?: string;
 }
 
 export interface Production {
@@ -78,6 +101,12 @@ export interface Production {
   /** uid of the staff member who logged this lot — powers per-person bonus tracking (sprint 17). */
   staffUid?: string;
   statut: string;
+  /**
+   * Réceptions (`Approvisionnement.id`) ayant alimenté ce lot — traçabilité
+   * amont, requise à la saisie depuis le sprint 30. Optionnel dans le type
+   * car les lots créés avant ce sprint n'ont pas ce champ.
+   */
+  approvisionnementIds?: string[];
 }
 
 export interface MouvementStockMP {
@@ -90,6 +119,17 @@ export interface MouvementStockMP {
   sortie: number;
   coutUnitaire: number;
   observation: string;
+  /**
+   * Réceptions (`Approvisionnement.id`) à l'origine d'un mouvement d'entrée —
+   * requis à la saisie pour type "Entrée" depuis le sprint 31. Optionnel
+   * dans le type car les mouvements créés avant ce sprint n'ont pas ce champ.
+   */
+  approvisionnementIds?: string[];
+  /**
+   * Lots de production (`Production.id`) alimentés par un mouvement de
+   * sortie — requis à la saisie pour type "Sortie" depuis le sprint 31.
+   */
+  productionIds?: string[];
 }
 
 export interface Client {
@@ -117,6 +157,13 @@ export interface Vente {
   commerciale: string;
   /** uid of the staff member who logged this sale — powers per-person bonus tracking (sprint 17). */
   staffUid?: string;
+  /**
+   * Lots de production (`Production.id`) ayant fourni les bouteilles
+   * vendues — traçabilité amont, requise à la saisie depuis le sprint 30.
+   * Optionnel dans le type car les ventes créées avant ce sprint n'ont pas
+   * ce champ.
+   */
+  productionIds?: string[];
 }
 
 export interface ActionMarketing {
@@ -141,6 +188,25 @@ export interface ChargeFixe {
   realise: number;
 }
 
+export type QualityDecision = "liberer" | "quarantaine" | "rejeter";
+
+/**
+ * Minimal mirror of AROM-Mobile's `qualityControls` collection (web ERP
+ * correction, 2026-09) — only the fields `computeErp`'s own
+ * `headControlsByProduction`/sellable-stock gating needs, not the full
+ * shape (no shared package between the two repos; hand-kept in sync, same
+ * convention as every other cross-repo field on this page). Read-only here
+ * — AROM-Production never writes this collection (quality control is
+ * mobile-only, confirmed by firestore.rules' own write predicate).
+ */
+export interface QualityControl {
+  id: string;
+  productionId: string;
+  decision: QualityDecision;
+  /** Id of the earlier "quarantaine" control this one resolves, if any — see AROM-Mobile's quality/model.ts for the full doc comment. */
+  resolvesId?: string;
+}
+
 export interface ErpState {
   parametres: Parametres;
   producteurs: Producteur[];
@@ -151,6 +217,7 @@ export interface ErpState {
   ventes: Vente[];
   marketing: ActionMarketing[];
   charges: ChargeFixe[];
+  qualityControls: QualityControl[];
 }
 
 /* ---------- Données réelles issues du classeur (campagne pilote 2026) ---------- */
@@ -311,6 +378,7 @@ export const SEED: ErpState = {
     { id: "CH-3", rubrique: "Main-d'œuvre directe", budget: 118000, realise: 118000 },
     { id: "CH-4", rubrique: "Autres charges", budget: 0, realise: 0 },
   ],
+  qualityControls: [],
 };
 
 export const FORMATS: Format[] = ["500 ml", "330 ml", "300 ml"];
