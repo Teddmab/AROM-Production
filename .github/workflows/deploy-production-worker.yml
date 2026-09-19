@@ -1,0 +1,130 @@
+name: Deploy production Worker (manual)
+
+# The ONLY way AROM-Production is deployed to the production Worker.
+#
+# - Manual (`workflow_dispatch`) only. Never push- or PR-triggered; ordinary
+#   validation lives in ci.yml, which has no deploy capability.
+# - The Worker (`arom-production`) and its Firebase project
+#   (`arom-production-657f2`) are hardcoded below. They are deliberately NOT
+#   inputs, so a dispatch can never redirect the deployment. QA is a separate,
+#   explicit process (see docs/deployment.md), and this workflow refuses any
+#   QA artifact.
+# - Runs only from `main`, only at the current tip of `origin/main`, and only
+#   after the operator types the production phrase into BOTH inputs.
+# - Deploys with the repository's pinned local Wrangler binary, never a
+#   floating `npx wrangler`, after inspecting the generated config.
+#
+# The `production-worker` GitHub Environment is expected to restrict
+# deployment branches to `main` and (where the plan allows) require reviewers
+# and hold CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID. See docs/deployment.md.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Type "deploy-arom-production" to confirm the target'
+        required: true
+        type: string
+      confirm_target:
+        description: 'Type "deploy-arom-production" again to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-worker-deploy
+  cancel-in-progress: false
+
+env:
+  PRODUCTION_WORKER_NAME: arom-production
+  PRODUCTION_FIREBASE_PROJECT: arom-production-657f2
+  REQUIRED_PHRASE: deploy-arom-production
+
+jobs:
+  preflight:
+    # Cheap fail-fast checks that run BEFORE the protected environment (and
+    # any approval) is requested. No secrets are available here.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require main and the double confirmation
+        env:
+          GIT_REF: ${{ github.ref }}
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_CONFIRM: ${{ inputs.confirm_target }}
+        run: |
+          set -euo pipefail
+          if [ "$GIT_REF" != "refs/heads/main" ]; then
+            echo "::error::Production deploys run only from refs/heads/main (got: $GIT_REF)."
+            exit 1
+          fi
+          if [ "$INPUT_TARGET" != "$REQUIRED_PHRASE" ] || [ "$INPUT_CONFIRM" != "$REQUIRED_PHRASE" ]; then
+            echo "::error::Both confirmation inputs must equal the production phrase."
+            exit 1
+          fi
+
+  deploy:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: production-worker
+    steps:
+      - name: Re-check main and the double confirmation
+        env:
+          GIT_REF: ${{ github.ref }}
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_CONFIRM: ${{ inputs.confirm_target }}
+        run: |
+          set -euo pipefail
+          [ "$GIT_REF" = "refs/heads/main" ] || { echo "::error::Not main."; exit 1; }
+          [ "$INPUT_TARGET" = "$REQUIRED_PHRASE" ] && [ "$INPUT_CONFIRM" = "$REQUIRED_PHRASE" ] || { echo "::error::Confirmation mismatch."; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - name: Checked-out commit must be the current tip of origin/main
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          remote_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          echo "checked out: $head_sha"
+          echo "origin/main: $remote_sha"
+          echo "dispatched : $GITHUB_SHA"
+          [ -n "$remote_sha" ] && [ "$head_sha" = "$remote_sha" ] && [ "$head_sha" = "$GITHUB_SHA" ] || {
+            echo "::error::Refusing to deploy: main moved or the checkout is not the tip of origin/main."
+            exit 1
+          }
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Require the pinned local Wrangler binary
+        run: |
+          set -euo pipefail
+          [ -x node_modules/.bin/wrangler ] || { echo "::error::Local Wrangler binary is missing (node_modules/.bin/wrangler)."; exit 1; }
+          pinned="$(node -p "require('./package.json').devDependencies.wrangler")"
+          echo "$pinned" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::Wrangler must be pinned to an exact version (got: $pinned)."; exit 1; }
+          installed="$(./node_modules/.bin/wrangler --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+          [ "$installed" = "$pinned" ] || { echo "::error::Installed Wrangler ($installed) does not match the pin ($pinned)."; exit 1; }
+          echo "wrangler $installed (pinned)"
+
+      - name: Build
+        run: bun run build
+
+      - name: Inspect the generated Worker config and artifact
+        run: node scripts/ci/check-production-worker-artifact.mjs .output
+
+      - name: Deploy to the production Worker
+        working-directory: .output/server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "::error::Production Cloudflare credentials are not configured on the production-worker environment."; exit 1; }
+          ../../node_modules/.bin/wrangler deploy --config wrangler.json --name arom-production
