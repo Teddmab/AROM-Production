@@ -118,4 +118,15 @@ describe("POST /api/mombongo/create-offer", () => {
       }),
     );
   });
+
+  it.each(["in_flight", "conflict", "unknown"] as const)(
+    "maps '%s' to 409 — not a plain success, not a 5xx that would imply a safe-to-retry transient fault",
+    async (status) => {
+      vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+      vi.mocked(createMombongoOffer).mockResolvedValue({ status, message: "x" });
+      const res = await post(request(createExternalHarvestOfferRequestFixture));
+      expect(res.status).toBe(409);
+      expect((await res.json()).status).toBe(status);
+    },
+  );
 });

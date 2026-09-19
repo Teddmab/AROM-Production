@@ -1,5 +1,6 @@
-import { doc, getDoc, runTransaction, setDoc, updateDoc } from "firebase/firestore/lite";
+import { doc, getDoc, runTransaction, updateDoc } from "firebase/firestore/lite";
 import { serverDb } from "@/lib/firebase/serverDb";
+import { hashSha256Hex } from "./mombongoSigning";
 import { signedMombongoPost } from "./mombongo";
 
 /**
@@ -94,65 +95,216 @@ export type CreateOfferResult =
       offer: HarvestOfferDoc;
       alreadyExisted: boolean;
     }
-  | { status: "rejected" | "error"; httpStatus: number; message: string };
+  | { status: "rejected"; httpStatus: number; message: string }
+  /** Same fingerprint (listing+qty+price) is already being submitted by another in-flight request — do not resubmit, this is not a failure. */
+  | { status: "in_flight"; message: string }
+  /** A *different* proposal (different qty/price) is in flight for this same listing right now. */
+  | { status: "conflict"; message: string }
+  /**
+   * The prior attempt on this listing is in a state where AROM cannot
+   * prove whether Mombongo created an offer or not (a request timed out,
+   * the Worker was interrupted, or the response was malformed) — or a
+   * prior attempt was definitively rejected. Either way, no automatic
+   * retry is safe; see claimOfferSubmission's own doc comment.
+   */
+  | { status: "unknown"; message: string }
+  | { status: "error"; httpStatus: number; message: string };
+
+interface OfferClaim {
+  id: string;
+  listingId: string;
+  fingerprint: string;
+  status: "in_flight" | "completed" | "rejected" | "unknown";
+  createdAt: string;
+  createdByUid: string;
+  harvestOfferId?: string;
+  updatedAt?: string;
+}
+
+function offerFingerprint(input: {
+  listingId: string;
+  offerQuantityKg: number;
+  offerPricePerKgCdf: number;
+}): string {
+  return `${input.listingId}:${input.offerQuantityKg}:${input.offerPricePerKgCdf}`;
+}
+
+type ClaimAttempt =
+  | { kind: "won" }
+  | { kind: "already_completed"; harvestOfferId?: string }
+  | { kind: "in_flight_same" }
+  | { kind: "in_flight_conflict" }
+  | { kind: "blocked"; priorStatus: "rejected" | "unknown" };
 
 /**
- * Duplicate-offer protection (2026-09): the invariant is "at most one AROM
- * offer per Mombongo listing." The document id is deterministic — the
- * listingId itself — instead of the old random `offer_<ts>_<rand>` scheme,
- * so a retried/duplicate request finds the existing record instead of
- * creating a second one. Pre-existing docs created under the old random-id
- * scheme are untouched; this only governs new submissions going forward.
+ * Server-owned submission-claim state machine (2026-09 hardening): the
+ * required invariant is "AROM must not intentionally call Mombongo's
+ * offer-submission API more than once for one canonical listing, unless a
+ * documented human recovery decision explicitly authorizes another
+ * attempt." A Firestore-doc-level dedup (the previous version of this
+ * function) cannot guarantee that — two concurrent requests can both pass
+ * a pre-check before either writes the final `harvestOffers` doc, so both
+ * call Mombongo. This closes that gap by reserving a claim, in its own
+ * `mombongoOfferClaims` collection, *before* calling Mombongo at all.
  *
- * What this closes: a client retry after a timeout where the first
- * request actually succeeded, and a double-tap/second-device request that
- * lands after the first one's Firestore write — both find the existing
- * doc below and return it verbatim (`alreadyExisted: true`), with NO
- * second call to Mombongo's API.
+ * `mombongoOfferClaims` is deliberately separate from `harvestOffers`:
+ * the latter's firestore.rules require a real `mombongoOfferId` (which
+ * doesn't exist yet at claim time) at create, and only allow an update to
+ * touch `status` — relaxing either would be a bigger, riskier rules
+ * change than adding one new, narrowly-scoped collection that only this
+ * trusted server identity can ever read or write (see
+ * AROM-Backend/firestore.rules' own `mombongoOfferClaims` block and its
+ * PR for the exact grant).
  *
- * What this does NOT close: two requests for the same listing arriving
- * near-simultaneously can both pass the pre-check below before either has
- * written, so both may still call Mombongo's API before the transaction at
- * the bottom resolves which one's Firestore write wins. Closing that fully
- * means reserving the doc (with a real `mombongoOfferId`, which we don't
- * have yet) before calling Mombongo — but AROM-Backend's firestore.rules
- * requires `mombongoOfferId` to already be a string at create time, and
- * only allows an update to touch the `status` key, so there is no way to
- * "claim then fill in" without relaxing those rules — out of scope for
- * this change. The Firestore-side outcome is still fully protected (see
- * the transaction below: at most one document is ever persisted for a
- * given listingId), only a duplicate *external* Mombongo submission in
- * that narrow window is not.
+ * Firestore transactions provide real cross-request atomicity here (this
+ * is not a client-side check): if two requests race to create the same
+ * claim doc, only one's transaction commits — the other's automatically
+ * retries (Firestore's own optimistic-concurrency retry), observes the
+ * winner's write, and returns a non-"won" outcome *before ever calling
+ * Mombongo*. This is the actual fix for the "two simultaneous requests"
+ * scenario the previous design could only partially close.
+ *
+ * States are intentionally monotonic and never auto-expire:
+ * `in_flight -> {completed, rejected, unknown}`, and there is no
+ * transition back out of `rejected`/`unknown`/`completed` — once a
+ * listing has been attempted, only a documented human recovery workflow
+ * (not built here — see this repo's PR description) may authorize a new
+ * attempt. Time elapsed alone never proves the first request failed, so
+ * nothing here ever auto-unsticks a stale `in_flight`/`unknown` claim.
+ */
+async function claimOfferSubmission(
+  input: CreateOfferInput,
+  claimRef: ReturnType<typeof doc>,
+  fingerprint: string,
+): Promise<ClaimAttempt> {
+  return runTransaction(serverDb, async (tx) => {
+    const snap = await tx.get(claimRef);
+    if (!snap.exists()) {
+      const claim: OfferClaim = {
+        id: claimRef.id,
+        listingId: input.listingId,
+        fingerprint,
+        status: "in_flight",
+        createdAt: new Date().toISOString(),
+        createdByUid: input.createdByUid,
+      };
+      tx.set(claimRef, claim);
+      return { kind: "won" };
+    }
+    const claim = snap.data() as OfferClaim;
+    if (claim.status === "completed")
+      return { kind: "already_completed", harvestOfferId: claim.harvestOfferId };
+    if (claim.status === "in_flight") {
+      return claim.fingerprint === fingerprint
+        ? { kind: "in_flight_same" }
+        : { kind: "in_flight_conflict" };
+    }
+    // "rejected" or "unknown" — both terminal and blocking, regardless of
+    // whether this new attempt's fingerprint matches the prior one.
+    return { kind: "blocked", priorStatus: claim.status };
+  });
+}
+
+/**
+ * Duplicate-offer protection (2026-09, hardened): see claimOfferSubmission
+ * for the state machine this drives. The one gap that remains — and
+ * cannot be closed without a partner-side contract change — is a Worker
+ * process interrupted (crash, eviction) *after* Mombongo has already
+ * returned success but *before* this function's own completion
+ * transaction below runs at all: the claim is left `in_flight` forever
+ * (correctly blocking any further automatic attempt on this listing —
+ * see item below on why that's the safe failure mode), but the
+ * `harvestOffers` doc is never created, and Mombongo's own API has no
+ * polling/lookup endpoint (confirmed in
+ * AROM-Documentation/mombongo-integration-audit.md §3) to reconcile
+ * against. This is a genuine, currently irreducible gap: closing it needs
+ * either an upstream idempotency/lookup capability Mombongo doesn't
+ * expose today, or infrastructure guarantees (e.g. a durable outbox with
+ * at-least-once retry semantics) well beyond this change's scope. It is
+ * not hidden — a stuck claim requires a documented manual/ops recovery
+ * step, not an automatic retry.
  */
 export async function createMombongoOffer(input: CreateOfferInput): Promise<CreateOfferResult> {
-  const offerDocId = safeHarvestOfferDocId(input.listingId);
-  const ref = offerDocId ? doc(serverDb, "harvestOffers", offerDocId) : null;
+  const claimId = await hashSha256Hex(input.listingId);
+  const claimRef = doc(serverDb, "mombongoOfferClaims", claimId);
+  const offerRef = doc(serverDb, "harvestOffers", claimId);
+  const fingerprint = offerFingerprint(input);
 
-  if (ref) {
-    const existing = await getDoc(ref);
+  const attempt = await claimOfferSubmission(input, claimRef, fingerprint);
+
+  if (attempt.kind === "already_completed") {
+    const existing = await getDoc(offerRef);
     if (existing.exists()) {
       const offer = existing.data() as HarvestOfferDoc;
       return {
         status: "accepted",
-        offerDocId: offerDocId!,
+        offerDocId: claimId,
         mombongoOfferId: offer.mombongoOfferId,
         offer,
         alreadyExisted: true,
       };
     }
+    // Claim says completed but the offer doc is missing (shouldn't
+    // happen — they're written in the same transaction below — but
+    // failing honestly here beats fabricating a fake offer).
+    return {
+      status: "unknown",
+      message: "L'état de cette offre est incohérent localement — contactez le support technique.",
+    };
+  }
+  if (attempt.kind === "in_flight_same") {
+    return {
+      status: "in_flight",
+      message: "Cette offre est déjà en cours d'envoi — ne renvoyez pas.",
+    };
+  }
+  if (attempt.kind === "in_flight_conflict") {
+    return {
+      status: "conflict",
+      message: "Une autre offre est déjà en cours d'envoi pour cette même annonce.",
+    };
+  }
+  if (attempt.kind === "blocked") {
+    return {
+      status: "unknown",
+      message:
+        attempt.priorStatus === "rejected"
+          ? "Une tentative précédente sur cette annonce a été rejetée — contactez le support technique avant de réessayer."
+          : "L'état d'une tentative précédente sur cette annonce n'a pas pu être confirmé — contactez le support technique avant de réessayer.",
+    };
   }
 
-  const { httpStatus, data } = await signedMombongoPost<{ status?: string; offerId?: string }>(
-    "/createExternalHarvestOffer",
-    {
-      listingId: input.listingId,
-      offerQuantityKg: input.offerQuantityKg,
-      offerPricePerKgCdf: input.offerPricePerKgCdf,
-      message: input.message,
-    },
-  );
+  // attempt.kind === "won" — this request, and only this one, may call Mombongo.
+  let httpResult: { httpStatus: number; data: { status?: string; offerId?: string } };
+  try {
+    httpResult = await signedMombongoPost<{ status?: string; offerId?: string }>(
+      "/createExternalHarvestOffer",
+      {
+        listingId: input.listingId,
+        offerQuantityKg: input.offerQuantityKg,
+        offerPricePerKgCdf: input.offerPricePerKgCdf,
+        message: input.message,
+      },
+    );
+  } catch (err) {
+    // Network failure, timeout, config error, etc. — deliberately not
+    // distinguished from "Mombongo may have received it": erring toward
+    // the safe (blocking) outcome is always acceptable here, where
+    // erring toward "safe to retry" is not.
+    console.error("createMombongoOffer: signedMombongoPost threw", err);
+    await markClaim(claimRef, "unknown");
+    return {
+      status: "unknown",
+      message:
+        "La confirmation de Mombongo n'a pas pu être obtenue — contactez le support technique avant de réessayer.",
+    };
+  }
+
+  const { httpStatus, data } = httpResult;
 
   if (httpStatus === 400) {
+    // Authoritative rejection with proof no offer was created.
+    await markClaim(claimRef, "rejected");
     return {
       status: "rejected",
       httpStatus,
@@ -161,7 +313,15 @@ export async function createMombongoOffer(input: CreateOfferInput): Promise<Crea
     };
   }
   if (httpStatus !== 200 || data.status !== "accepted" || !data.offerId) {
-    return { status: "error", httpStatus, message: `Mombongo returned ${httpStatus}` };
+    // Any other non-success (500, malformed body, etc.) does NOT prove
+    // Mombongo didn't create the offer — treat as unknown, not a plain
+    // retryable "error".
+    await markClaim(claimRef, "unknown");
+    return {
+      status: "unknown",
+      message:
+        "La réponse de Mombongo était inattendue — contactez le support technique avant de réessayer.",
+    };
   }
 
   // AROM's own record of the offer — Mombongo has no "won"/"declined"
@@ -172,10 +332,8 @@ export async function createMombongoOffer(input: CreateOfferInput): Promise<Crea
   // picked — there is no other signal to distinguish that from "still
   // being considered," which is worth surfacing honestly in the UI
   // rather than guessing a false "declined" state.
-  // signInAsMombongoSystem() already happened inside signedMombongoPost's
-  // getMombongoConfig() call above — this write reuses that session.
   const persistedOffer: HarvestOfferDoc = {
-    id: offerDocId ?? `offer_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: claimId,
     listingId: input.listingId,
     mombongoOfferId: data.offerId,
     offerQuantityKg: input.offerQuantityKg,
@@ -190,52 +348,33 @@ export async function createMombongoOffer(input: CreateOfferInput): Promise<Crea
     createdByUid: input.createdByUid,
   };
 
-  if (!ref) {
-    // listingId wasn't safe to use as a doc id (see safeHarvestOfferDocId)
-    // — fall back to the old random-id write, no dedup guarantee for this
-    // one submission rather than crashing doc().
-    await setDoc(doc(serverDb, "harvestOffers", persistedOffer.id), persistedOffer);
-    return {
-      status: "accepted",
-      offerDocId: persistedOffer.id,
-      mombongoOfferId: data.offerId,
-      offer: persistedOffer,
-      alreadyExisted: false,
-    };
-  }
-
-  // Closes the "two concurrent requests both saw 'not exists' above" race
-  // at the Firestore layer: whichever transaction commits second re-reads
-  // inside the transaction, finds the doc the first one just created, and
-  // returns THAT canonical record instead of overwriting it — so at most
-  // one Firestore document ever exists per listingId, even though (see
-  // this function's own doc comment) both requests may already have
-  // called Mombongo's API by this point.
-  const finalOffer = await runTransaction(serverDb, async (tx) => {
-    const snap = await tx.get(ref);
-    if (snap.exists()) return snap.data() as HarvestOfferDoc;
-    tx.set(ref, persistedOffer);
-    return persistedOffer;
+  // Both writes in ONE transaction — closes the "Mombongo succeeded but
+  // the Worker died between writing harvestOffers and completing the
+  // claim" window entirely (the one window this design CAN close: if
+  // this transaction commits at all, both documents land together).
+  await runTransaction(serverDb, async (tx) => {
+    tx.set(offerRef, persistedOffer);
+    tx.update(claimRef, {
+      status: "completed",
+      harvestOfferId: claimId,
+      updatedAt: new Date().toISOString(),
+    });
   });
 
   return {
     status: "accepted",
-    offerDocId: offerDocId!,
-    mombongoOfferId: finalOffer.mombongoOfferId,
-    offer: finalOffer,
-    alreadyExisted: finalOffer.createdAt !== persistedOffer.createdAt,
+    offerDocId: claimId,
+    mombongoOfferId: data.offerId,
+    offer: persistedOffer,
+    alreadyExisted: false,
   };
 }
 
-/**
- * Firestore document ids are a single path segment — a listingId
- * containing "/" (or empty) can't be used as one. Mombongo's listingIds
- * have always been simple opaque strings in practice, but this guards the
- * assumption rather than letting doc() throw for an unexpected one.
- */
-function safeHarvestOfferDocId(listingId: string): string | null {
-  if (!listingId || listingId.includes("/")) return null;
-  return listingId;
+async function markClaim(
+  claimRef: ReturnType<typeof doc>,
+  status: "rejected" | "unknown",
+): Promise<void> {
+  await updateDoc(claimRef, { status, updatedAt: new Date().toISOString() });
 }
 
 export interface CreateHarvestCheckoutInput {
