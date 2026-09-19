@@ -161,6 +161,29 @@ Two concurrent deliveries: one inbox record (transaction); both may proceed to p
 | Reconciliation page                                    | **No** (item by item; import = create-pending then apply)                   | idempotent re-examination via overlap; interrupted import leaves a pending offer                       |
 | Reconciliation boundary advancement                    | Yes (one compare-and-set transaction) — but not atomic with page processing | boundary only advances after the page is handled; a crash before it just replays the page              |
 
+## 5b. Accepted-offer enrichment (Mombongo PR #70)
+
+Verified against mombongo-functions merge commit `5ff75b72ed973b4a00a5a4a5b49dfb956e8abaf1` (default branch
+`feature/s2-00-data-foundation`). `getExternalHarvestOffer(s)` add `seller` / `listing` for **accepted** offers
+only (`null`/`null` for pending/declined; `seller: {id, displayName: null}` + `listing: null` when the listing
+cannot be read or matched; thumbnail = ~1 h signed URL). Both are optional in `ExternalHarvestOfferDto` so an
+older Mombongo build keeps working.
+
+`mombongoOfferEnrichment.ts` is the only consumer: it sanitizes field by field (no spreads, no unknown keys, no
+email/phone-like names, https `storage.googleapis.com` thumbnails only, an already-expired thumbnail is not
+stored) and `applyOfferEnrichment` writes `mombongoSeller` / `mombongoListing` / `mombongoEnrichmentSourceAt`
+in one transaction on an EXISTING accepted/won offer — never creating an offer, never touching status,
+`invoiceId`, `lastEventId`, `mombongoOccurredAt`, `updatedAt`, checkout or payment. The seller id is frozen,
+an older `sourceAt` cannot replace a newer snapshot, and a null never erases a stored value (Mombongo degrades
+to less detail on a transient failure). Reconciliation calls it after the outcome step for both `applied` and
+the same-state `already_applied` path, and treats any enrichment problem as non-fatal (no issue, no pin).
+
+**Known limits.** (1) Enrichment arrives only through reconciliation, which pages by the offer's own
+`updatedAt`: an offer accepted before Mombongo shipped enrichment is not re-fetched unless its `updatedAt`
+moves, so it needs a one-off backfill (a per-offer `getExternalHarvestOffer` refresh, or a controlled
+re-bootstrap) — not built here. (2) The thumbnail lives one hour, so a stored URL is usually expired by the time
+it is viewed; a fresh one needs the same kind of on-demand refresh. Consumers must treat it as optional.
+
 ## 6. Payment boundary
 
 `createMombongoHarvestCheckout` always returns `reception_approval_required` (403); route scoped to

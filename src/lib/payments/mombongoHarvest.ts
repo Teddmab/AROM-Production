@@ -92,6 +92,24 @@ export interface HarvestOfferDoc {
   invoiceId?: string;
   mombongoOccurredAt?: string;
   lastEventId?: string;
+  /**
+   * Sanitized snapshot of Mombongo's accepted-offer enrichment (see
+   * mombongoOfferEnrichment.ts). Provenance is kept explicit: `mombongo*`
+   * names say where the values came from, and `mombongoEnrichmentSourceAt`
+   * is the remote offer `updatedAt` they were read at. Only ever present on
+   * an accepted/won offer; never affects status, invoice or payment state.
+   */
+  mombongoSeller?: { id: string; displayName: string | null };
+  mombongoListing?: {
+    commodity: string | null;
+    commodityCode: string | null;
+    province: string | null;
+    territory: string | null;
+    /** Signed URL with a short life — presentation context, never reception evidence. Always paired with its expiry. */
+    thumbnailUrl: string | null;
+    thumbnailExpiresAt: string | null;
+  };
+  mombongoEnrichmentSourceAt?: string;
 }
 
 export type CreateOfferResult =
