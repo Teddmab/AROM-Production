@@ -25,10 +25,17 @@ import { signHmac } from "./mombongoSigning";
  * secret or onboarding a second partner later never needs a deployment.
  */
 
-/** Exported for mombongoHarvest.ts (Sprint DP: listings/offers) — same signing seam, same secret, same base URL. */
+/**
+ * Exported for mombongoHarvest.ts (Sprint DP: listings/offers) — same
+ * signing seam, same secret, same base URL. `extraHeaders` exists solely
+ * for contract v2's `Idempotency-Key` (mombongoHarvest.ts's
+ * createMombongoOffer/reconciliation calls) — every other caller omits
+ * it and is byte-for-byte unaffected.
+ */
 export async function signedMombongoPost<T>(
   path: string,
   body: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<{ httpStatus: number; data: T }> {
   const config = await getMombongoConfig();
 
@@ -41,6 +48,7 @@ export async function signedMombongoPost<T>(
       "content-type": "application/json",
       "x-partner-id": config.partnerId,
       "x-partner-signature": signature,
+      ...extraHeaders,
     },
     body: rawBody,
   });

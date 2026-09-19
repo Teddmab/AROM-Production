@@ -41,7 +41,9 @@ export const Route = createFileRoute("/api/mombongo/create-harvest-checkout")({
                   ? 502
                   : result.status === "error"
                     ? 502
-                    : 200;
+                    : result.status === "reception_approval_required"
+                      ? 403
+                      : 200;
           return Response.json(result, { status });
         } catch (err) {
           console.error("createMombongoHarvestCheckout failed:", err);

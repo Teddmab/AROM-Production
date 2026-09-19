@@ -13,6 +13,306 @@ import {
 import { serverDb } from "@/lib/firebase/serverDb";
 import { getMombongoConfig } from "@/lib/payments/mombongoConfig";
 import { verifyHmac } from "@/lib/payments/mombongoSigning";
+import { applyMombongoOfferOutcome } from "@/lib/payments/mombongoOfferOutcome";
+import {
+  claimInboxEvent,
+  markInboxConflict,
+  markInboxFailed,
+  markInboxProcessed,
+} from "@/lib/payments/mombongoWebhookInbox";
+
+interface OfferStatusChangedPayload {
+  eventId?: string;
+  schemaVersion?: number;
+  occurredAt?: string;
+  offerId?: string;
+  externalReference?: string | null;
+  status?: string;
+  quantityKg?: number;
+  unitPriceCdf?: number;
+  currency?: string;
+}
+
+/**
+ * Contract v2 `offer_status_changed` — durable inbox first (create before
+ * any harvestOffers write, per "do not acknowledge success if durable
+ * recording failed"), then applies the outcome via the shared
+ * applyMombongoOfferOutcome (same function reconciliation uses — no
+ * separate authorization loophole between the two).
+ */
+async function handleOfferStatusChanged(payload: OfferStatusChangedPayload): Promise<Response> {
+  const {
+    eventId,
+    schemaVersion,
+    occurredAt,
+    offerId,
+    externalReference,
+    status,
+    quantityKg,
+    unitPriceCdf,
+    currency,
+  } = payload;
+  if (
+    !eventId ||
+    !occurredAt ||
+    !offerId ||
+    !status ||
+    quantityKg == null ||
+    unitPriceCdf == null
+  ) {
+    return Response.json({ error: "missing_fields" }, { status: 400 });
+  }
+  if (schemaVersion !== 1) {
+    return Response.json({ error: "unsupported_schema_version" }, { status: 400 });
+  }
+  if (status !== "accepted" && status !== "declined") {
+    return Response.json({ error: "unsupported_status" }, { status: 400 });
+  }
+  if (currency !== "CDF") {
+    return Response.json({ error: "unsupported_currency" }, { status: 400 });
+  }
+
+  let claim: Awaited<ReturnType<typeof claimInboxEvent>>;
+  try {
+    claim = await claimInboxEvent({
+      eventId,
+      eventType: "offer_status_changed",
+      schemaVersion,
+      occurredAt,
+      mombongoOfferId: offerId,
+      ...(externalReference ? { externalReference } : {}),
+    });
+  } catch (err) {
+    console.error("offer_status_changed: durable inbox recording failed, not acknowledging", err);
+    return Response.json({ error: "durable_recording_failed" }, { status: 500 });
+  }
+
+  if (claim.kind === "already_processed")
+    return Response.json({ status: "already_processed" }, { status: 200 });
+  if (claim.kind === "already_conflict")
+    return Response.json({ status: "acknowledged_conflict" }, { status: 200 });
+
+  try {
+    const outcome = await applyMombongoOfferOutcome({
+      mombongoOfferId: offerId,
+      externalReference: externalReference ?? null,
+      status,
+      occurredAt,
+      eventId,
+    });
+
+    if (
+      outcome.kind === "applied" ||
+      outcome.kind === "already_applied" ||
+      outcome.kind === "stale"
+    ) {
+      await markInboxProcessed(claim.ref, outcome.offerDocId);
+      return Response.json({ status: "ok" }, { status: 200 });
+    }
+    if (outcome.kind === "conflict") {
+      await markInboxConflict(claim.ref, outcome.reason);
+      return Response.json({ status: "acknowledged_conflict" }, { status: 200 });
+    }
+    // not_found — tolerate arrival before the submission response is
+    // stored: recoverable, not a permanent error. A later redelivery or
+    // AROM's own reconciliation pass will complete this using the exact
+    // same applyMombongoOfferOutcome logic.
+    await markInboxFailed(claim.ref, "offer_not_found", outcome.reason);
+    return Response.json({ error: "offer_not_found_yet" }, { status: 503 });
+  } catch (err) {
+    console.error("offer_status_changed: processing failed", err);
+    await markInboxFailed(
+      claim.ref,
+      "processing_error",
+      err instanceof Error ? err.message : String(err),
+    );
+    return Response.json({ error: "processing_failed" }, { status: 500 });
+  }
+}
+
+interface InvoiceIssuedV2Payload {
+  eventId?: string;
+  schemaVersion?: number;
+  occurredAt?: string;
+  invoiceId?: string;
+  offerId?: string | null;
+  externalReference?: string | null;
+  farmerId?: string;
+  listingId?: string | null;
+  quantityKg?: number;
+  unitPriceCdf?: number;
+  totalAmountCdf?: number;
+  currency?: string;
+  amountUsd?: number;
+  commodity?: string;
+}
+
+/**
+ * Contract v2 `invoice_issued` (schemaVersion 2) — additive over v1.
+ * Correlates via exact mombongoOfferId (never listingId alone); an
+ * offerId that matches a local offer whose OWN externalReference
+ * disagrees with the payload's is a genuine correlation inconsistency —
+ * recorded as a conflict, nothing written, rather than guessing which is
+ * right. Never marks anything paid, never triggers checkout, never
+ * mutates stock — this only ever creates the `harvestInvoices` record
+ * (statut: 'a_payer') and, when correlation is exact, applies 'accepted'
+ * to the linked offer via the same shared outcome function the webhook's
+ * offer_status_changed path uses.
+ */
+async function handleInvoiceIssuedV2(payload: InvoiceIssuedV2Payload): Promise<Response> {
+  const {
+    eventId,
+    schemaVersion,
+    occurredAt,
+    invoiceId,
+    offerId,
+    externalReference,
+    farmerId,
+    listingId,
+    quantityKg,
+    unitPriceCdf,
+    totalAmountCdf,
+    currency,
+    amountUsd,
+    commodity,
+  } = payload;
+  if (
+    !eventId ||
+    !occurredAt ||
+    !invoiceId ||
+    !farmerId ||
+    quantityKg == null ||
+    unitPriceCdf == null ||
+    totalAmountCdf == null ||
+    amountUsd == null ||
+    !commodity
+  ) {
+    return Response.json({ error: "missing_fields" }, { status: 400 });
+  }
+  if (schemaVersion !== 2) {
+    return Response.json({ error: "unsupported_schema_version" }, { status: 400 });
+  }
+  if (currency !== "CDF") {
+    return Response.json({ error: "unsupported_currency" }, { status: 400 });
+  }
+
+  let claim: Awaited<ReturnType<typeof claimInboxEvent>>;
+  try {
+    claim = await claimInboxEvent({
+      eventId,
+      eventType: "invoice_issued",
+      schemaVersion,
+      occurredAt,
+      invoiceId,
+      ...(offerId ? { mombongoOfferId: offerId } : {}),
+      ...(externalReference ? { externalReference } : {}),
+    });
+  } catch (err) {
+    console.error("invoice_issued v2: durable inbox recording failed, not acknowledging", err);
+    return Response.json({ error: "durable_recording_failed" }, { status: 500 });
+  }
+
+  if (claim.kind === "already_processed")
+    return Response.json({ status: "already_processed" }, { status: 200 });
+  if (claim.kind === "already_conflict")
+    return Response.json({ status: "acknowledged_conflict" }, { status: 200 });
+
+  try {
+    // Second, independent idempotency invariant on top of eventId: the
+    // invoiceId itself is Mombongo's own id and this doc's own Firestore
+    // id — a repeat delivery under a *different* eventId (shouldn't
+    // happen, since eventId is deterministic from invoiceId, but not
+    // relied upon) still can't create a duplicate invoice.
+    const existingInvoice = await getDoc(doc(serverDb, "harvestInvoices", invoiceId));
+    if (existingInvoice.exists()) {
+      await markInboxProcessed(claim.ref);
+      return Response.json({ status: "already_processed" }, { status: 200 });
+    }
+
+    let matchedOfferDocId: string | null = null;
+    if (offerId) {
+      const offerMatches = await getDocs(
+        query(
+          collection(serverDb, "harvestOffers"),
+          where("mombongoOfferId", "==", offerId),
+          limit(2),
+        ),
+      );
+      if (offerMatches.size === 1) {
+        const matchedOffer = offerMatches.docs[0];
+        const matchedExternalRef = (matchedOffer.data().externalReference as string | null) ?? null;
+        if (
+          externalReference != null &&
+          matchedExternalRef != null &&
+          matchedExternalRef !== externalReference
+        ) {
+          await markInboxConflict(
+            claim.ref,
+            `invoice ${invoiceId} references offerId ${offerId} whose externalReference (${matchedExternalRef}) does not match the payload's (${externalReference}).`,
+          );
+          return Response.json({ status: "acknowledged_conflict" }, { status: 200 });
+        }
+        matchedOfferDocId = matchedOffer.id;
+      }
+      // Zero or ambiguous (>=2) matches: tolerate — the invoice record
+      // below is still created (Mombongo's authoritative payable fact
+      // stands on its own), just without an offer-side accept applied
+      // yet; reconciliation will catch up once the offer exists locally.
+    }
+
+    // Never marks paid, never triggers checkout, never touches stock —
+    // exactly the same three invariants as the pre-v2 handler below.
+    await setDoc(doc(serverDb, "harvestInvoices", invoiceId), {
+      id: invoiceId,
+      farmerId,
+      listingId: listingId ?? null,
+      amountUsd,
+      quantityKg,
+      commodity,
+      statut: "a_payer",
+      createdAt: new Date().toISOString(),
+      eventId,
+      schemaVersion,
+      occurredAt,
+      mombongoOfferId: offerId ?? null,
+      externalReference: externalReference ?? null,
+      unitPriceCdf,
+      totalAmountCdf,
+      currency,
+    });
+
+    if (matchedOfferDocId) {
+      const outcome = await applyMombongoOfferOutcome({
+        mombongoOfferId: offerId!,
+        externalReference: externalReference ?? null,
+        status: "accepted",
+        occurredAt,
+        eventId,
+        invoiceId,
+      });
+      // A conflict here (e.g. the offer was already authoritatively
+      // 'declined') doesn't undo the invoice we just created — Mombongo
+      // is the source of truth for the invoice existing at all — but is
+      // still worth recording for investigation rather than silently
+      // dropped.
+      if (outcome.kind === "conflict") {
+        await markInboxConflict(claim.ref, outcome.reason);
+        return Response.json({ status: "acknowledged_conflict" }, { status: 200 });
+      }
+    }
+
+    await markInboxProcessed(claim.ref, matchedOfferDocId ?? undefined);
+    return Response.json({ status: "ok" }, { status: 200 });
+  } catch (err) {
+    console.error("invoice_issued v2: processing failed", err);
+    await markInboxFailed(
+      claim.ref,
+      "processing_error",
+      err instanceof Error ? err.message : String(err),
+    );
+    return Response.json({ error: "processing_failed" }, { status: 500 });
+  }
+}
 
 /**
  * MOB-07 (payment_complete), extended for their 2026-09-01 partner-API
@@ -54,7 +354,7 @@ export const Route = createFileRoute("/api/webhooks/mombongo")({
         }
 
         let payload: {
-          event?: "payment_complete" | "invoice_issued";
+          event?: "payment_complete" | "invoice_issued" | "offer_status_changed";
           externalInvoiceId?: string;
           status?: string;
           amountUsd?: number;
@@ -64,11 +364,30 @@ export const Route = createFileRoute("/api/webhooks/mombongo")({
           listingId?: string;
           quantityKg?: number;
           commodity?: string;
+          // contract v2 additions
+          eventId?: string;
+          schemaVersion?: number;
+          occurredAt?: string;
+          partnerId?: string;
+          offerId?: string;
+          externalReference?: string | null;
+          unitPriceCdf?: number;
+          totalAmountCdf?: number;
+          currency?: string;
         };
         try {
           payload = JSON.parse(rawBody);
         } catch {
           return Response.json({ error: "invalid_json" }, { status: 400 });
+        }
+
+        if (payload.event === "offer_status_changed") {
+          return handleOfferStatusChanged(payload);
+        }
+
+        if (payload.event === "invoice_issued" && payload.eventId != null) {
+          // Contract v2 (schemaVersion 2) — has eventId, unlike v1.
+          return handleInvoiceIssuedV2(payload);
         }
 
         if (payload.event === "invoice_issued") {

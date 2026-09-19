@@ -38,6 +38,24 @@ export async function signHmac(secret: string, body: string): Promise<string> {
 }
 
 /**
+ * Deterministic, always-safe Firestore document id derivation (contract
+ * v2 offer-submission hardening) — turns an external partner-supplied
+ * identifier (Mombongo's own `listingId`) into a doc id without trusting
+ * its raw shape (length, `/`, unicode, whitespace). SHA-256 hex is
+ * fixed-length (64 chars, well under Firestore's 1500-byte limit),
+ * contains no `/`, and satisfies Mombongo's own Idempotency-Key
+ * constraint (1-200 chars, no `/`) — this same value is reused as both
+ * the harvestOffers/mombongoOfferClaims doc id AND the Idempotency-Key/
+ * externalReference sent to Mombongo (see mombongoHarvest.ts). No
+ * case-folding or trimming: two strings differing only by case or
+ * trailing whitespace are treated as genuinely different listings.
+ */
+export async function hashSha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return bytesToHex(digest);
+}
+
+/**
  * Verifies `signatureHex` against `body` using `crypto.subtle.verify`
  * (constant-time by construction) rather than a manual string/byte
  * comparison — avoids reimplementing timing-safe comparison ourselves.

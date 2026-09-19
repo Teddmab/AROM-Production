@@ -20,6 +20,15 @@ export interface MombongoIntegrationConfig {
   inboundSigningSecret: string;
   outboundVerifySecret: string;
   active: boolean;
+  /**
+   * Trusted, admin-set reconciliation bootstrap: where the very first
+   * reconciliation run (no durable checkpoint yet) starts. Either an ISO
+   * 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`) or the literal
+   * `"full-history"` (no lower bound). Absent/invalid = reconciliation
+   * fails closed. Lives here, not in a request, so an untrusted caller can
+   * never choose it. See mombongoReconciliation.ts.
+   */
+  reconciliationBootstrapSince?: string;
 }
 
 export async function getMombongoConfig(): Promise<MombongoIntegrationConfig> {
@@ -48,5 +57,9 @@ export async function getMombongoConfig(): Promise<MombongoIntegrationConfig> {
     inboundSigningSecret: data.inboundSigningSecret,
     outboundVerifySecret: data.outboundVerifySecret,
     active: data.active,
+    reconciliationBootstrapSince:
+      typeof data.reconciliationBootstrapSince === "string"
+        ? data.reconciliationBootstrapSince
+        : undefined,
   };
 }
