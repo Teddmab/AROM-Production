@@ -56,9 +56,21 @@ function canonicalStatus(raw: HarvestOfferDoc["status"]): "pending" | "accepted"
 }
 
 export async function findOfferDocId(input: ApplyOfferOutcomeInput): Promise<string | null> {
+  return (await findOfferDoc(input))?.id ?? null;
+}
+
+/**
+ * The exact-correlation lookup findOfferDocId has always done, but returning
+ * the document too, so a caller that only needs to read it does not pay a
+ * second read. Same rules: by externalReference (the doc's own id) first,
+ * else by Mombongo offer id, and an ambiguous match is "not found".
+ */
+export async function findOfferDoc(
+  input: Pick<ApplyOfferOutcomeInput, "mombongoOfferId" | "externalReference">,
+): Promise<{ id: string; data: HarvestOfferDoc } | null> {
   if (input.externalReference) {
     const direct = await getDoc(doc(serverDb, "harvestOffers", input.externalReference));
-    if (direct.exists()) return direct.id;
+    if (direct.exists()) return { id: direct.id, data: direct.data() as HarvestOfferDoc };
   }
   // Fallback: pre-v2 offers (created before externalReference existed) or
   // a mismatched/absent externalReference — correlate by Mombongo's own
@@ -73,7 +85,7 @@ export async function findOfferDocId(input: ApplyOfferOutcomeInput): Promise<str
     limit(2),
   );
   const snap = await getDocs(q);
-  if (snap.size === 1) return snap.docs[0].id;
+  if (snap.size === 1) return { id: snap.docs[0].id, data: snap.docs[0].data() as HarvestOfferDoc };
   return null;
 }
 

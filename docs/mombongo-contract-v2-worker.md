@@ -178,11 +178,31 @@ an older `sourceAt` cannot replace a newer snapshot, and a null never erases a s
 to less detail on a transient failure). Reconciliation calls it after the outcome step for both `applied` and
 the same-state `already_applied` path, and treats any enrichment problem as non-fatal (no issue, no pin).
 
-**Known limits.** (1) Enrichment arrives only through reconciliation, which pages by the offer's own
-`updatedAt`: an offer accepted before Mombongo shipped enrichment is not re-fetched unless its `updatedAt`
-moves, so it needs a one-off backfill (a per-offer `getExternalHarvestOffer` refresh, or a controlled
-re-bootstrap) — not built here. (2) The thumbnail lives one hour, so a stored URL is usually expired by the time
-it is viewed; a fresh one needs the same kind of on-demand refresh. Consumers must treat it as optional.
+**Refresh operation (`POST /api/mombongo/refresh-receivable-offers`).** Lifecycle reconciliation pages by the
+offer's own `updatedAt`, so it can never enrich an offer accepted before enrichment shipped nor renew a lapsed
+thumbnail. A separate, user-triggered, bounded presentation refresh does: it lists **accepted** offers only with
+**no** `updatedSince` (historical included), and applies the same planner (`planEnrichmentUpdate`) to offers that
+already exist locally as accepted/won. Two independent lanes: business data (seller/listing product/place) obeys
+the remote-`updatedAt` monotonic guard; the thumbnail is a short-lived credential renewed when missing, expired or
+under 30 min from expiry (never rewritten while comfortably valid), even when `updatedAt` has not moved. A failed
+renewal leaves a still-valid image and all other metadata untouched. It also fills a missing `invoiceId`. It never
+creates an offer, changes a status, or touches the reconciliation checkpoint, invoices, receptions, checkout or
+payment.
+
+- **Authorization:** verified ID token + that uid's own profile only — active `admin`, or active staff with poste
+  exactly `Agent de collecte`. 401 unauthenticated, 403 anyone else (Directeur de Production, Chargée de
+  Commercialisation, Personnalisé/poste-less staff, partners, inactive). The body/query are never read.
+- **Bounds (server constants):** 50 offers/page, at most 4 pages (200 offers), separate absolute ceiling of 6 remote
+  requests, cursor-cycle stop. A run that hits a cap reports `partial`, never `complete`. Mombongo lists oldest-changed
+  first, so the cap covers the 200 oldest accepted offers — far above the pilot volume and Mobile's cache (newest
+  100); if accepted offers ever exceed it a checkpoint or a descending list is needed (not built, no second durable
+  checkpoint until volume demands it).
+- **Throttle:** in-process (per Worker isolate) — equivalent concurrent refreshes share one run; another within 20 s
+  answers 429 `throttled`. Best-effort by design: correctness never depends on it (idempotent updates of existing
+  documents only). No cron, queue or scheduler.
+- **Response:** `{status: complete|partial|unavailable, examined, refreshed, unchanged, skipped, shouldReread}`, or
+  `{status: throttled, retryAfterMs}` — never credentials, signatures, payloads, names or thumbnail URLs; never an
+  instruction to clear a cache. 200/429/502.
 
 ## 6. Payment boundary
 

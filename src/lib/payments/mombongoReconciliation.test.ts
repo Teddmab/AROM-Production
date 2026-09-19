@@ -1163,7 +1163,7 @@ describe("accepted-offer enrichment", () => {
     expect(JSON.stringify(mockRegistry["harvestOffers/ext-a"])).toBe(first);
   });
 
-  it("a stale remote response cannot regress newer local metadata", async () => {
+  it("a stale remote response cannot regress newer BUSINESS metadata (it may still renew a missing thumbnail — a separate, credential lane)", async () => {
     seedLocal("a", {
       status: "accepted",
       mombongoOccurredAt: T(30),
@@ -1181,14 +1181,14 @@ describe("accepted-offer enrichment", () => {
     remote = [
       offer("a", T(10), "accepted", {
         seller: { id: "farmer-a", displayName: "Old Name" },
-        listing: { ...ENRICHMENT.listing, commodity: "manioc" },
+        listing: { ...ENRICHMENT.listing, commodity: "manioc", province: "Old" },
       }),
     ];
     const s = await reconcileMombongoOffers();
-    expect(s).toMatchObject({ status: "complete", enriched: 0 });
+    expect(s.status).toBe("complete");
     expect(local("a")).toMatchObject({
       mombongoSeller: { displayName: "Marie Kabuya" },
-      mombongoListing: { commodity: "ananas" },
+      mombongoListing: { commodity: "ananas", province: null, thumbnailExpiresAt: FAR },
       mombongoEnrichmentSourceAt: T(30),
     });
   });

@@ -17,6 +17,7 @@ import { Route as StorefrontIndexRouteImport } from './routes/storefront/index'
 import { Route as StorefrontSignupRouteImport } from './routes/storefront/signup'
 import { Route as StorefrontProfileRouteImport } from './routes/storefront/profile'
 import { Route as ApiWebhooksMombongoRouteImport } from './routes/api/webhooks/mombongo'
+import { Route as ApiMombongoRefreshReceivableOffersRouteImport } from './routes/api/mombongo/refresh-receivable-offers'
 import { Route as ApiMombongoReconcileOffersRouteImport } from './routes/api/mombongo/reconcile-offers'
 import { Route as ApiMombongoListingsRouteImport } from './routes/api/mombongo/listings'
 import { Route as ApiMombongoCreateOfferRouteImport } from './routes/api/mombongo/create-offer'
@@ -68,6 +69,12 @@ const ApiWebhooksMombongoRoute = ApiWebhooksMombongoRouteImport.update({
   path: '/api/webhooks/mombongo',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiMombongoRefreshReceivableOffersRoute =
+  ApiMombongoRefreshReceivableOffersRouteImport.update({
+    id: '/api/mombongo/refresh-receivable-offers',
+    path: '/api/mombongo/refresh-receivable-offers',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiMombongoReconcileOffersRoute =
   ApiMombongoReconcileOffersRouteImport.update({
     id: '/api/mombongo/reconcile-offers',
@@ -142,6 +149,7 @@ export interface FileRoutesByFullPath {
   '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
   '/api/mombongo/listings': typeof ApiMombongoListingsRoute
   '/api/mombongo/reconcile-offers': typeof ApiMombongoReconcileOffersRoute
+  '/api/mombongo/refresh-receivable-offers': typeof ApiMombongoRefreshReceivableOffersRoute
   '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRoutesByTo {
@@ -162,6 +170,7 @@ export interface FileRoutesByTo {
   '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
   '/api/mombongo/listings': typeof ApiMombongoListingsRoute
   '/api/mombongo/reconcile-offers': typeof ApiMombongoReconcileOffersRoute
+  '/api/mombongo/refresh-receivable-offers': typeof ApiMombongoRefreshReceivableOffersRoute
   '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRoutesById {
@@ -183,6 +192,7 @@ export interface FileRoutesById {
   '/api/mombongo/create-offer': typeof ApiMombongoCreateOfferRoute
   '/api/mombongo/listings': typeof ApiMombongoListingsRoute
   '/api/mombongo/reconcile-offers': typeof ApiMombongoReconcileOffersRoute
+  '/api/mombongo/refresh-receivable-offers': typeof ApiMombongoRefreshReceivableOffersRoute
   '/api/webhooks/mombongo': typeof ApiWebhooksMombongoRoute
 }
 export interface FileRouteTypes {
@@ -205,6 +215,7 @@ export interface FileRouteTypes {
     | '/api/mombongo/create-offer'
     | '/api/mombongo/listings'
     | '/api/mombongo/reconcile-offers'
+    | '/api/mombongo/refresh-receivable-offers'
     | '/api/webhooks/mombongo'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -225,6 +236,7 @@ export interface FileRouteTypes {
     | '/api/mombongo/create-offer'
     | '/api/mombongo/listings'
     | '/api/mombongo/reconcile-offers'
+    | '/api/mombongo/refresh-receivable-offers'
     | '/api/webhooks/mombongo'
   id:
     | '__root__'
@@ -245,6 +257,7 @@ export interface FileRouteTypes {
     | '/api/mombongo/create-offer'
     | '/api/mombongo/listings'
     | '/api/mombongo/reconcile-offers'
+    | '/api/mombongo/refresh-receivable-offers'
     | '/api/webhooks/mombongo'
   fileRoutesById: FileRoutesById
 }
@@ -266,6 +279,7 @@ export interface RootRouteChildren {
   ApiMombongoCreateOfferRoute: typeof ApiMombongoCreateOfferRoute
   ApiMombongoListingsRoute: typeof ApiMombongoListingsRoute
   ApiMombongoReconcileOffersRoute: typeof ApiMombongoReconcileOffersRoute
+  ApiMombongoRefreshReceivableOffersRoute: typeof ApiMombongoRefreshReceivableOffersRoute
   ApiWebhooksMombongoRoute: typeof ApiWebhooksMombongoRoute
 }
 
@@ -325,6 +339,13 @@ declare module '@tanstack/react-router' {
       path: '/api/webhooks/mombongo'
       fullPath: '/api/webhooks/mombongo'
       preLoaderRoute: typeof ApiWebhooksMombongoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mombongo/refresh-receivable-offers': {
+      id: '/api/mombongo/refresh-receivable-offers'
+      path: '/api/mombongo/refresh-receivable-offers'
+      fullPath: '/api/mombongo/refresh-receivable-offers'
+      preLoaderRoute: typeof ApiMombongoRefreshReceivableOffersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/mombongo/reconcile-offers': {
@@ -418,6 +439,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiMombongoCreateOfferRoute: ApiMombongoCreateOfferRoute,
   ApiMombongoListingsRoute: ApiMombongoListingsRoute,
   ApiMombongoReconcileOffersRoute: ApiMombongoReconcileOffersRoute,
+  ApiMombongoRefreshReceivableOffersRoute:
+    ApiMombongoRefreshReceivableOffersRoute,
   ApiWebhooksMombongoRoute: ApiWebhooksMombongoRoute,
 }
 export const routeTree = rootRouteImport
