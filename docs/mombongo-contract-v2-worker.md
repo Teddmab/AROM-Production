@@ -1,7 +1,7 @@
 # Mombongo contract v2 — Worker behavior, recovery and atomicity
 
 Scope: `src/lib/payments/mombongo*.ts`, `/api/mombongo/*`, `/api/webhooks/mombongo`.
-Verified against mombongo-functions `960ed54` and AROM-Backend `fcb9d56`.
+Verified against mombongo-functions `960ed54` and AROM-Backend `751b3bc` (includes PR #12/#13/#14).
 
 ## 1. Offer identity
 
@@ -37,26 +37,63 @@ UUIDs do not collide.
 Merged Rules already permit every transition used (`in_flight→*`, `unknown→completed|rejected`); no
 `unknown→in_flight` transition is needed or used.
 
-## 3. Reconciliation algorithm (no persisted checkpoint)
+## 3. Reconciliation — durable checkpoint
 
-The previous "derive `updatedSince` from max local `harvestOffers.updatedAt`" design was **proven unsafe** and
-removed: (a) two remote offers with equal `updatedAt` — Mombongo filters `updatedAt >` strictly, so if one of a tied
-pair is applied and the other isn't, the derived boundary equals both and the unprocessed twin is skipped forever;
-(b) a remote offer with no local doc (`not_found`) never contributes a local timestamp, so a later, newer offer in the
-same page moves the boundary past it permanently.
+Backend dependency: `mombongoReconciliationState/harvest-offers` (AROM-Backend PR #14, merged `751b3bc`).
+Closed schema `{streamId, completedThrough?, updatedAt}`; `isMombongoWebhook()` only; ISO UTC (ms) strings; monotonic.
+**The Worker must not run against an environment where these Rules are not deployed** (writes would be denied and
+reconciliation would report `checkpoint_write_failed`). Deploy Backend Rules first (transitional policy), then the Worker.
 
-Current algorithm (`reconcileMombongoOffers`): every run requests
-`updatedSince = now − 72h` (fixed, wall-clock), pages through `getExternalHarvestOffers` with the cursor used only
-inside that one run, and applies each `accepted`/`declined` offer via `applyMombongoOfferOutcome` (idempotent: same
-state = no-op, terminal conflict = recorded not overwritten, legacy `won` normalized). Nothing is carried between runs,
-so restart, expired cursor, partial failure, ties and mid-run remote updates can only cause *re-examination*, never a
-skip. **Not claimed:** this is *not* a checkpoint. Limits: a backlog deeper than `maxPages × pageSize` that persists
-longer than 72 h can age out; the summary's `pagesProcessed === maxPages` is the signal.
+Earlier designs were removed: a checkpoint *derived* from local `updatedAt` skipped equal-timestamp ties and offers with
+no local doc; a fixed 72 h lookback let an old backlog age out. Neither is used.
 
-**Backend follow-up (not made here):** a `mombongoReconciliationState` collection (one doc,
-`isMombongoWebhook()` read/write, `{ completedThrough: <ISO>, updatedAt }`, monotonic advance only after a page is
-fully applied) would allow a true checkpoint. Existing collections cannot hold it (`externalIntegrations/*` is
-`isAdmin()`-write; `mombongoWebhookEvents`/`mombongoOfferClaims` have closed field allow-lists).
+**Bootstrap (no boundary yet).** Value comes only from trusted config
+`externalIntegrations/mombongo.reconciliationBootstrapSince` (admin-set Firestore field, never a request input):
+an ISO timestamp, or `"full-history"` (no lower bound — provably covers every partner offer). Absent/invalid ⇒
+**fail closed** (`not_configured`, HTTP 503, no Mombongo request). No value is guessed: production data was not (and
+must not be) inspected here, so no automatic lower bound can be proven. Recommended: `"full-history"` — offer volume is
+low and progress is checkpointed page by page. Any ISO value must be ≤ the earliest AROM offer ever submitted.
+
+**Query.** `updatedSince = completedThrough − overlap`, overlap default 1 h, never below the 15-minute Backend minimum.
+Mombongo filters `updatedAt > updatedSince` (strict) ordered `(updatedAt, offerId)`; because the query starts an overlap
+*before* the boundary, records equal to or after the boundary — ties, late-visible writes within the overlap — are
+always re-fetched. Re-applying is idempotent. Pages that only replay the overlap do not count against the per-run page
+cap (otherwise a dense backlog inside the overlap would livelock every run at the same first pages).
+
+**Advancement and ties.** After a page is fully handled, `completedThrough` = greatest **remote** `updatedAt` that is
+(a) strictly below the earliest blocked/failed record, and (b) on a non-final page, strictly below that page's final
+`updatedAt` — the trailing tie group may continue on the next page, so it is never committed until a later page or the
+end of the stream proves it complete. Overlap would revisit it anyway; this is belt and braces. Never a local clock.
+An empty result commits nothing (no fabricated boundary, no state doc).
+
+**Compare-and-set.** One transaction: read stored boundary; if stored ≥ proposed write nothing (equal = no-op,
+greater = superseded); else create/update. If the Rules reject the write, re-read: stored ≥ proposed ⇒ superseded, stop
+safely; otherwise the failure is reported (`checkpoint_write_failed`). Never retried with an older value.
+
+**Concurrent runs.** No lease. Each run only commits a boundary it fully processed, duplicate processing is
+idempotent, Rules forbid moving the boundary backward. A slower run either finds its proposal ≤ stored (no write) or is
+denied and stops as superseded.
+
+**Remote offer with no local doc.** Ownership is provable (the list endpoint takes `partnerId` from the verified header,
+never the body). If `offerId`, `listingId`, `createdAt`, positive `quantityKg`/`unitPriceCdf` and `currency: CDF` are
+all present it is imported: doc id = `externalReference` (else `mombongo-<offerId>`), created **pending** (Rules
+force `pending` at create), `createdAt` = Mombongo's, `importedFrom: "reconciliation"`, and the remote
+accepted/declined is then applied as a separate step (an interruption leaves a pending offer; the next run applies it).
+Nothing is fabricated; `createdByUid` (required by Rules) is the system marker `system:mombongo-reconciliation`, not a
+user. Anything missing ⇒ **blocked**: durably recorded once in `mombongoWebhookEvents` as a `conflict` (safe text
+only), counted in `blocked`, and it **pins** the boundary below it. There is no timer-based release. Known limit: a
+permanently blocked record makes every run re-scan from its position (bounded by the page cap). Releasing one needs an
+explicit resolution policy (an operator/Backend decision) — not built.
+
+**Failure recovery.** Item throws ⇒ boundary pinned below it, run stops (`processing_failed`), earlier items stay
+applied and earlier pages stay committed. Mombongo error/invalid cursor ⇒ `mombongo_unavailable`; committed progress
+stays. Restart ⇒ nothing in-process is needed; the next run resumes from the durable boundary. Backlog larger than one
+run drains across runs.
+
+**Route response** (`POST /api/mombongo/reconcile-offers`, no request input is read): `status`
+(`complete`|`partial`|`not_configured`|`error`), optional safe `reason` code, `pagesProcessed`, `offersExamined`,
+`imported`, `updated`, `noops`, `conflicts`, `blocked`, `checkpoint {advanced, previous, current}`. HTTP 200
+complete/partial, 429 throttled, 502 error, 503 not_configured. Never credentials, signatures, raw errors.
 
 ## 4. Webhook inbox
 
@@ -82,8 +119,8 @@ Two concurrent deliveries: one inbox record (transaction); both may proceed to p
 | Offer status update (read-check-write) | Yes (one transaction) | — |
 | Offer update → inbox `processed` | **No** | redelivery re-applies as a no-op |
 | Invoice create → offer accept (`invoice_issued`) | **No** (invoice `setDoc`, then outcome tx) | invoice existence dedupes redelivery; offer accept re-applied by reconciliation/`offer_status_changed` |
-| Reconciliation page | **No** (item by item) | idempotent re-examination next run |
-| Reconciliation boundary advancement | **Does not exist** (stateless window) | see §3 |
+| Reconciliation page | **No** (item by item; import = create-pending then apply) | idempotent re-examination via overlap; interrupted import leaves a pending offer |
+| Reconciliation boundary advancement | Yes (one compare-and-set transaction) — but not atomic with page processing | boundary only advances after the page is handled; a crash before it just replays the page |
 
 ## 6. Payment boundary
 
@@ -95,7 +132,7 @@ still `a_payer`. None exist in any repository today.
 
 ## 7. Cutover compatibility
 
-Writes only `accepted`/`declined`, never `won`. The deployed (pre-v2) Worker writes `pending→won`: keep Backend
+Writes only `accepted`/`declined`, never `won`; requires the Backend `mombongoReconciliationState` Rules (PR #14) to be deployed before the reconcile route is used. The deployed (pre-v2) Worker writes `pending→won`: keep Backend
 **transitional** Rules until this Worker is live and no `won` writes occur, then deploy **final** Rules.
 
 ## 8. AROM-Mobile follow-up (read-only audit, Mobile `mombongo-offers-redesign`, PR #5 merged)
@@ -107,8 +144,10 @@ Writes only `accepted`/`declined`, never `won`. The deployed (pre-v2) Worker wri
   and `SentOffersTab.tsx:14,51-53,71-72,135,156-162` hard-code two buckets/filters/copy → add accepted + declined
   buckets, filters, counts, and card layout for a third stat.
 - Nothing calls `/api/mombongo/reconcile-offers`; plug into the existing `harvest-listings.tsx:77,97`
-  pull-to-refresh/focus flow (`useAutoRefresh`/`refreshRolePlan`), tolerate the 429 throttle, show partial-failure /
-  conflict summary (`error`, `conflicts`, `notFoundLocally`).
+  pull-to-refresh/focus flow (`useAutoRefresh`/`refreshRolePlan`), tolerate the 429 throttle, and render the new summary
+  (`status`, `reason`, `imported`, `updated`, `conflicts`, `blocked`, `checkpoint`). Reconciliation-imported offers carry
+  `createdByUid: "system:mombongo-reconciliation"`, so Mobile's `createdByUid === uid` filter hides them — Mobile must
+  decide how to show AROM-owned imported offers.
 - `harvestOffers` sync category (`syncPlan.ts:140`, `adminCache.ts:27`) is fine offline, but cached docs may carry
   `won`/`accepted`/`declined` and new fields (`externalReference`, `invoiceId`) — parsing must not reject them.
 - Offer→invoice link is by `listingId` only (`SentOffersTab.tsx:117-119`, `harvest-offer/[id].tsx:60`) — must switch to

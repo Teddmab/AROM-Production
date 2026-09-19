@@ -6,6 +6,18 @@ import { reconcileMombongoOffers } from "@/lib/payments/mombongoReconciliation";
 vi.mock("@/lib/auth/verifyMombongoCaller", () => ({ verifyMombongoCaller: vi.fn() }));
 vi.mock("@/lib/payments/mombongoReconciliation", () => ({ reconcileMombongoOffers: vi.fn() }));
 
+const SUMMARY = {
+  status: "complete" as const,
+  pagesProcessed: 1,
+  offersExamined: 2,
+  imported: 0,
+  updated: 1,
+  noops: 1,
+  conflicts: 0,
+  blocked: 0,
+  checkpoint: { advanced: true, previous: null, current: "2026-09-19T10:00:00.000Z" },
+};
+
 function request() {
   return new Request("http://localhost/api/mombongo/reconcile-offers", { method: "POST" });
 }
@@ -44,14 +56,7 @@ describe("POST /api/mombongo/reconcile-offers", () => {
 
   it("returns the summary with 200 on success, no credentials in the body", async () => {
     vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
-    vi.mocked(reconcileMombongoOffers).mockResolvedValue({
-      pagesProcessed: 1,
-      offersExamined: 2,
-      applied: 1,
-      alreadyApplied: 1,
-      conflicts: 0,
-      notFoundLocally: 0,
-    });
+    vi.mocked(reconcileMombongoOffers).mockResolvedValue(SUMMARY);
     const res = await post(request());
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -61,14 +66,7 @@ describe("POST /api/mombongo/reconcile-offers", () => {
 
   it("throttles a second call arriving within the minimum interval", async () => {
     vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
-    vi.mocked(reconcileMombongoOffers).mockResolvedValue({
-      pagesProcessed: 0,
-      offersExamined: 0,
-      applied: 0,
-      alreadyApplied: 0,
-      conflicts: 0,
-      notFoundLocally: 0,
-    });
+    vi.mocked(reconcileMombongoOffers).mockResolvedValue(SUMMARY);
     expect((await post(request())).status).toBe(200);
     now += 1_000; // still inside the throttle window
     vi.spyOn(Date, "now").mockReturnValue(now);
@@ -77,16 +75,61 @@ describe("POST /api/mombongo/reconcile-offers", () => {
     expect(reconcileMombongoOffers).toHaveBeenCalledTimes(1);
   });
 
+  it("maps not_configured (no bootstrap value) to 503 and error to 502", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(reconcileMombongoOffers).mockResolvedValueOnce({
+      ...SUMMARY,
+      status: "not_configured",
+      reason: "bootstrap_not_configured",
+    });
+    expect((await post(request())).status).toBe(503);
+  });
+
+  it("ignores every request input: a caller cannot choose the checkpoint doc, bootstrap bound, overlap or limits", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(reconcileMombongoOffers).mockResolvedValue(SUMMARY);
+    const req = new Request(
+      "http://localhost/api/mombongo/reconcile-offers?bootstrapSince=2020-01-01T00:00:00.000Z&stream=other",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          bootstrapSince: "2020-01-01T00:00:00.000Z",
+          completedThrough: "2099-01-01T00:00:00.000Z",
+          overlapMs: 1,
+          maxPages: 9999,
+          streamId: "partner-x",
+        }),
+      },
+    );
+    expect((await post(req)).status).toBe(200);
+    expect(reconcileMombongoOffers).toHaveBeenCalledWith();
+  });
+
+  it("returns the safe operational shape (counts, checkpoint movement) and no credentials", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(reconcileMombongoOffers).mockResolvedValue(SUMMARY);
+    const body = await (await post(request())).json();
+    expect(Object.keys(body).sort()).toEqual([
+      "blocked",
+      "checkpoint",
+      "conflicts",
+      "imported",
+      "noops",
+      "offersExamined",
+      "pagesProcessed",
+      "status",
+      "updated",
+    ]);
+    expect(JSON.stringify(body)).not.toMatch(/secret|signature|partner|authorization/i);
+  });
+
   it("maps a reconciliation error to 502", async () => {
     vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
     vi.mocked(reconcileMombongoOffers).mockResolvedValue({
-      pagesProcessed: 0,
-      offersExamined: 0,
-      applied: 0,
-      alreadyApplied: 0,
-      conflicts: 0,
-      notFoundLocally: 0,
-      error: "Mombongo returned 500",
+      ...SUMMARY,
+      status: "error",
+      reason: "mombongo_unavailable",
     });
     expect((await post(request())).status).toBe(502);
   });

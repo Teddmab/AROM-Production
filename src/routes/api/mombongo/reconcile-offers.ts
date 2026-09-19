@@ -10,15 +10,11 @@ import { verifyMombongoCaller } from "@/lib/auth/verifyMombongoCaller";
  * every other /api/mombongo/* route). Returns only safe counts/
  * diagnostics — never Mombongo's response bodies, never a credential.
  *
- * Throttle: a simple in-process minimum-interval guard (this Worker
- * instance only — no persisted, cross-instance throttle exists, since
- * AROM-Backend's externalIntegrations/mombongo doc is write-restricted to
- * isAdmin() and no other Rules-writable location exists for
- * isMombongoWebhook() to store one; a durable, cross-instance throttle
- * would need a Backend Rules change, out of scope here). This still
- * meaningfully prevents an accidental hot-loop of refresh taps from the
- * same warm Worker instance from re-running the whole paginated
- * reconciliation back to back.
+ * Throttle: an in-process minimum-interval guard (this Worker instance only).
+ * It is NOT needed for correctness — concurrent runs are safe (idempotent
+ * application, forward-only compare-and-set checkpoint, see
+ * mombongoReconciliation.ts) — it only avoids wasted duplicate work from a
+ * hot loop of refresh taps.
  */
 const MIN_INTERVAL_MS = 10_000;
 let lastRunAt = 0;
@@ -42,10 +38,19 @@ export const Route = createFileRoute("/api/mombongo/reconcile-offers")({
         lastRunAt = now;
 
         try {
+          // No request input is read here on purpose: the checkpoint
+          // document, the bootstrap lower bound, the overlap and the page
+          // limits are all fixed server-side, so a caller can only ask
+          // "please reconcile", never choose what or from where.
           const summary = await reconcileMombongoOffers();
-          return Response.json(summary, { status: summary.error ? 502 : 200 });
+          const status =
+            summary.status === "error" ? 502 : summary.status === "not_configured" ? 503 : 200;
+          return Response.json(summary, { status });
         } catch (err) {
-          console.error("reconcileMombongoOffers failed:", err);
+          console.error(
+            "reconcileMombongoOffers failed:",
+            err instanceof Error ? err.name : "unknown",
+          );
           return Response.json({ error: "internal_error" }, { status: 500 });
         }
       },

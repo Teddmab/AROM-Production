@@ -51,7 +51,7 @@ function canonicalStatus(raw: HarvestOfferDoc["status"]): "pending" | "accepted"
   return raw === "won" ? "accepted" : raw;
 }
 
-async function findOfferDocId(input: ApplyOfferOutcomeInput): Promise<string | null> {
+export async function findOfferDocId(input: ApplyOfferOutcomeInput): Promise<string | null> {
   if (input.externalReference) {
     const direct = await getDoc(doc(serverDb, "harvestOffers", input.externalReference));
     if (direct.exists()) return direct.id;
@@ -95,6 +95,16 @@ export async function applyMombongoOfferOutcome(
       };
     }
     const offer = snap.data() as HarvestOfferDoc;
+    // Exact correlation must hold in both directions: a doc found by
+    // externalReference that carries a DIFFERENT Mombongo offer id is a
+    // correlation inconsistency, never something to overwrite.
+    if (offer.mombongoOfferId && offer.mombongoOfferId !== input.mombongoOfferId) {
+      return {
+        kind: "conflict",
+        offerDocId,
+        reason: `L'offre locale ${offerDocId} référence l'offre Mombongo ${offer.mombongoOfferId}, pas ${input.mombongoOfferId}.`,
+      };
+    }
     const before = canonicalStatus(offer.status);
     const storedOccurredAt = offer.mombongoOccurredAt ?? "";
 
@@ -150,5 +160,96 @@ export async function applyMombongoOfferOutcome(
       offerDocId,
       reason: `L'offre est déjà '${before}' localement ; un nouvel événement rapporte '${input.status}'.`,
     };
+  });
+}
+
+/**
+ * Provenance marker written as `createdByUid` on offers imported by
+ * reconciliation. merged Backend Rules require `createdByUid is string` at
+ * create, so the field cannot be omitted; this is a *system* provenance
+ * marker, deliberately not a user uid (it never matches a users/ doc), so no
+ * human actor is invented. Consequence, reported as a Mobile follow-up:
+ * AROM-Mobile's "Mes offres" filters by createdByUid === the caller's uid,
+ * so imported offers are not shown there until Mobile handles them.
+ */
+export const RECONCILIATION_ACTOR = "system:mombongo-reconciliation";
+
+export interface RemoteOfferForImport {
+  offerId: string;
+  externalReference: string | null;
+  listingId: string | null;
+  quantityKg: number;
+  unitPriceCdf: number;
+  currency: string;
+  createdAt: string | null;
+}
+
+export type ImportRemoteOfferResult =
+  | { kind: "imported"; offerDocId: string }
+  | { kind: "exists"; offerDocId: string }
+  | { kind: "blocked"; reason: string };
+
+/**
+ * Reconstructs a missing local `harvestOffers` doc from authoritative
+ * Mombongo fields — only when every required field is really present.
+ * Ownership is provable: the DTO comes from getExternalHarvestOffers, whose
+ * partnerId is taken from the verified x-partner-id header, never the body,
+ * so every returned offer is this partner's. Nothing is fabricated: no
+ * listing, quantity, price or createdAt is invented (missing => blocked),
+ * and no user actor is assumed (see RECONCILIATION_ACTOR).
+ *
+ * Merged Rules force `status: 'pending'` at create, so the doc is created
+ * pending; a remote accepted/declined is applied as a second, separate
+ * step by the caller (applyMombongoOfferOutcome). If that second step is
+ * interrupted the offer simply exists as pending and the next run applies
+ * it. Doc id = externalReference when present (AROM's own identity, same
+ * scheme as createMombongoOffer), else `mombongo-<offerId>`.
+ */
+export async function importRemoteOffer(
+  dto: RemoteOfferForImport,
+): Promise<ImportRemoteOfferResult> {
+  if (!dto.offerId) return { kind: "blocked", reason: "offerId manquant" };
+  if (!dto.listingId) return { kind: "blocked", reason: "listingId manquant côté Mombongo" };
+  if (!dto.createdAt) return { kind: "blocked", reason: "createdAt manquant côté Mombongo" };
+  if (dto.currency !== "CDF") return { kind: "blocked", reason: "devise inattendue" };
+  if (!Number.isFinite(dto.quantityKg) || dto.quantityKg <= 0)
+    return { kind: "blocked", reason: "quantité invalide" };
+  if (!Number.isFinite(dto.unitPriceCdf) || dto.unitPriceCdf <= 0)
+    return { kind: "blocked", reason: "prix invalide" };
+  const docId = dto.externalReference || `mombongo-${dto.offerId}`;
+  if (docId.includes("/")) return { kind: "blocked", reason: "identifiant local non sûr" };
+
+  const ref = doc(serverDb, "harvestOffers", docId);
+  return runTransaction(serverDb, async (tx): Promise<ImportRemoteOfferResult> => {
+    const existing = await tx.get(ref);
+    if (existing.exists()) {
+      const local = existing.data() as HarvestOfferDoc;
+      return local.mombongoOfferId === dto.offerId
+        ? { kind: "exists", offerDocId: docId }
+        : {
+            kind: "blocked",
+            reason: `un document local ${docId} référence une autre offre Mombongo`,
+          };
+    }
+    const offer: HarvestOfferDoc & { importedFrom: string; importedAt: string } = {
+      id: docId,
+      listingId: dto.listingId!,
+      mombongoOfferId: dto.offerId,
+      offerQuantityKg: dto.quantityKg,
+      offerPricePerKgCdf: dto.unitPriceCdf,
+      message: null,
+      commodity: null,
+      province: null,
+      territory: null,
+      quality: null,
+      status: "pending",
+      createdAt: dto.createdAt!,
+      createdByUid: RECONCILIATION_ACTOR,
+      ...(dto.externalReference ? { externalReference: dto.externalReference } : {}),
+      importedFrom: "reconciliation",
+      importedAt: new Date().toISOString(),
+    };
+    tx.set(ref, offer);
+    return { kind: "imported", offerDocId: docId };
   });
 }

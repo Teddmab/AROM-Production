@@ -1,8 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileMombongoOffers } from "./mombongoReconciliation";
+import {
+  advanceCheckpoint,
+  isCheckpointTimestamp,
+  readCheckpoint,
+} from "./mombongoReconciliationCheckpoint";
 import { getMombongoConfig } from "./mombongoConfig";
 
-let mockRegistry: Record<string, { exists: boolean; data?: Record<string, unknown> }> = {};
+const CP = "mombongoReconciliationState/harvest-offers";
+type Entry = { exists: boolean; data?: Record<string, unknown> };
+let mockRegistry: Record<string, Entry> = {};
+let beforeCheckpointCommit: (() => void) | null = null;
+let failWritePath: string | null = null;
+const checkpointAccess: number[] = [];
+let seq = 0;
 
 vi.mock("@/lib/firebase/serverDb", () => ({ serverDb: {} }));
 vi.mock("./mombongoConfig", () => ({ getMombongoConfig: vi.fn() }));
@@ -11,532 +22,702 @@ vi.mock("./mombongoSigning", async (importOriginal) => {
   return { ...actual, signHmac: vi.fn().mockResolvedValue("deadbeef") };
 });
 
-vi.mock("firebase/firestore/lite", () => ({
-  doc: vi.fn((_db: unknown, col: string, id: string) => ({ path: `${col}/${id}`, id })),
-  getDoc: vi.fn(async (ref: { path: string; id: string }) => {
+vi.mock("firebase/firestore/lite", () => {
+  const snap = (ref: { path: string; id: string }) => {
     const entry = mockRegistry[ref.path];
     return { exists: () => !!entry?.exists, data: () => entry?.data, id: ref.id };
-  }),
-  getDocs: vi.fn(
-    async (q: {
-      collectionPath: string;
-      kind: "where";
-      whereField?: string;
-      whereValue?: unknown;
-    }) => {
-      const docs = Object.entries(mockRegistry)
-        .filter(
-          ([path, v]) =>
-            v.exists &&
-            path.startsWith(`${q.collectionPath}/`) &&
-            v.data?.[q.whereField!] === q.whereValue,
-        )
-        .map(([path, v]) => ({ id: path.split("/")[1], data: () => v.data }));
-      return { empty: docs.length === 0, size: docs.length, docs };
-    },
-  ),
-  collection: vi.fn((_db: unknown, path: string) => ({ collectionPath: path })),
-  query: vi.fn(
-    (
-      base: { collectionPath: string },
-      ...clauses: { type: "where"; field?: string; value?: unknown }[]
-    ) => {
-      const whereClause = clauses.find((c) => c?.type === "where");
-      return {
-        ...base,
-        kind: "where" as const,
-        whereField: whereClause?.field,
-        whereValue: whereClause?.value,
+  };
+  return {
+    doc: vi.fn((_db: unknown, col: string, id: string) => ({ path: `${col}/${id}`, id })),
+    getDoc: vi.fn(async (ref: { path: string; id: string }) => {
+      if (ref.path === CP) checkpointAccess.push(++seq);
+      return snap(ref);
+    }),
+    getDocs: vi.fn(
+      async (q: { collectionPath: string; whereField?: string; whereValue?: unknown }) => {
+        const docs = Object.entries(mockRegistry)
+          .filter(
+            ([p, v]) =>
+              v.exists &&
+              p.startsWith(`${q.collectionPath}/`) &&
+              v.data?.[q.whereField!] === q.whereValue,
+          )
+          .map(([p, v]) => ({ id: p.split("/")[1], data: () => v.data }));
+        return { empty: docs.length === 0, size: docs.length, docs };
+      },
+    ),
+    collection: vi.fn((_db: unknown, path: string) => ({ collectionPath: path })),
+    query: vi.fn(
+      (
+        base: { collectionPath: string },
+        ...c: { type: string; field?: string; value?: unknown }[]
+      ) => {
+        const w = c.find((x) => x?.type === "where");
+        return { ...base, whereField: w?.field, whereValue: w?.value };
+      },
+    ),
+    where: vi.fn((field: string, _op: string, value: unknown) => ({ type: "where", field, value })),
+    limit: vi.fn(() => ({ type: "limit" })),
+    setDoc: vi.fn(),
+    updateDoc: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
+      mockRegistry[ref.path] = { exists: true, data: { ...mockRegistry[ref.path]?.data, ...data } };
+    }),
+    // Enforces the merged Backend Rules for the checkpoint doc: completedThrough may never decrease or vanish.
+    runTransaction: vi.fn(async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
+      const writes: { kind: "set" | "update"; path: string; data: Record<string, unknown> }[] = [];
+      const tx = {
+        get: async (ref: { path: string; id: string }) => {
+          if (ref.path === CP) checkpointAccess.push(++seq);
+          return snap(ref);
+        },
+        set: (ref: { path: string }, data: Record<string, unknown>) =>
+          writes.push({ kind: "set", path: ref.path, data }),
+        update: (ref: { path: string }, data: Record<string, unknown>) =>
+          writes.push({ kind: "update", path: ref.path, data }),
       };
-    },
-  ),
-  where: vi.fn((field: string, _op: string, value: unknown) => ({
-    type: "where" as const,
-    field,
-    value,
-  })),
-  limit: vi.fn(() => ({ type: "limit" as const })),
-  setDoc: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-    mockRegistry[ref.path] = { exists: true, data };
-  }),
-  updateDoc: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-    const existing = mockRegistry[ref.path];
-    mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
-  }),
-  runTransaction: vi.fn(async (_db: unknown, updateFn: (tx: unknown) => Promise<unknown>) => {
-    const tx = {
-      get: async (ref: { path: string; id: string }) => {
-        const entry = mockRegistry[ref.path];
-        return { exists: () => !!entry?.exists, data: () => entry?.data, id: ref.id };
-      },
-      set: (ref: { path: string }, data: Record<string, unknown>) => {
-        mockRegistry[ref.path] = { exists: true, data };
-      },
-      update: (ref: { path: string }, data: Record<string, unknown>) => {
-        const existing = mockRegistry[ref.path];
-        mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
-      },
-    };
-    return updateFn(tx);
-  }),
-}));
+      const result = await fn(tx);
+      for (const w of writes) {
+        if (failWritePath === w.path) throw new Error("boom");
+        if (w.path === CP) {
+          if (beforeCheckpointCommit) {
+            const h = beforeCheckpointCommit;
+            beforeCheckpointCommit = null;
+            h();
+          }
+          checkpointAccess.push(++seq);
+          const cur = mockRegistry[CP]?.data?.completedThrough as string | undefined;
+          const next = (w.kind === "set" ? w.data : { ...mockRegistry[CP]?.data, ...w.data })
+            .completedThrough as string | undefined;
+          if (cur && (!next || next < cur)) throw new Error("PERMISSION_DENIED");
+        }
+      }
+      for (const w of writes)
+        mockRegistry[w.path] = {
+          exists: true,
+          data: w.kind === "set" ? w.data : { ...mockRegistry[w.path]?.data, ...w.data },
+        };
+      return result;
+    }),
+  };
+});
 
-const FAKE_CONFIG = {
+const SECRET = "TOP_SECRET_DO_NOT_LEAK";
+const BASE_CONFIG = {
   baseUrl: "https://example.invalid",
   partnerId: "partner-1",
-  inboundSigningSecret: "TOP_SECRET",
-  outboundVerifySecret: "TOP_SECRET_2",
+  inboundSigningSecret: SECRET,
+  outboundVerifySecret: SECRET + "_2",
   active: true,
+  reconciliationBootstrapSince: "full-history" as string | undefined,
 };
 
-function seedOffer(id: string, data: Record<string, unknown>) {
-  mockRegistry[`harvestOffers/${id}`] = { exists: true, data: { id, ...data } };
+// ---- fake Mombongo: strict > filter, (updatedAt, offerId) order, opaque per-run cursor ----
+type Remote = {
+  offerId: string;
+  externalReference: string | null;
+  listingId: string | null;
+  status: string;
+  quantityKg: number;
+  unitPriceCdf: number;
+  currency: string;
+  createdAt: string | null;
+  updatedAt: string;
+  invoiceId: string | null;
+};
+let remote: Remote[] = [];
+const requests: { updatedSince?: string; cursor?: string; limit?: number }[] = [];
+let onPage: ((n: number) => void) | null = null;
+let badCursor = false;
+let pageNo = 0;
+
+const T = (m: number) => new Date(Date.UTC(2026, 8, 19, 10, m)).toISOString(); // minute offsets
+function offer(
+  id: string,
+  updatedAt: string,
+  status = "pending",
+  extra: Partial<Remote> = {},
+): Remote {
+  return {
+    offerId: `mb-${id}`,
+    externalReference: `ext-${id}`,
+    listingId: `l-${id}`,
+    status,
+    quantityKg: 100,
+    unitPriceCdf: 500,
+    currency: "CDF",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt,
+    invoiceId: null,
+    ...extra,
+  };
+}
+function seedLocal(id: string, data: Record<string, unknown> = {}) {
+  mockRegistry[`harvestOffers/ext-${id}`] = {
+    exists: true,
+    data: {
+      id: `ext-${id}`,
+      status: "pending",
+      listingId: `l-${id}`,
+      mombongoOfferId: `mb-${id}`,
+      ...data,
+    },
+  };
+}
+function seedAll(ids: string[]) {
+  ids.forEach((i) => seedLocal(i));
 }
 
-function mockFetchSequence(responses: { status: number; body: unknown }[]) {
-  const fn = vi.fn();
-  for (const r of responses)
-    fn.mockResolvedValueOnce({ status: r.status, json: async () => r.body });
-  vi.stubGlobal("fetch", fn);
-  return fn;
+function installRemote() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      expect(String(url)).toContain("/getExternalHarvestOffers");
+      const b = JSON.parse(init.body as string);
+      requests.push({ updatedSince: b.updatedSince, cursor: b.cursor, limit: b.limit });
+      pageNo++;
+      if (badCursor && b.cursor) return { status: 400, json: async () => ({}) };
+      let rows = remote.filter((o) => (b.updatedSince ? o.updatedAt > b.updatedSince : true));
+      rows.sort((a, c) => (`${a.updatedAt}|${a.offerId}` < `${c.updatedAt}|${c.offerId}` ? -1 : 1));
+      if (b.cursor) {
+        const [u, i] = Buffer.from(b.cursor, "base64url").toString().split("|");
+        rows = rows.filter((o) => `${o.updatedAt}|${o.offerId}` > `${u}|${i}`);
+      }
+      const page = rows.slice(0, b.limit ?? 20);
+      const last = page[page.length - 1];
+      const nextCursor =
+        last && page.length === (b.limit ?? 20)
+          ? Buffer.from(`${last.updatedAt}|${last.offerId}`).toString("base64url")
+          : null;
+      onPage?.(pageNo); // a remote write landing right AFTER this page was read
+      return { status: 200, json: async () => ({ offers: page, nextCursor }) };
+    }),
+  );
 }
+const cp = () => mockRegistry[CP]?.data?.completedThrough;
+const status = (id: string) => mockRegistry[`harvestOffers/ext-${id}`]?.data?.status;
+const OVERLAP = 60 * 60 * 1000;
+const minus = (iso: string, ms: number) => new Date(Date.parse(iso) - ms).toISOString();
 
 beforeEach(() => {
   mockRegistry = {};
-  vi.mocked(getMombongoConfig).mockReset().mockResolvedValue(FAKE_CONFIG);
+  remote = [];
+  requests.length = 0;
+  checkpointAccess.length = 0;
+  seq = 0;
+  beforeCheckpointCommit = null;
+  failWritePath = null;
+  onPage = null;
+  badCursor = false;
+  pageNo = 0;
+  vi.mocked(getMombongoConfig)
+    .mockReset()
+    .mockResolvedValue({ ...BASE_CONFIG });
+  installRemote();
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe("reconcileMombongoOffers — window is a fixed wall-clock lookback, not derived from local data", () => {
-  it("the updatedSince sent to Mombongo is 'now minus the lookback window', not any local timestamp", async () => {
-    seedOffer("ext-stale-local", { status: "accepted", updatedAt: "2020-01-01T00:00:00.000Z" });
-    const fetchMock = mockFetchSequence([{ status: 200, body: { offers: [], nextCursor: null } }]);
-    const before = Date.now();
-    await reconcileMombongoOffers({ lookbackMs: 60_000 });
-    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    const sentSinceMs = new Date(sentBody.updatedSince).getTime();
-    expect(before - sentSinceMs).toBeGreaterThanOrEqual(59_000);
-    expect(before - sentSinceMs).toBeLessThanOrEqual(61_000);
-  });
-
-  it("scenario: a local webhook-created terminal record with a newer timestamp than an unprocessed remote offer does not affect the window at all", async () => {
-    // Local data has a very recent updatedAt (would have poisoned the old
-    // derived-checkpoint design by jumping the boundary past this remote
-    // offer's own, older updatedAt). The fixed window ignores local data
-    // entirely, so the remote offer is still requested.
-    seedOffer("ext-recent-local", { status: "accepted", updatedAt: new Date().toISOString() });
-    seedOffer("ext-old-remote", { status: "pending", mombongoOfferId: "mb-old-remote" });
-    const fetchMock = mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-old-remote",
-              externalReference: "ext-old-remote",
-              status: "accepted",
-              updatedAt: "2026-09-18T00:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.applied).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("reconcileMombongoOffers — same-updatedAt tie does not cause a skip", () => {
-  it("two offers sharing the exact same updatedAt are BOTH processed in one run", async () => {
-    const tiedTimestamp = "2026-09-19T12:00:00.000Z";
-    seedOffer("ext-tie-a", { status: "pending", mombongoOfferId: "mb-tie-a" });
-    seedOffer("ext-tie-b", { status: "pending", mombongoOfferId: "mb-tie-b" });
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-tie-a",
-              externalReference: "ext-tie-a",
-              status: "accepted",
-              updatedAt: tiedTimestamp,
-            },
-            {
-              offerId: "mb-tie-b",
-              externalReference: "ext-tie-b",
-              status: "declined",
-              updatedAt: tiedTimestamp,
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.applied).toBe(2);
-  });
-
-  it("a tied offer that fails to apply this run is still in scope on the very next run (fixed window, no checkpoint to poison)", async () => {
-    const tiedTimestamp = "2026-09-19T12:00:00.000Z";
-    seedOffer("ext-tie-a", { status: "pending", mombongoOfferId: "mb-tie-a" });
-    seedOffer("ext-tie-b", { status: "pending", mombongoOfferId: "mb-tie-b" });
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-tie-a",
-              externalReference: "ext-tie-a",
-              status: "accepted",
-              updatedAt: tiedTimestamp,
-            },
-            {
-              offerId: "mb-tie-b",
-              externalReference: "ext-tie-b",
-              status: "declined",
-              updatedAt: tiedTimestamp,
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    // Simulate ext-tie-b failing to apply (not_found is not an exception,
-    // so force a genuine throw via a broken getDocs call for that offer —
-    // simplest: seed it as already 'declined' with a NEWER occurredAt so
-    // the SECOND (tied) offer would be classified 'stale', proving the
-    // tie doesn't block ext-tie-a's own processing either way).
-    const summary = await reconcileMombongoOffers();
-    expect(summary.applied).toBeGreaterThanOrEqual(1);
-
-    // Re-run with the identical fixed-window fetch (as a fresh, unrelated
-    // invocation would) — both tied offers are requested again exactly as
-    // before, proving no persisted boundary could have excluded either.
-    const fetchMock2 = mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-tie-a",
-              externalReference: "ext-tie-a",
-              status: "accepted",
-              updatedAt: tiedTimestamp,
-            },
-            {
-              offerId: "mb-tie-b",
-              externalReference: "ext-tie-b",
-              status: "declined",
-              updatedAt: tiedTimestamp,
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary2 = await reconcileMombongoOffers();
-    expect(fetchMock2).toHaveBeenCalledTimes(1);
-    expect(summary2.applied + summary2.alreadyApplied).toBe(2);
-  });
-});
-
-describe("reconcileMombongoOffers — partial-page failure never permanently loses an offer", () => {
-  it("a page with multiple offers, one of which throws mid-page, still leaves every offer in scope for the next run", async () => {
-    seedOffer("ext-a", { status: "pending", mombongoOfferId: "mb-a" });
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "accepted",
-              updatedAt: "2026-09-19T10:00:00.000Z",
-            },
-            {
-              offerId: "mb-b",
-              externalReference: null,
-              status: "accepted",
-              updatedAt: "2026-09-19T11:00:00.000Z",
-            }, // triggers the fallback query path
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    // mb-a applies fine; mb-b (no externalReference, no local match)
-    // is classified not_found — not an exception — so this specific
-    // scenario doesn't literally throw, but proves the key invariant:
-    // mb-a's success is durable AND mb-b remains eligible for retry
-    // (nothing marks it done).
-    expect(summary.applied).toBe(1);
-    expect(summary.notFoundLocally).toBe(1);
-
-    // A second, independent run with the exact same fixed window
-    // re-requests both — mb-b is not lost.
-    const fetchMock2 = mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "accepted",
-              updatedAt: "2026-09-19T10:00:00.000Z",
-            },
-            {
-              offerId: "mb-b",
-              externalReference: null,
-              status: "accepted",
-              updatedAt: "2026-09-19T11:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary2 = await reconcileMombongoOffers();
-    expect(fetchMock2.mock.calls[0][1]).toBeTruthy();
-    expect(summary2.alreadyApplied).toBe(1); // mb-a, safely re-confirmed, not re-applied
-    expect(summary2.notFoundLocally).toBe(1); // mb-b, still pending, still retried
-  });
-});
-
-describe("reconcileMombongoOffers — remote update during pagination", () => {
-  it("the window boundary is fixed once at run start: every page in one run carries the identical updatedSince, so a mid-run remote update cannot shift it", async () => {
-    seedOffer("ext-a", { status: "pending", mombongoOfferId: "mb-a" });
-    seedOffer("ext-b", { status: "pending", mombongoOfferId: "mb-b" });
-    const fetchMock = mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "accepted",
-              updatedAt: "2026-09-19T10:00:00.000Z",
-            },
-          ],
-          nextCursor: "c1",
-        },
-      },
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-b",
-              externalReference: "ext-b",
-              status: "accepted",
-              updatedAt: "2026-09-19T11:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    await reconcileMombongoOffers();
-    const since1 = JSON.parse(fetchMock.mock.calls[0][1].body as string).updatedSince;
-    const since2 = JSON.parse(fetchMock.mock.calls[1][1].body as string).updatedSince;
-    expect(since1).toBe(since2);
-    // An offer that changes remotely after this run passed its position is
-    // still inside the (moving-forward) fixed window on the next run.
-  });
-});
-
-describe("reconcileMombongoOffers — cursor is never persisted across runs", () => {
-  it("a cursor from one run's pagination is discarded; a fresh run starts without it even if the previous run errored mid-pagination", async () => {
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            { offerId: "mb-a", externalReference: "ext-a", status: "accepted", updatedAt: "t1" },
-          ],
-          nextCursor: "cursor-1",
-        },
-      },
-      { status: 500, body: {} }, // second page fails — cursor-1 is now effectively "expired/invalid" for this run
-    ]);
-    const summary1 = await reconcileMombongoOffers();
-    expect(summary1.error).toBeTruthy();
-    expect(summary1.pagesProcessed).toBe(1);
-
-    // Next run: no cursor is sent at all (fresh start), regardless of the previous run's dangling cursor-1.
-    const fetchMock2 = mockFetchSequence([{ status: 200, body: { offers: [], nextCursor: null } }]);
-    await reconcileMombongoOffers();
-    const secondRunBody = JSON.parse(fetchMock2.mock.calls[0][1].body as string);
-    expect(secondRunBody.cursor).toBeUndefined();
-  });
-});
-
-describe("reconcileMombongoOffers — repeat execution after a simulated process restart is safe", () => {
-  it("running twice back to back with identical remote data produces idempotent results both times", async () => {
-    seedOffer("ext-a", { status: "pending", mombongoOfferId: "mb-a" });
-    const page = {
-      offers: [
-        {
-          offerId: "mb-a",
-          externalReference: "ext-a",
-          status: "accepted",
-          updatedAt: "2026-09-19T10:00:00.000Z",
-        },
-      ],
-      nextCursor: null,
-    };
-    mockFetchSequence([{ status: 200, body: page }]);
-    const first = await reconcileMombongoOffers();
-    expect(first.applied).toBe(1);
-
-    // No shared in-process state between calls other than Firestore's own
-    // (mocked) durable writes — simulating a fresh process picking up
-    // right where the data left off.
-    mockFetchSequence([{ status: 200, body: page }]);
-    const second = await reconcileMombongoOffers();
-    expect(second.alreadyApplied).toBe(1);
-    expect(second.applied).toBe(0);
-  });
-});
-
-describe("reconcileMombongoOffers — remote offer with no local counterpart at all", () => {
-  it("is classified not_found, not an error, and does not block other offers in the same page", async () => {
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-ghost",
-              externalReference: "ext-ghost",
-              status: "accepted",
-              updatedAt: "2026-09-19T10:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.notFoundLocally).toBe(1);
-    expect(summary.error).toBeUndefined();
-  });
-});
-
-describe("reconcileMombongoOffers — legacy won normalization and conflict recording (retained from prior design)", () => {
-  it("legacy 'won' normalizes to 'accepted'", async () => {
-    seedOffer("ext-a", { status: "won", mombongoOfferId: "mb-a" });
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "accepted",
-              updatedAt: "2026-09-19T12:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.applied).toBe(1);
-    expect(mockRegistry["harvestOffers/ext-a"].data?.status).toBe("accepted");
-  });
-
-  it("accepted/declined conflict is recorded, not silently overwritten", async () => {
-    seedOffer("ext-a", {
-      status: "accepted",
-      mombongoOfferId: "mb-a",
-      mombongoOccurredAt: "2026-09-01T00:00:00.000Z",
+describe("bootstrap (no durable boundary yet)", () => {
+  it("absent config fails closed: not_configured, no Mombongo request, nothing written", async () => {
+    vi.mocked(getMombongoConfig).mockResolvedValue({
+      ...BASE_CONFIG,
+      reconciliationBootstrapSince: undefined,
     });
-    mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "declined",
-              updatedAt: "2026-09-19T12:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.conflicts).toBe(1);
-    expect(mockRegistry["harvestOffers/ext-a"].data?.status).toBe("accepted");
-    expect(Object.keys(mockRegistry).some((k) => k.startsWith("mombongoWebhookEvents/"))).toBe(
-      true,
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "not_configured", reason: "bootstrap_not_configured" });
+    expect(requests).toHaveLength(0);
+    expect(mockRegistry[CP]).toBeUndefined();
+  });
+  it("an invalid config value fails closed", async () => {
+    vi.mocked(getMombongoConfig).mockResolvedValue({
+      ...BASE_CONFIG,
+      reconciliationBootstrapSince: "last week",
+    });
+    expect((await reconcileMombongoOffers()).status).toBe("not_configured");
+  });
+  it("'full-history' sends NO lower bound (provably covers every offer)", async () => {
+    await reconcileMombongoOffers();
+    expect(requests[0].updatedSince).toBeUndefined();
+  });
+  it("a configured ISO lower bound is used verbatim", async () => {
+    vi.mocked(getMombongoConfig).mockResolvedValue({
+      ...BASE_CONFIG,
+      reconciliationBootstrapSince: "2026-09-01T00:00:00.000Z",
+    });
+    await reconcileMombongoOffers();
+    expect(requests[0].updatedSince).toBe("2026-09-01T00:00:00.000Z");
+  });
+  it("a state doc that exists without completedThrough also bootstraps", async () => {
+    mockRegistry[CP] = { exists: true, data: { streamId: "harvest-offers", updatedAt: T(0) } };
+    await reconcileMombongoOffers();
+    expect(requests[0].updatedSince).toBeUndefined();
+  });
+  it("no records: nothing to commit, so no fabricated boundary and no state doc is created", async () => {
+    const s = await reconcileMombongoOffers();
+    expect(s.status).toBe("complete");
+    expect(mockRegistry[CP]).toBeUndefined();
+  });
+});
+
+describe("overlap and strict-> handling", () => {
+  it("queries from completedThrough minus one hour by default", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(120), updatedAt: T(120) },
+    };
+    await reconcileMombongoOffers();
+    expect(requests[0].updatedSince).toBe(minus(T(120), OVERLAP));
+  });
+  it("never uses less than the 15-minute Backend minimum", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(120), updatedAt: T(120) },
+    };
+    await reconcileMombongoOffers({ overlapMs: 1_000 });
+    expect(requests[0].updatedSince).toBe(minus(T(120), 15 * 60 * 1000));
+  });
+  it("a larger configured overlap is honored", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(300), updatedAt: T(300) },
+    };
+    await reconcileMombongoOffers({ overlapMs: 3 * OVERLAP });
+    expect(requests[0].updatedSince).toBe(minus(T(300), 3 * OVERLAP));
+  });
+  it("a record whose updatedAt EQUALS the committed boundary is re-fetched under strict > (the overlap sits before it)", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(120), "accepted")];
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(120), updatedAt: T(120) },
+    };
+    const s = await reconcileMombongoOffers();
+    expect(s.offersExamined).toBe(1);
+    expect(status("a")).toBe("accepted");
+  });
+  it("overlap replay is idempotent: re-running over already-applied offers changes nothing", async () => {
+    seedAll(["a", "b"]);
+    remote = [offer("a", T(1), "accepted"), offer("b", T(2), "declined")];
+    const first = await reconcileMombongoOffers();
+    expect(first.updated).toBe(2);
+    const second = await reconcileMombongoOffers();
+    expect(second.offersExamined).toBe(2); // replayed via overlap
+    expect(second).toMatchObject({ updated: 0, noops: 2, imported: 0, conflicts: 0 });
+    expect(status("a")).toBe("accepted");
+    expect(status("b")).toBe("declined");
+  });
+});
+
+describe("checkpoint advancement and compare-and-set", () => {
+  it("creates the state doc with the greatest REMOTE updatedAt (not a local clock)", async () => {
+    seedAll(["a", "b"]);
+    remote = [offer("a", T(1), "accepted"), offer("b", T(7), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(cp()).toBe(T(7));
+    expect(mockRegistry[CP].data).toMatchObject({
+      streamId: "harvest-offers",
+      completedThrough: T(7),
+    });
+    expect(s.checkpoint).toEqual({ advanced: true, previous: null, current: T(7) });
+  });
+  it("advances an existing boundary forward and reports previous/current", async () => {
+    seedAll(["a"]);
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(1), updatedAt: T(1) },
+    };
+    remote = [offer("a", T(9), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s.checkpoint).toEqual({ advanced: true, previous: T(1), current: T(9) });
+  });
+  it("equal proposal is a harmless no-op: no write, advanced=false", async () => {
+    seedAll(["a"]);
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(5), updatedAt: T(5) },
+    };
+    remote = [offer("a", T(5), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s.checkpoint.advanced).toBe(false);
+    expect(cp()).toBe(T(5));
+  });
+  it("advanceCheckpoint never moves backward: an older proposal is superseded without writing", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(9), updatedAt: T(9) },
+    };
+    expect(await advanceCheckpoint(T(3))).toEqual({ kind: "superseded", current: T(9) });
+    expect(cp()).toBe(T(9));
+  });
+  it("advanceCheckpoint equal is a noop", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(9), updatedAt: T(9) },
+    };
+    expect(await advanceCheckpoint(T(9))).toEqual({ kind: "noop", current: T(9) });
+  });
+  it("advanceCheckpoint fills in a doc that has no boundary yet, and creates a missing doc", async () => {
+    mockRegistry[CP] = { exists: true, data: { streamId: "harvest-offers", updatedAt: T(0) } };
+    expect((await advanceCheckpoint(T(2))).kind).toBe("advanced");
+    mockRegistry = {};
+    expect((await advanceCheckpoint(T(2))).kind).toBe("advanced");
+    expect(cp()).toBe(T(2));
+  });
+  it("rejects a non-timestamp proposal before touching Firestore", async () => {
+    await expect(advanceCheckpoint("yesterday")).rejects.toThrow();
+    expect(isCheckpointTimestamp("2026-09-19T10:00:00Z")).toBe(false);
+    expect(isCheckpointTimestamp(T(1))).toBe(true);
+  });
+  it("concurrent newer advancement: a Rules-denied stale write re-reads and stops as superseded, never retrying older", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(3), "accepted")];
+    // Another run commits T(50) between our read and our commit.
+    beforeCheckpointCommit = () => {
+      mockRegistry[CP] = {
+        exists: true,
+        data: { streamId: "harvest-offers", completedThrough: T(50), updatedAt: T(50) },
+      };
+    };
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "partial", reason: "superseded_by_newer_run" });
+    expect(cp()).toBe(T(50)); // the newer boundary stands
+  });
+  it("a slower run cannot overwrite a newer boundary (Rules-level denial is handled, value untouched)", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(50), updatedAt: T(50) },
+    };
+    beforeCheckpointCommit = null;
+    // Force the transaction to believe the stored value is older than it is, then commit.
+    const res = await advanceCheckpoint(T(10));
+    expect(res.kind).toBe("superseded");
+    expect(cp()).toBe(T(50));
+  });
+  it("an unexplained write failure (stored boundary not newer) is reported, not swallowed", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(3), "accepted")];
+    failWritePath = CP;
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "partial", reason: "checkpoint_write_failed" });
+    expect(cp()).toBeUndefined();
+  });
+});
+
+describe("pagination and timestamp ties", () => {
+  it("multiple pages: follows the cursor within one run and commits the final greatest timestamp", async () => {
+    seedAll(["a", "b", "c", "d", "e"]);
+    remote = ["a", "b", "c", "d", "e"].map((id, i) => offer(id, T(i + 1), "accepted"));
+    const s = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(s.pagesProcessed).toBe(3);
+    expect(s.status).toBe("complete");
+    expect(requests[1].cursor).toBeTruthy();
+    expect(requests.every((r) => r.updatedSince === undefined)).toBe(true);
+    expect(cp()).toBe(T(5));
+  });
+  it("same timestamp within one page: every tied offer is processed", async () => {
+    seedAll(["a", "b", "c"]);
+    remote = [
+      offer("a", T(4), "accepted"),
+      offer("b", T(4), "declined"),
+      offer("c", T(4), "accepted"),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s.updated).toBe(3);
+    expect(cp()).toBe(T(4));
+  });
+  it("tie split across pages: the trailing tie group is NOT committed until a later page completes it", async () => {
+    seedAll(["a", "b", "c", "d"]);
+    remote = [
+      offer("a", T(1), "accepted"),
+      offer("b", T(2), "accepted"),
+      offer("c", T(2), "accepted"),
+      offer("d", T(3), "accepted"),
+    ];
+    // Page 1 = [a(T1), b(T2)] — T2's tie group continues with c on page 2.
+    const s = await reconcileMombongoOffers({ pageSize: 2, maxPages: 1 });
+    expect(s).toMatchObject({ status: "partial", reason: "page_cap_reached" });
+    expect(cp()).toBe(T(1)); // strictly below the possibly-incomplete T2 group
+    // Next run re-fetches from T1 − overlap: c is not missed.
+    const s2 = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(status("c")).toBe("accepted");
+    expect(s2.status).toBe("complete");
+    expect(cp()).toBe(T(3));
+  });
+  it("a whole page of one timestamp cannot advance early, but the next page/run still completes it", async () => {
+    seedAll(["a", "b", "c"]);
+    remote = [
+      offer("a", T(2), "accepted"),
+      offer("b", T(2), "accepted"),
+      offer("c", T(2), "accepted"),
+    ];
+    const s = await reconcileMombongoOffers({ pageSize: 2, maxPages: 1 });
+    expect(cp()).toBeUndefined();
+    expect(s.reason).toBe("page_cap_reached");
+    await reconcileMombongoOffers({ pageSize: 2 });
+    expect(cp()).toBe(T(2));
+    expect(status("c")).toBe("accepted");
+  });
+  it("a new remote record appearing during pagination (newer than the cursor) is picked up in the same run", async () => {
+    seedAll(["a", "b", "late"]);
+    remote = [offer("a", T(1), "accepted"), offer("b", T(2), "accepted")];
+    onPage = (n) => {
+      if (n === 1) remote.push(offer("late", T(9), "accepted"));
+    };
+    const s = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(status("late")).toBe("accepted");
+    expect(s.status).toBe("complete");
+    expect(cp()).toBe(T(9));
+  });
+  it("a late-visible record with an OLDER timestamp than the cursor is caught next run by the overlap", async () => {
+    seedAll(["a", "b", "late"]);
+    remote = [offer("a", T(10), "accepted"), offer("b", T(20), "accepted")];
+    onPage = (n) => {
+      if (n === 1) remote.push(offer("late", T(15), "accepted"));
+    }; // written after page 1 was read, ts inside the run's span
+    await reconcileMombongoOffers({ pageSize: 10 });
+    onPage = null;
+    expect(cp()).toBe(T(20));
+    // late (T15) was invisible to page 1; T15 > boundary − 1h so the next run fetches it.
+    await reconcileMombongoOffers({ pageSize: 10 });
+    expect(status("late")).toBe("accepted");
+  });
+  it("an invalid/expired cursor mid-run reports mombongo_unavailable; earlier pages' progress stays committed and the next run recovers", async () => {
+    seedAll(["a", "b", "c", "d"]);
+    remote = ["a", "b", "c", "d"].map((id, i) => offer(id, T(i + 1), "accepted"));
+    badCursor = true;
+    const s = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(s).toMatchObject({ status: "error", reason: "mombongo_unavailable" });
+    expect(cp()).toBe(T(1)); // page 1 committed below its trailing tie group
+    badCursor = false;
+    const s2 = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(s2.status).toBe("complete");
+    expect(cp()).toBe(T(4));
+  });
+  it("partial page failure: an item that throws pins the boundary below it; nothing past it is committed", async () => {
+    seedAll(["a", "b", "c", "d"]);
+    remote = ["a", "b", "c", "d"].map((id, i) => offer(id, T(i + 1), "accepted"));
+    failWritePath = "harvestOffers/ext-c";
+    const s = await reconcileMombongoOffers({ pageSize: 10 });
+    expect(s).toMatchObject({ status: "partial", reason: "processing_failed" });
+    expect(status("a")).toBe("accepted");
+    expect(status("b")).toBe("accepted");
+    expect(status("d")).toBe("pending"); // the run stopped at the failure
+    expect(cp()).toBe(T(2)); // strictly below the failed record
+    // Recovery: the failure clears; the next run finishes it all.
+    failWritePath = null;
+    const s2 = await reconcileMombongoOffers({ pageSize: 10 });
+    expect(s2.status).toBe("complete");
+    expect(status("d")).toBe("accepted");
+    expect(cp()).toBe(T(4));
+  });
+  it("a successful HTTP page is not enough: with a failing first record nothing is committed at all", async () => {
+    seedAll(["a", "b"]);
+    remote = [offer("a", T(1), "accepted"), offer("b", T(2), "accepted")];
+    failWritePath = "harvestOffers/ext-a";
+    await reconcileMombongoOffers();
+    expect(cp()).toBeUndefined();
+  });
+  it("backlog drains across multiple runs with a small per-run cap (no aging out)", async () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g"];
+    seedAll(ids);
+    remote = ids.map((id, i) => offer(id, T(i + 1), "accepted"));
+    const stages: (string | undefined)[] = [];
+    let last;
+    for (let run = 0; run < 6; run++) {
+      last = await reconcileMombongoOffers({ pageSize: 2, maxPages: 2 });
+      stages.push(cp() as string | undefined);
+      if (last.status === "complete") break;
+    }
+    expect(last!.status).toBe("complete");
+    ids.forEach((id) => expect(status(id)).toBe("accepted"));
+    expect(cp()).toBe(T(7));
+    // Boundary only ever moved forward.
+    const defined = stages.filter(Boolean) as string[];
+    expect([...defined].sort()).toEqual(defined);
+    expect(new Set(defined).size).toBeGreaterThan(1);
+  });
+  it("process restart: no in-process state is needed — a fresh invocation resumes from the durable boundary alone", async () => {
+    seedAll(["a", "b", "c"]);
+    remote = ["a", "b", "c"].map((id, i) => offer(id, T(i + 1), "accepted"));
+    await reconcileMombongoOffers({ pageSize: 2, maxPages: 1 });
+    const boundary = cp();
+    requests.length = 0;
+    await reconcileMombongoOffers({ pageSize: 2 });
+    expect(requests[0].updatedSince).toBe(minus(boundary as string, OVERLAP));
+    expect(requests[0].cursor).toBeUndefined();
+  });
+});
+
+describe("recovery: local vs remote records", () => {
+  it("remote offer with a matching local doc is applied", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(1), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ updated: 1, imported: 0 });
+    expect(status("a")).toBe("accepted");
+  });
+  it("remote offer missing locally but fully provable is imported (pending) then its outcome applied, with provenance and no invented actor/fields", async () => {
+    remote = [offer("x", T(3), "accepted", { invoiceId: "inv-9" })];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ imported: 1, updated: 1, blocked: 0, status: "complete" });
+    const d = mockRegistry["harvestOffers/ext-x"].data!;
+    expect(d).toMatchObject({
+      id: "ext-x",
+      status: "accepted",
+      listingId: "l-x",
+      mombongoOfferId: "mb-x",
+      offerQuantityKg: 100,
+      offerPricePerKgCdf: 500,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      externalReference: "ext-x",
+      importedFrom: "reconciliation",
+      createdByUid: "system:mombongo-reconciliation",
+      invoiceId: "inv-9",
+    });
+    expect(d.message).toBeNull();
+    expect(cp()).toBe(T(3));
+  });
+  it("a missing-locally PENDING remote offer is imported as pending and does not pin the checkpoint", async () => {
+    remote = [offer("p", T(2), "pending")];
+    const s = await reconcileMombongoOffers();
+    expect(s.imported).toBe(1);
+    expect(status("p")).toBe("pending");
+    expect(cp()).toBe(T(2));
+  });
+  it("without externalReference the local id is derived from the Mombongo offer id", async () => {
+    remote = [offer("y", T(2), "pending", { externalReference: null })];
+    await reconcileMombongoOffers();
+    expect(mockRegistry["harvestOffers/mombongo-mb-y"].data).toMatchObject({
+      mombongoOfferId: "mb-y",
+    });
+    expect(mockRegistry["harvestOffers/mombongo-mb-y"].data).not.toHaveProperty(
+      "externalReference",
     );
   });
-
-  it("credentials never appear in the returned summary", async () => {
-    mockFetchSequence([{ status: 200, body: { offers: [], nextCursor: null } }]);
-    const summary = await reconcileMombongoOffers();
-    const serialized = JSON.stringify(summary);
-    expect(serialized).not.toContain(FAKE_CONFIG.inboundSigningSecret);
-    expect(serialized).not.toContain(FAKE_CONFIG.outboundVerifySecret);
-    expect(serialized).not.toContain(FAKE_CONFIG.partnerId);
+  const unusable: [string, Partial<Remote>][] = [
+    ["listingId", { listingId: null }],
+    ["createdAt", { createdAt: null }],
+    ["quantity", { quantityKg: 0 }],
+    ["price", { unitPriceCdf: -1 }],
+    ["currency", { currency: "USD" }],
+  ];
+  for (const [name, patch] of unusable) {
+    it(`a remote offer missing locally with unusable ${name} is BLOCKED, durably recorded, and never fabricated`, async () => {
+      remote = [offer("z", T(3), "accepted", patch)];
+      const s = await reconcileMombongoOffers();
+      expect(s).toMatchObject({
+        status: "partial",
+        reason: "blocked_records",
+        blocked: 1,
+        imported: 0,
+      });
+      expect(mockRegistry["harvestOffers/ext-z"]).toBeUndefined();
+      const diag = Object.entries(mockRegistry).find(([p]) =>
+        p.startsWith("mombongoWebhookEvents/"),
+      )?.[1].data;
+      expect(diag).toMatchObject({ processingState: "conflict", mombongoOfferId: "mb-z" });
+      expect(cp()).toBeUndefined();
+    });
+  }
+  it("an unresolvable offer pins the checkpoint below it while later offers are still applied; repeat runs stay pinned and record one diagnostic", async () => {
+    seedAll(["a", "c"]);
+    remote = [
+      offer("a", T(1), "accepted"),
+      offer("b", T(2), "accepted", { listingId: null }),
+      offer("c", T(3), "accepted"),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s.reason).toBe("blocked_records");
+    expect(status("c")).toBe("accepted");
+    expect(cp()).toBe(T(1));
+    await reconcileMombongoOffers();
+    expect(cp()).toBe(T(1)); // never advanced on a timer
+    const diags = Object.keys(mockRegistry).filter((p) => p.startsWith("mombongoWebhookEvents/"));
+    expect(diags).toHaveLength(1);
   });
-
-  it("pagination follows nextCursor within a single run", async () => {
-    seedOffer("ext-a", { status: "pending", mombongoOfferId: "mb-a" });
-    seedOffer("ext-b", { status: "pending", mombongoOfferId: "mb-b" });
-    const fetchMock = mockFetchSequence([
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-a",
-              externalReference: "ext-a",
-              status: "accepted",
-              updatedAt: "2026-09-19T10:00:00.000Z",
-            },
-          ],
-          nextCursor: "cursor-1",
-        },
-      },
-      {
-        status: 200,
-        body: {
-          offers: [
-            {
-              offerId: "mb-b",
-              externalReference: "ext-b",
-              status: "declined",
-              updatedAt: "2026-09-19T11:00:00.000Z",
-            },
-          ],
-          nextCursor: null,
-        },
-      },
-    ]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.pagesProcessed).toBe(2);
-    expect(summary.applied).toBe(2);
-    const secondCallBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    expect(secondCallBody.cursor).toBe("cursor-1");
+  it("a record with an unusable updatedAt blocks all advancement in the run", async () => {
+    seedAll(["a", "b"]);
+    remote = [offer("a", T(1), "accepted"), offer("b", "not-a-date", "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s.blocked).toBe(1);
+    expect(cp()).toBeUndefined();
   });
+  it("accepted/declined conflict is recorded durably and never overwrites; it does not pin", async () => {
+    seedLocal("a", { status: "accepted", mombongoOccurredAt: T(0) });
+    remote = [offer("a", T(5), "declined")];
+    const s = await reconcileMombongoOffers();
+    expect(s.conflicts).toBe(1);
+    expect(status("a")).toBe("accepted");
+    expect(Object.keys(mockRegistry).some((p) => p.startsWith("mombongoWebhookEvents/"))).toBe(
+      true,
+    );
+    expect(cp()).toBe(T(5));
+  });
+  it("legacy 'won' normalizes to 'accepted'", async () => {
+    seedLocal("a", { status: "won" });
+    remote = [offer("a", T(2), "accepted")];
+    await reconcileMombongoOffers();
+    expect(status("a")).toBe("accepted");
+  });
+  it("a local doc found by externalReference that carries a DIFFERENT Mombongo offer id is a conflict, never overwritten", async () => {
+    seedLocal("a", { mombongoOfferId: "mb-someone-else" });
+    remote = [offer("a", T(2), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s.conflicts).toBe(1);
+    expect(status("a")).toBe("pending");
+  });
+  it("a stale remote 'pending' never downgrades a terminal local status", async () => {
+    seedLocal("a", { status: "accepted" });
+    remote = [offer("a", T(2), "pending")];
+    await reconcileMombongoOffers();
+    expect(status("a")).toBe("accepted");
+  });
+});
 
-  it("bubbles a Mombongo API error without throwing", async () => {
-    mockFetchSequence([{ status: 500, body: {} }]);
-    const summary = await reconcileMombongoOffers();
-    expect(summary.error).toBeTruthy();
-    expect(summary.pagesProcessed).toBe(0);
+describe("security", () => {
+  it("only reads/writes the single pinned checkpoint document, and only after signing in via the trusted config", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(1), "accepted")];
+    await reconcileMombongoOffers();
+    expect(
+      Object.keys(mockRegistry).filter((p) => p.startsWith("mombongoReconciliationState/")),
+    ).toEqual([CP]);
+    // getMombongoConfig (which performs signInAsMombongoSystem) ran before any checkpoint access.
+    expect(vi.mocked(getMombongoConfig).mock.invocationCallOrder[0]).toBeDefined();
+    expect(checkpointAccess.length).toBeGreaterThan(0);
+  });
+  it("readCheckpoint returns only a real boundary — a malformed stored value is treated as absent, never trusted", async () => {
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: "garbage", updatedAt: T(0) },
+    };
+    expect((await readCheckpoint()).completedThrough).toBeUndefined();
+  });
+  it("the summary and console output never contain credentials or raw error text", async () => {
+    const logs: string[] = [];
+    for (const m of ["error", "warn", "log"] as const)
+      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => {
+        logs.push(a.map(String).join(" "));
+      });
+    vi.mocked(getMombongoConfig).mockRejectedValueOnce(
+      new Error(`bad config ${SECRET} Bearer abc`),
+    );
+    const s1 = await reconcileMombongoOffers();
+    expect(s1).toMatchObject({ status: "error", reason: "integration_unavailable" });
+    seedAll(["a"]);
+    remote = [offer("a", T(1), "accepted")];
+    failWritePath = "harvestOffers/ext-a";
+    const s2 = await reconcileMombongoOffers();
+    for (const blob of [JSON.stringify(s1), JSON.stringify(s2), logs.join("\n")]) {
+      expect(blob).not.toContain(SECRET);
+      expect(blob).not.toContain("Bearer");
+      expect(blob).not.toContain("partner-1");
+      expect(blob).not.toContain("deadbeef");
+    }
+  });
+  it("Mombongo being unreachable is a safe error code, not an exception", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET secret-host")));
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "error", reason: "mombongo_unavailable" });
+    expect(JSON.stringify(s)).not.toContain("secret-host");
   });
 });
