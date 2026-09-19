@@ -7,29 +7,56 @@ import {
 } from "./mombongoWebhookInbox";
 
 let mockRegistry: Record<string, { exists: boolean; data?: Record<string, unknown> }> = {};
+let registryVersion = 0;
 const setDocCalls: { path: string; data: Record<string, unknown> }[] = [];
 const updateDocCalls: { path: string; data: Record<string, unknown> }[] = [];
 
 vi.mock("@/lib/firebase/serverDb", () => ({ serverDb: {} }));
 vi.mock("firebase/firestore/lite", () => ({
   doc: vi.fn((_db: unknown, col: string, id: string) => ({ path: `${col}/${id}`, id })),
-  getDoc: vi.fn(async (ref: { path: string }) => {
-    const entry = mockRegistry[ref.path];
-    return { exists: () => !!entry?.exists, data: () => entry?.data };
-  }),
-  setDoc: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-    setDocCalls.push({ path: ref.path, data });
-    mockRegistry[ref.path] = { exists: true, data };
-  }),
   updateDoc: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
     updateDocCalls.push({ path: ref.path, data });
     const existing = mockRegistry[ref.path];
     mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
   }),
+  // Faithful-enough optimistic-concurrency simulation, same pattern as
+  // mombongoHarvest.test.ts's own runTransaction mock: if the registry
+  // changed between this transaction's own read and its attempted commit,
+  // the whole callback re-runs and observes the winner's write instead of
+  // overwriting it — this is what actually proves "two concurrent
+  // deliveries of the same event do not both process" under a real race,
+  // not just a sequential replay.
+  runTransaction: vi.fn(async (_db: unknown, updateFn: (tx: unknown) => Promise<unknown>) => {
+    for (;;) {
+      const versionAtStart = registryVersion;
+      let write: { path: string; data: Record<string, unknown> } | null = null;
+      const tx = {
+        get: async (ref: { path: string }) => {
+          const entry = mockRegistry[ref.path];
+          return { exists: () => !!entry?.exists, data: () => entry?.data };
+        },
+        set: (ref: { path: string }, data: Record<string, unknown>) => {
+          write = { path: ref.path, data };
+        },
+      };
+      const result = await updateFn(tx);
+      if (write) {
+        if (registryVersion !== versionAtStart) continue; // lost the race — retry, observe the winner
+        mockRegistry[(write as { path: string }).path] = {
+          exists: true,
+          data: (write as { data: Record<string, unknown> }).data,
+        };
+        setDocCalls.push(write);
+        registryVersion++;
+      }
+      return result;
+    }
+  }),
 }));
 
 beforeEach(() => {
   mockRegistry = {};
+  registryVersion = 0;
   setDocCalls.length = 0;
   updateDocCalls.length = 0;
 });
@@ -84,6 +111,22 @@ describe("claimInboxEvent", () => {
     await claimInboxEvent(INPUT);
     const claim = await claimInboxEvent(INPUT);
     expect(claim.kind).toBe("process");
+  });
+
+  it("two truly concurrent deliveries of the same eventId create at most one inbox record — the atomic transaction, not app-level luck, closes this", async () => {
+    const [a, b] = await Promise.all([claimInboxEvent(INPUT), claimInboxEvent(INPUT)]);
+    // Exactly one create ever commits — the other observes the winner's
+    // already-'received' record via the transaction's own retry, not a
+    // second independent create.
+    expect(setDocCalls).toHaveLength(1);
+    // Both may legitimately resolve to kind:'process' (the loser resumes
+    // the winner's still-'received' record rather than being told
+    // "already handled") — the actual double-application protection for
+    // the OFFER itself lives in applyMombongoOfferOutcome's own
+    // same-state idempotency (see mombongoOfferOutcome.test.ts), not
+    // here; this test's own guarantee is narrower and structural: the
+    // inbox never forks into two logical records for one eventId.
+    expect([a.kind, b.kind].every((k) => k === "process")).toBe(true);
   });
 });
 

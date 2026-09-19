@@ -1,5 +1,3 @@
-import { collection, getDocs, limit as fsLimit, orderBy, query } from "firebase/firestore/lite";
-import { serverDb } from "@/lib/firebase/serverDb";
 import { hashSha256Hex } from "./mombongoSigning";
 import { getMombongoHarvestOffers } from "./mombongoHarvest";
 import { applyMombongoOfferOutcome } from "./mombongoOfferOutcome";
@@ -12,19 +10,59 @@ import { claimInboxEvent, markInboxConflict, markInboxProcessed } from "./mombon
  * processing share one authorization/transition surface, never a
  * separate loophole.
  *
- * Checkpoint: rather than a separately-persisted cursor (AROM-Backend's
- * `externalIntegrations/mombongo` doc is isMombongoWebhook()-*read*-only;
- * write is isAdmin()-only, so this trusted identity cannot durably store
- * a checkpoint there without a Backend Rules change, which is out of
- * scope here), the checkpoint is derived fresh each run: the highest
- * `updatedAt` currently present across `harvestOffers` — a field only
- * ever written by a trusted outcome-applying transition (webhook or this
- * job). This is self-maintaining and correctly conservative: a page whose
- * items fail partway through only durably advances what actually
- * committed (each item's own `updatedAt`), so a resumed run's derived
- * checkpoint reflects exactly what succeeded, never more — "partial-page
- * failure does not advance the checkpoint" falls out of this by
- * construction rather than needing a separate stored value at all.
+ * CHECKPOINT DESIGN — REVISED (superseded the original "derive updatedSince
+ * from the max local harvestOffers.updatedAt" approach, which was PROVEN
+ * unsafe, not merely theoretically risky):
+ *
+ *   1. Two offers can share the exact same `updatedAt` (real, not
+ *      hypothetical — Mombongo's own reconciliation index is `(updatedAt
+ *      asc, __name__ asc)` specifically because ties are expected). If one
+ *      of a tied pair is processed and the other fails/is skipped, the
+ *      derived checkpoint equals BOTH their timestamps — but
+ *      `getExternalHarvestOffers` filters `updatedAt > updatedSince`
+ *      (strict), so the unprocessed twin is silently excluded from every
+ *      future page, forever.
+ *   2. A "not_found" offer (arrived before its harvestOffers doc existed
+ *      locally) writes nothing, so its remote `updatedAt` never appears in
+ *      the local max. If a LATER offer in the same page (larger
+ *      `updatedAt`) succeeds, the derived checkpoint jumps past the
+ *      not-found offer's own timestamp — it can never be re-fetched again,
+ *      even though it was never actually resolved.
+ *
+ *   Both are genuine, provable, permanent-skip bugs — not edge cases worth
+ *   hand-waving. AROM-Backend's `externalIntegrations/mombongo` doc (the
+ *   only existing config-like location) is `isAdmin()`-write-only, so this
+ *   trusted identity has nowhere Rules-legal to durably persist a real
+ *   checkpoint without a Backend change (out of scope for this task — see
+ *   the follow-up note below).
+ *
+ *   Chosen safe option instead: STATELESS, BOUNDED, DELIBERATELY
+ *   OVERLAPPING reconciliation. Every run queries a FIXED wall-clock
+ *   lookback window (`now() - LOOKBACK_WINDOW_MS`), independent of any
+ *   local write, any prior run's progress, or any cursor surviving across
+ *   runs. Every offer inside that window is re-examined every run,
+ *   regardless of whether an earlier run already settled it —
+ *   `applyMombongoOfferOutcome` is fully idempotent (a same-state replay
+ *   is a safe no-op; a genuine terminal conflict is recorded, never
+ *   overwritten), so redundant re-examination costs nothing but a wasted
+ *   read. Nothing inside the window can ever be silently skipped, because
+ *   nothing about *what's in scope* depends on what happened to any other
+ *   offer in the same or a prior run. The cursor itself is used only
+ *   within a single run's own pagination loop and is discarded at the end
+ *   — "cursor expires/becomes invalid" and "reconciliation repeats after a
+ *   process restart" are both trivially safe, since no cursor or
+ *   checkpoint is ever carried across invocations at all.
+ *
+ *   Tradeoff, stated plainly: this is bounded-correct, not
+ *   bounded-efficient. An offer whose backlog is deeper than
+ *   `maxPages * pageSize` within one run, for longer than
+ *   LOOKBACK_WINDOW_MS, can still age out unprocessed — this is a real,
+ *   accepted limitation of a stateless design, not a hidden one. The
+ *   proper fix is a dedicated, trusted-writer `mombongoReconciliationState`
+ *   collection in AROM-Backend (a single doc, isMombongoWebhook()-only
+ *   read/write, holding just `{ updatedSinceCursor: string }`) — reported
+ *   as the required follow-up, not built here (AROM-Backend is out of
+ *   scope for this task).
  */
 export interface ReconciliationSummary {
   pagesProcessed: number;
@@ -36,13 +74,16 @@ export interface ReconciliationSummary {
   error?: string;
 }
 
-async function computeCheckpoint(): Promise<string | undefined> {
-  const snap = await getDocs(
-    query(collection(serverDb, "harvestOffers"), orderBy("updatedAt", "desc"), fsLimit(1)),
-  );
-  if (snap.empty) return undefined;
-  return (snap.docs[0].data().updatedAt as string) ?? undefined;
-}
+/**
+ * How far back every run looks, regardless of when it last ran. Must
+ * exceed the longest realistic gap between reconciliation runs (manual
+ * Mobile-triggered refresh, today — no schedule exists yet) with a wide
+ * safety margin; 72h is a deliberately generous starting point given
+ * reconciliation volume is low. Revisit if runs are ever expected to be
+ * spaced further apart than this, or once the real checkpoint collection
+ * above replaces this entirely.
+ */
+const LOOKBACK_WINDOW_MS = 72 * 60 * 60 * 1000;
 
 async function recordReconciliationConflict(
   offerId: string,
@@ -61,11 +102,12 @@ async function recordReconciliationConflict(
 }
 
 export async function reconcileMombongoOffers(
-  options: { maxPages?: number; pageSize?: number } = {},
+  options: { maxPages?: number; pageSize?: number; lookbackMs?: number } = {},
 ): Promise<ReconciliationSummary> {
   const maxPages = options.maxPages ?? 20;
   const pageSize = Math.min(Math.max(1, options.pageSize ?? 100), 100);
-  const updatedSince = await computeCheckpoint();
+  const lookbackMs = options.lookbackMs ?? LOOKBACK_WINDOW_MS;
+  const updatedSince = new Date(Date.now() - lookbackMs).toISOString();
 
   const summary: ReconciliationSummary = {
     pagesProcessed: 0,
@@ -107,11 +149,13 @@ export async function reconcileMombongoOffers(
           await recordReconciliationConflict(offerDto.offerId, offerDto.status, outcome.reason);
         } else if (outcome.kind === "not_found") summary.notFoundLocally++;
       } catch (err) {
-        // Partial-page failure: stop here rather than skip ahead — every
-        // item processed before this one is already durably committed
-        // (its own transaction succeeded independently), so the derived
-        // checkpoint for the *next* run naturally reflects exactly that
-        // much progress, safely repeatable.
+        // A single item's own processing error stops this run here rather
+        // than skipping ahead to later items in the page — but unlike the
+        // old derived-checkpoint design, this does NOT cause any offer to
+        // be permanently missed: the fixed window means every offer in
+        // this page (including the ones after the failure point) is
+        // in scope again on the very next run, exactly as if this run had
+        // never touched them.
         summary.error = err instanceof Error ? err.message : "partial_page_failure";
         return summary;
       }

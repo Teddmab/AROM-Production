@@ -121,6 +121,7 @@ export type CreateOfferResult =
   | { status: "error"; httpStatus: number; message: string };
 
 interface OfferClaim {
+  /** = sha256(listingId) — AROM's own LOCAL one-attempt-per-listing lock, matching AROM-Mobile's findActiveOfferForListing/PR #5 policy (verified, not assumed — see this module's own investigation note below). Never sent to Mombongo. */
   id: string;
   listingId: string;
   fingerprint: string;
@@ -129,9 +130,9 @@ interface OfferClaim {
   createdByUid: string;
   harvestOfferId?: string;
   updatedAt?: string;
-  /** Stable for the life of this claim — the same value sent as Mombongo's Idempotency-Key on every retry. Equal to the claim/offer doc id (see createMombongoOffer). */
+  /** IDEMPOTENCY_KEY_PREFIX + attemptId — the exact value sent as Mombongo's Idempotency-Key header on every retry of this attempt. Never derived from listingId alone (see generateOfferAttemptIdentity's doc comment). */
   idempotencyKey: string;
-  /** Equal to idempotencyKey/claim id — one AROM-owned opaque reference, reused everywhere for this attempt. */
+  /** = attemptId — AROM's own opaque, randomly-generated reference for this specific submission attempt. Also this attempt's harvestOffers doc id once completed. */
   externalReference: string;
 }
 
@@ -143,6 +144,61 @@ function offerFingerprint(input: {
   return `${input.listingId}:${input.offerQuantityKg}:${input.offerPricePerKgCdf}`;
 }
 
+const IDEMPOTENCY_KEY_PREFIX = "arom-harvest-offer-v1:";
+
+/**
+ * A Cloudflare Worker request cannot legitimately stay "in_flight" this
+ * long — this is not a race-window tuning knob, it's a floor well above
+ * any plausible real request duration (Workers' own hard CPU/wall-clock
+ * limits are far shorter), used only to distinguish "still genuinely
+ * being processed by a live request right now" from "the request that
+ * created this claim is definitely gone." See claimOfferSubmission's own
+ * use of this for exactly which crash windows it closes.
+ */
+const IN_FLIGHT_STALE_THRESHOLD_MS = 60_000;
+
+/**
+ * Generates the Mombongo-facing identity for a genuinely new submission
+ * attempt — deliberately NOT a function of listingId, quantity, price, or
+ * message. Mombongo's own idempotency is scoped to (partnerId,
+ * Idempotency-Key), with a content *fingerprint* check that already
+ * distinguishes "same key, same payload" (safe replay) from "same key,
+ * different payload" (409) — see createExternalHarvestOfferIdempotency.ts
+ * in mombongo-functions. Deriving AROM's own key from mutable fields
+ * (quantity/price/message) would therefore be actively harmful: a
+ * deliberately revised offer would collide with the old key and either
+ * 409 or silently replay the stale content, and Mombongo already does
+ * this exact detection for us — duplicating it into the key itself is
+ * both redundant and unsafe.
+ *
+ * Investigated (2026-09-19, AROM-Mobile read-only + mombongo-functions
+ * source, not assumed): AROM currently submits **at most one offer per
+ * listing, ever** — a deliberate, already-documented product decision
+ * (AROM-Mobile's findActiveOfferForListing matches on listingId alone
+ * regardless of status, offer.tsx redirects to the existing offer instead
+ * of showing the form, and Mobile PR #5's own description states this
+ * explicitly). Mombongo's own createHarvestOfferCore places NO
+ * corresponding restriction — it creates a fresh harvest_offers doc on
+ * every call with no per-(partner,listing) uniqueness check at all, so
+ * this is entirely AROM's self-imposed policy, not a guarantee either
+ * system enforces structurally. Coupling the Mombongo-facing identity to
+ * listingId would therefore be fragile: if that mobile-side policy is
+ * ever relaxed (a cancel/re-offer feature), reusing the same key for a
+ * genuinely new attempt would either silently replay the old offer or
+ * 409 against it. Generating a fresh random identity per attempt, kept
+ * separate from the LOCAL one-per-listing lock (mombongoOfferClaims'
+ * doc id, which legitimately stays keyed by listingId — see OfferClaim's
+ * own doc comment), makes the identity scheme correct independent of
+ * whether that policy ever changes.
+ */
+export function generateOfferAttemptIdentity(): {
+  externalReference: string;
+  idempotencyKey: string;
+} {
+  const attemptId = crypto.randomUUID();
+  return { externalReference: attemptId, idempotencyKey: `${IDEMPOTENCY_KEY_PREFIX}${attemptId}` };
+}
+
 type ClaimAttempt =
   | { kind: "won"; claim: OfferClaim }
   | { kind: "already_completed"; harvestOfferId?: string }
@@ -151,29 +207,31 @@ type ClaimAttempt =
   | { kind: "blocked"; priorStatus: "rejected" | "unknown"; claim: OfferClaim };
 
 /**
- * Server-owned submission-claim state machine. Local invariant: "AROM
- * submits at most one offer per canonical listing, ever" (matches
- * AROM-Mobile's findActiveOfferForListing, which blocks a new submission
- * once ANY offer — any status — exists for a listing) — so the claim's
- * identity is permanently keyed by listingId, not per-attempt. What
- * contract v2 changes is what happens once a claim reaches "unknown":
- * previously (no upstream idempotency existed) that was a dead end
- * requiring human recovery. Now, because Mombongo's own (partnerId,
- * Idempotency-Key) fingerprint-replay guarantees at most one offer per
- * key ever, `createMombongoOffer` can safely reconcile and, if genuinely
- * absent, retry using this SAME claim's idempotencyKey — see its own doc
- * comment. The Rules-level state machine itself is unchanged: no new
- * transition (e.g. unknown -> in_flight) was needed or added.
+ * Server-owned submission-claim state machine. The claim doc's own id
+ * (`mombongoOfferClaims/{sha256(listingId)}`) enforces AROM's local
+ * one-attempt-per-listing policy atomically (see generateOfferAttemptIdentity's
+ * doc comment for why this is a verified, deliberate rule, not an
+ * assumption) — but the *content* AROM sends to Mombongo (externalReference,
+ * Idempotency-Key) is a fresh random identity generated once when the
+ * claim is first created, decoupled from listingId. What contract v2
+ * changes is what happens once a claim reaches "unknown": previously (no
+ * upstream idempotency existed) that was a dead end requiring human
+ * recovery. Now, because Mombongo's own (partnerId, Idempotency-Key)
+ * fingerprint-replay guarantees at most one offer per key ever,
+ * `createMombongoOffer` can safely reconcile and, if genuinely absent,
+ * retry using this SAME claim's idempotencyKey — see its own doc comment.
+ * The Rules-level state machine itself is unchanged: no new transition
+ * (e.g. unknown -> in_flight) was needed or added.
  */
 async function claimOfferSubmission(
   input: CreateOfferInput,
   claimRef: ReturnType<typeof doc>,
-  claimId: string,
   fingerprint: string,
 ): Promise<ClaimAttempt> {
   return runTransaction(serverDb, async (tx) => {
     const snap = await tx.get(claimRef);
     if (!snap.exists()) {
+      const { externalReference, idempotencyKey } = generateOfferAttemptIdentity();
       const claim: OfferClaim = {
         id: claimRef.id,
         listingId: input.listingId,
@@ -181,8 +239,8 @@ async function claimOfferSubmission(
         status: "in_flight",
         createdAt: new Date().toISOString(),
         createdByUid: input.createdByUid,
-        idempotencyKey: claimId,
-        externalReference: claimId,
+        idempotencyKey,
+        externalReference,
       };
       tx.set(claimRef, claim);
       return { kind: "won", claim };
@@ -191,6 +249,22 @@ async function claimOfferSubmission(
     if (claim.status === "completed")
       return { kind: "already_completed", harvestOfferId: claim.harvestOfferId };
     if (claim.status === "in_flight") {
+      const ageMs = Date.now() - new Date(claim.createdAt).getTime();
+      if (ageMs > IN_FLIGHT_STALE_THRESHOLD_MS) {
+        // Genuinely stuck, not a legitimate concurrent race: a Worker
+        // request cannot run this long, so whatever created this claim
+        // either crashed before ever calling Mombongo, or crashed after
+        // Mombongo succeeded but before the completion transaction ran.
+        // Either way, AROM cannot tell which from local state alone —
+        // route through the exact same reconciliation-based recovery as
+        // an "unknown" claim (Mombongo's own fingerprint-conflict check
+        // is still the backstop if a retry ever carries different
+        // content than whatever Mombongo may already have on file).
+        console.warn(
+          `mombongoOfferClaims/${claim.id}: stale in_flight claim (${ageMs}ms old) — routing through unknown-claim recovery`,
+        );
+        return { kind: "blocked", priorStatus: "unknown", claim };
+      }
       return claim.fingerprint === fingerprint
         ? { kind: "in_flight_same" }
         : { kind: "in_flight_conflict" };
@@ -217,9 +291,9 @@ async function markClaim(
 async function submitToMombongoAndPersist(
   input: CreateOfferInput,
   claim: OfferClaim,
-  offerRef: ReturnType<typeof doc>,
   claimRef: ReturnType<typeof doc>,
 ): Promise<CreateOfferResult> {
+  const offerRef = doc(serverDb, "harvestOffers", claim.externalReference);
   let httpResult: {
     httpStatus: number;
     data: {
@@ -326,7 +400,7 @@ async function submitToMombongoAndPersist(
   // only ever advances via applyMombongoOfferOutcome (the
   // offer_status_changed webhook, or reconciliation).
   const persistedOffer: HarvestOfferDoc = {
-    id: claim.id,
+    id: claim.externalReference,
     listingId: input.listingId,
     mombongoOfferId: data.offerId!,
     offerQuantityKg: input.offerQuantityKg,
@@ -349,14 +423,14 @@ async function submitToMombongoAndPersist(
     tx.set(offerRef, persistedOffer);
     tx.update(claimRef, {
       status: "completed",
-      harvestOfferId: claim.id,
+      harvestOfferId: claim.externalReference,
       updatedAt: new Date().toISOString(),
     });
   });
 
   return {
     status: "accepted",
-    offerDocId: claim.id,
+    offerDocId: claim.externalReference,
     mombongoOfferId: data.offerId!,
     offer: persistedOffer,
     alreadyExisted,
@@ -375,9 +449,9 @@ async function submitToMombongoAndPersist(
 async function recoverFromUnknownClaim(
   input: CreateOfferInput,
   claim: OfferClaim,
-  offerRef: ReturnType<typeof doc>,
   claimRef: ReturnType<typeof doc>,
 ): Promise<CreateOfferResult> {
+  const offerRef = doc(serverDb, "harvestOffers", claim.externalReference);
   const lookup = await getMombongoHarvestOffer({ externalReference: claim.externalReference });
 
   if (lookup.found) {
@@ -387,7 +461,7 @@ async function recoverFromUnknownClaim(
     // during the outage) via the same shared outcome logic used by the
     // webhook, applied after first persisting the base 'pending' record.
     const persistedOffer: HarvestOfferDoc = {
-      id: claim.id,
+      id: claim.externalReference,
       listingId: input.listingId,
       mombongoOfferId: lookup.offer.offerId,
       offerQuantityKg: input.offerQuantityKg,
@@ -407,13 +481,13 @@ async function recoverFromUnknownClaim(
       if (!existing.exists()) tx.set(offerRef, persistedOffer);
       tx.update(claimRef, {
         status: "completed",
-        harvestOfferId: claim.id,
+        harvestOfferId: claim.externalReference,
         updatedAt: new Date().toISOString(),
       });
     });
     return {
       status: "accepted",
-      offerDocId: claim.id,
+      offerDocId: claim.externalReference,
       mombongoOfferId: lookup.offer.offerId,
       offer: persistedOffer,
       alreadyExisted: true,
@@ -426,7 +500,7 @@ async function recoverFromUnknownClaim(
     // fingerprint-replay guarantee means this either creates the offer
     // fresh or, if it turns out Mombongo actually had it after all,
     // returns it via `replayed: true` — never a duplicate.
-    return submitToMombongoAndPersist(input, claim, offerRef, claimRef);
+    return submitToMombongoAndPersist(input, claim, claimRef);
   }
 
   // Reconciliation itself failed (network error, 401/429/5xx from
@@ -441,20 +515,31 @@ async function recoverFromUnknownClaim(
 }
 
 export async function createMombongoOffer(input: CreateOfferInput): Promise<CreateOfferResult> {
+  // claimId is AROM's own LOCAL one-attempt-per-listing lock key — never
+  // sent to Mombongo. The Mombongo-facing identity (externalReference,
+  // Idempotency-Key) is generated fresh inside claimOfferSubmission, only
+  // when a claim doesn't already exist — see generateOfferAttemptIdentity's
+  // doc comment for why these must not be the same value.
   const claimId = await hashSha256Hex(input.listingId);
   const claimRef = doc(serverDb, "mombongoOfferClaims", claimId);
-  const offerRef = doc(serverDb, "harvestOffers", claimId);
   const fingerprint = offerFingerprint(input);
 
-  const attempt = await claimOfferSubmission(input, claimRef, claimId, fingerprint);
+  const attempt = await claimOfferSubmission(input, claimRef, fingerprint);
 
   if (attempt.kind === "already_completed") {
-    const existing = await getDoc(offerRef);
+    if (!attempt.harvestOfferId) {
+      return {
+        status: "unknown",
+        message:
+          "L'état de cette offre est incohérent localement — contactez le support technique.",
+      };
+    }
+    const existing = await getDoc(doc(serverDb, "harvestOffers", attempt.harvestOfferId));
     if (existing.exists()) {
       const offer = existing.data() as HarvestOfferDoc;
       return {
         status: "accepted",
-        offerDocId: claimId,
+        offerDocId: attempt.harvestOfferId,
         mombongoOfferId: offer.mombongoOfferId,
         offer,
         alreadyExisted: true,
@@ -486,11 +571,11 @@ export async function createMombongoOffer(input: CreateOfferInput): Promise<Crea
       };
     }
     // priorStatus === "unknown" — attempt safe recovery before giving up.
-    return recoverFromUnknownClaim(input, attempt.claim, offerRef, claimRef);
+    return recoverFromUnknownClaim(input, attempt.claim, claimRef);
   }
 
   // attempt.kind === "won" — this request, and only this one, may call Mombongo.
-  return submitToMombongoAndPersist(input, attempt.claim, offerRef, claimRef);
+  return submitToMombongoAndPersist(input, attempt.claim, claimRef);
 }
 
 /**

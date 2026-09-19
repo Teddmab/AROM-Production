@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runTransaction } from "firebase/firestore/lite";
 import { Route } from "./mombongo";
 import { getMombongoConfig } from "@/lib/payments/mombongoConfig";
 import { verifyHmac } from "@/lib/payments/mombongoSigning";
@@ -74,6 +75,10 @@ vi.mock("firebase/firestore/lite", () => ({
       get: async (ref: { path: string }) => {
         const entry = mockRegistry[ref.path];
         return { exists: () => !!entry?.exists, data: () => entry?.data };
+      },
+      set: (ref: { path: string }, data: Record<string, unknown>) => {
+        setDocCalls.push({ path: ref.path, data });
+        mockRegistry[ref.path] = { exists: true, data };
       },
       update: (ref: { path: string }, data: Record<string, unknown>) => {
         updateDocCalls.push({ path: ref.path, data });
@@ -343,6 +348,60 @@ describe("POST /api/webhooks/mombongo — event: offer_status_changed (contract 
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error).toBe("offer_not_found_yet");
+  });
+
+  it("webhook-before-submission is eventually linkable: not_found now, resolved once the offer exists and the event is redelivered", async () => {
+    // First delivery: offer doesn't exist locally yet.
+    const first = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(first.status).toBe(503);
+    expect(
+      mockRegistry[`mombongoWebhookEvents/${offerStatusChangedEventFixture.eventId}`].data
+        ?.processingState,
+    ).toBe("failed");
+
+    // The offer now exists (createMombongoOffer completed in the meantime).
+    seedPendingOffer();
+
+    // Redelivery of the SAME event (Mombongo's own retry, or a manual
+    // adminRetryPartnerNotification) resumes from 'failed' and succeeds.
+    const second = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(second.status).toBe(200);
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("accepted");
+    expect(
+      mockRegistry[`mombongoWebhookEvents/${offerStatusChangedEventFixture.eventId}`].data
+        ?.processingState,
+    ).toBe("processed");
+  });
+
+  it("durable inbox record survives an offer-update failure: stays 'failed', never falsely acknowledged as processed", async () => {
+    seedPendingOffer();
+    let callCount = 0;
+    const realImpl = vi.mocked(runTransaction).getMockImplementation()!;
+    vi.mocked(runTransaction).mockImplementation(
+      async (...args: Parameters<typeof runTransaction>) => {
+        callCount++;
+        // Call 1 = claimInboxEvent's durable create (must succeed). Call 2 =
+        // applyMombongoOfferOutcome's own transaction (simulate it failing).
+        if (callCount === 2)
+          throw new Error("simulated Firestore failure applying the offer outcome");
+        return realImpl(...args);
+      },
+    );
+
+    const res = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("processing_failed");
+    const inboxRecord =
+      mockRegistry[`mombongoWebhookEvents/${offerStatusChangedEventFixture.eventId}`].data;
+    expect(inboxRecord?.processingState).toBe("failed");
+    // The offer itself was never touched — durably recorded intent, no partial effect.
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("pending");
   });
 
   it("duplicate event delivery (same eventId) is harmless — returns success without reapplying", async () => {
