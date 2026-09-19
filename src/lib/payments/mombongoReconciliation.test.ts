@@ -126,6 +126,10 @@ type Remote = {
 };
 let remote: Remote[] = [];
 const requests: { updatedSince?: string; cursor?: string; limit?: number }[] = [];
+const bodies: Record<string, unknown>[] = [];
+let scripted:
+  | ((b: { cursor?: string }, n: number) => { offers: Remote[]; nextCursor: string | null })
+  | null = null;
 let onPage: ((n: number) => void) | null = null;
 let badCursor = false;
 let pageNo = 0;
@@ -174,7 +178,12 @@ function installRemote() {
       expect(String(url)).toContain("/getExternalHarvestOffers");
       const b = JSON.parse(init.body as string);
       requests.push({ updatedSince: b.updatedSince, cursor: b.cursor, limit: b.limit });
+      bodies.push(b);
       pageNo++;
+      if (scripted) {
+        const r = scripted(b, pageNo);
+        return { status: 200, json: async () => r };
+      }
       if (badCursor && b.cursor) return { status: 400, json: async () => ({}) };
       let rows = remote.filter((o) => (b.updatedSince ? o.updatedAt > b.updatedSince : true));
       rows.sort((a, c) => (`${a.updatedAt}|${a.offerId}` < `${c.updatedAt}|${c.offerId}` ? -1 : 1));
@@ -202,6 +211,8 @@ beforeEach(() => {
   mockRegistry = {};
   remote = [];
   requests.length = 0;
+  bodies.length = 0;
+  scripted = null;
   checkpointAccess.length = 0;
   seq = 0;
   beforeCheckpointCommit = null;
@@ -601,7 +612,7 @@ describe("recovery: local vs remote records", () => {
     ["currency", { currency: "USD" }],
   ];
   for (const [name, patch] of unusable) {
-    it(`a remote offer missing locally with unusable ${name} is BLOCKED, durably recorded, and never fabricated`, async () => {
+    it(`a remote offer missing locally with unusable ${name} is BLOCKED, reported (not stored as a fake webhook), and never fabricated`, async () => {
       remote = [offer("z", T(3), "accepted", patch)];
       const s = await reconcileMombongoOffers();
       expect(s).toMatchObject({
@@ -611,14 +622,19 @@ describe("recovery: local vs remote records", () => {
         imported: 0,
       });
       expect(mockRegistry["harvestOffers/ext-z"]).toBeUndefined();
-      const diag = Object.entries(mockRegistry).find(([p]) =>
-        p.startsWith("mombongoWebhookEvents/"),
-      )?.[1].data;
-      expect(diag).toMatchObject({ processingState: "conflict", mombongoOfferId: "mb-z" });
+      expect(Object.keys(mockRegistry).some((p) => p.startsWith("mombongoWebhookEvents/"))).toBe(
+        false,
+      );
+      expect(s.issues).toHaveLength(1);
+      expect(s.issues[0]).toMatchObject({
+        kind: "blocked",
+        offerId: "mb-z",
+        remoteUpdatedAt: T(3),
+      });
       expect(cp()).toBeUndefined();
     });
   }
-  it("an unresolvable offer pins the checkpoint below it while later offers are still applied; repeat runs stay pinned and record one diagnostic", async () => {
+  it("an unresolvable offer pins the checkpoint below it while later offers are still applied; repeat runs stay pinned and report one issue each", async () => {
     seedAll(["a", "c"]);
     remote = [
       offer("a", T(1), "accepted"),
@@ -631,8 +647,10 @@ describe("recovery: local vs remote records", () => {
     expect(cp()).toBe(T(1));
     await reconcileMombongoOffers();
     expect(cp()).toBe(T(1)); // never advanced on a timer
-    const diags = Object.keys(mockRegistry).filter((p) => p.startsWith("mombongoWebhookEvents/"));
-    expect(diags).toHaveLength(1);
+    expect(
+      Object.keys(mockRegistry).filter((p) => p.startsWith("mombongoWebhookEvents/")),
+    ).toHaveLength(0);
+    expect(s.issues).toHaveLength(1);
   });
   it("a record with an unusable updatedAt blocks all advancement in the run", async () => {
     seedAll(["a", "b"]);
@@ -641,16 +659,22 @@ describe("recovery: local vs remote records", () => {
     expect(s.blocked).toBe(1);
     expect(cp()).toBeUndefined();
   });
-  it("accepted/declined conflict is recorded durably and never overwrites; it does not pin", async () => {
+  it("accepted/declined conflict never overwrites and PINS the boundary (no honest durable home exists), reported as an issue", async () => {
     seedLocal("a", { status: "accepted", mombongoOccurredAt: T(0) });
     remote = [offer("a", T(5), "declined")];
     const s = await reconcileMombongoOffers();
     expect(s.conflicts).toBe(1);
     expect(status("a")).toBe("accepted");
     expect(Object.keys(mockRegistry).some((p) => p.startsWith("mombongoWebhookEvents/"))).toBe(
-      true,
+      false,
     );
-    expect(cp()).toBe(T(5));
+    expect(s).toMatchObject({ status: "partial", reason: "blocked_records" });
+    expect(s.issues[0]).toMatchObject({
+      kind: "conflict",
+      code: "terminal_status_conflict",
+      offerId: "mb-a",
+    });
+    expect(cp()).toBeUndefined();
   });
   it("legacy 'won' normalizes to 'accepted'", async () => {
     seedLocal("a", { status: "won" });
@@ -719,5 +743,239 @@ describe("security", () => {
     const s = await reconcileMombongoOffers();
     expect(s).toMatchObject({ status: "error", reason: "mombongo_unavailable" });
     expect(JSON.stringify(s)).not.toContain("secret-host");
+  });
+});
+
+describe("two independent limits and cursor-cycle protection", () => {
+  const seedDense = (n: number, base = 0) => {
+    const ids = Array.from({ length: n }, (_, i) => `d${base + i}`);
+    seedAll(ids);
+    return ids;
+  };
+
+  it("dense overlap larger than the progress-page cap: replay pages are exempt, progress still happens, absolute limit is untouched", async () => {
+    const ids = seedDense(54);
+    remote = ids.map((id, i) => offer(id, T(i + 1), "accepted"));
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(50), updatedAt: T(50) },
+    };
+    const s = await reconcileMombongoOffers({ pageSize: 2, maxPages: 2, maxRequests: 100 });
+    // records T1..T50 are pure replay (<= the boundary the run started from)
+    expect(s.remoteRequests).toBeGreaterThan(2);
+    expect(s).toMatchObject({ status: "partial", reason: "page_cap_reached" });
+    expect(s.pagesProcessed).toBe(s.remoteRequests);
+    expect((cp() as string) > T(50)).toBe(true); // real progress despite the dense overlap
+  });
+
+  it("absolute request limit is reached by replay-only pages and cannot be bypassed; boundary does not move", async () => {
+    const ids = seedDense(60);
+    remote = ids.map((id, i) => offer(id, T(i + 1), "accepted"));
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(59), updatedAt: T(59) },
+    };
+    const s = await reconcileMombongoOffers({ pageSize: 2, maxPages: 20, maxRequests: 10 });
+    expect(s).toMatchObject({
+      status: "partial",
+      reason: "request_limit_reached",
+      remoteRequests: 10,
+    });
+    expect(requests).toHaveLength(10);
+    expect(cp()).toBe(T(59)); // never advanced past unprocessed work
+  });
+
+  it("repeated cursor (self-loop): stops with cursor_cycle after the second identical cursor, never keeps requesting", async () => {
+    seedAll(["a"]);
+    scripted = () => ({ offers: [offer("a", T(1), "accepted")], nextCursor: "C" });
+    const s = await reconcileMombongoOffers({ maxRequests: 50 });
+    expect(s).toMatchObject({ status: "partial", reason: "cursor_cycle" });
+    expect(requests).toHaveLength(2);
+    expect(cp()).toBeUndefined(); // last page treated as non-final: trailing group not committed
+  });
+
+  it("two-cursor cycle A -> B -> A stops at the first repeat", async () => {
+    seedAll(["a", "b", "c"]);
+    scripted = (b) => {
+      if (!b.cursor) return { offers: [offer("a", T(1), "accepted")], nextCursor: "A" };
+      if (b.cursor === "A") return { offers: [offer("b", T(2), "accepted")], nextCursor: "B" };
+      return { offers: [offer("c", T(3), "accepted")], nextCursor: "A" };
+    };
+    const s = await reconcileMombongoOffers({ maxRequests: 50 });
+    expect(s).toMatchObject({ status: "partial", reason: "cursor_cycle", remoteRequests: 3 });
+    expect(status("c")).toBe("accepted"); // each page was fully processed before stopping
+    expect(cp()).toBe(T(2)); // strictly below the last (non-final) page's timestamp
+  });
+
+  it("a remote that keeps returning the same page with FRESH cursors is stopped by the absolute limit, and never advances past unprocessed work", async () => {
+    seedAll(["a"]);
+    scripted = (_b, n) => ({ offers: [offer("a", T(1), "accepted")], nextCursor: `fresh-${n}` });
+    const s = await reconcileMombongoOffers({ maxPages: 1000, maxRequests: 5 });
+    expect(s).toMatchObject({
+      status: "partial",
+      reason: "request_limit_reached",
+      remoteRequests: 5,
+    });
+    expect(cp()).toBeUndefined();
+    expect(status("a")).toBe("accepted"); // replays are idempotent
+  });
+
+  it("safety limit reached mid-stream: partial response, boundary below the trailing group, and a later run continues safely", async () => {
+    seedAll(["a", "b", "c", "d", "e"]);
+    remote = ["a", "b", "c", "d", "e"].map((id, i) => offer(id, T(i + 1), "accepted"));
+    const s1 = await reconcileMombongoOffers({ pageSize: 2, maxRequests: 2 });
+    expect(s1).toMatchObject({ status: "partial", reason: "request_limit_reached" });
+    expect(cp()).toBe(T(3));
+    const s2 = await reconcileMombongoOffers({ pageSize: 2 });
+    expect(s2.status).toBe("complete");
+    expect(cp()).toBe(T(5));
+    ["a", "b", "c", "d", "e"].forEach((id) => expect(status(id)).toBe("accepted"));
+  });
+
+  it("a later run after a cycle recovers once the remote is healthy again", async () => {
+    seedAll(["a"]);
+    scripted = () => ({ offers: [offer("a", T(1), "accepted")], nextCursor: "C" });
+    await reconcileMombongoOffers();
+    scripted = null;
+    remote = [offer("a", T(1), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s.status).toBe("complete");
+    expect(cp()).toBe(T(1));
+  });
+
+  it("limits are server constants: the function options are not reachable from the route, and defaults are bounded", async () => {
+    const m = await import("./mombongoReconciliation");
+    expect(m.DEFAULT_MAX_PROGRESS_PAGES).toBe(20);
+    expect(m.DEFAULT_MAX_REMOTE_REQUESTS).toBe(100);
+    expect(m.DEFAULT_MAX_REMOTE_REQUESTS).toBeGreaterThan(m.DEFAULT_MAX_PROGRESS_PAGES);
+  });
+});
+
+describe("provenance of unresolved records", () => {
+  const sha = async (input: string) => (await import("./mombongoSigning")).hashSha256Hex(input);
+
+  it("never writes, reads or claims anything in mombongoWebhookEvents — no fabricated webhook, no invented Mombongo eventId", async () => {
+    seedLocal("c", { status: "accepted", mombongoOccurredAt: T(0) });
+    remote = [offer("z", T(1), "accepted", { listingId: null }), offer("c", T(2), "declined")];
+    const s = await reconcileMombongoOffers();
+    expect(s.blocked).toBe(1);
+    expect(s.conflicts).toBe(1);
+    expect(Object.keys(mockRegistry).filter((p) => p.startsWith("mombongoWebhookEvents/"))).toEqual(
+      [],
+    );
+  });
+
+  it("the same unresolved record found again (next run, or twice in one run) resolves to ONE deterministic issueId", async () => {
+    remote = [offer("z", T(1), "accepted", { listingId: null })];
+    const a = await reconcileMombongoOffers();
+    const b = await reconcileMombongoOffers();
+    expect(a.issues[0].issueId).toBe(b.issues[0].issueId);
+    scripted = () => ({
+      offers: [
+        offer("z", T(1), "accepted", { listingId: null }),
+        offer("z", T(1), "accepted", { listingId: null }),
+      ],
+      nextCursor: null,
+    });
+    const c = await reconcileMombongoOffers();
+    expect(c.issues).toHaveLength(1);
+    expect(c.blocked).toBe(1);
+    expect(c.issues[0].issueId).toBe(a.issues[0].issueId);
+  });
+
+  it("issueId is domain-separated and cannot equal any real Mombongo eventId derivation (offer_status_changed / invoice_issued)", async () => {
+    remote = [offer("z", T(1), "accepted", { listingId: null })];
+    const { issues } = await reconcileMombongoOffers();
+    const id = issues[0].issueId;
+    // Mombongo: sha256([kind, ...parts].join(" ")) — computeEventId in mombongo-functions
+    for (const real of [
+      await sha("offer_status_changed mb-z accepted"),
+      await sha("offer_status_changed mb-z declined"),
+      await sha("invoice_issued mb-z"),
+    ])
+      expect(id).not.toBe(real);
+    expect(id).toBe(await sha("reconciliation-issue-v1 blocked mb-z missing_listing_id"));
+  });
+
+  it("an issue exposes only safe, redacted fields: id, kind, machine code, offer id, remote timestamp", async () => {
+    remote = [offer("z", T(1), "accepted", { listingId: null })];
+    const { issues } = await reconcileMombongoOffers();
+    expect(Object.keys(issues[0]).sort()).toEqual([
+      "code",
+      "issueId",
+      "kind",
+      "offerId",
+      "remoteUpdatedAt",
+    ]);
+    expect(issues[0].code).toMatch(/^[a-z_]+$/);
+  });
+
+  it("issues are bounded in the response even when many records are unresolved (counts stay exact)", async () => {
+    remote = Array.from({ length: 30 }, (_, i) =>
+      offer(`u${i}`, T(i + 1), "accepted", { listingId: null }),
+    );
+    const s = await reconcileMombongoOffers();
+    expect(s.blocked).toBe(30);
+    expect(s.issues).toHaveLength(20);
+  });
+
+  it("a blocked record keeps the checkpoint pinned across runs", async () => {
+    seedAll(["a"]);
+    remote = [
+      offer("a", T(1), "accepted"),
+      offer("z", T(2), "accepted", { listingId: null }),
+      offer("b", T(3), "accepted"),
+    ];
+    seedAll(["b"]);
+    await reconcileMombongoOffers();
+    await reconcileMombongoOffers();
+    expect(cp()).toBe(T(1));
+  });
+
+  it("reconciliation-applied offers get a namespaced lastEventId that can never be mistaken for a real Mombongo eventId", async () => {
+    seedAll(["a"]);
+    remote = [offer("a", T(1), "accepted")];
+    await reconcileMombongoOffers();
+    const last = mockRegistry["harvestOffers/ext-a"].data?.lastEventId as string;
+    expect(last).toMatch(/^reconciliation-v1:[0-9a-f]{64}$/);
+    expect(last).not.toBe(await sha("offer_status_changed mb-a accepted"));
+  });
+});
+
+describe("config and import audit", () => {
+  it("'full-history' omits updatedSince from the request body entirely (no pseudo-timestamp)", async () => {
+    await reconcileMombongoOffers();
+    expect("updatedSince" in bodies[0]).toBe(false);
+    expect(JSON.stringify(bodies[0])).not.toContain("full-history");
+  });
+  it("an explicit bootstrap timestamp is sent as-is; an existing boundary always wins over config", async () => {
+    vi.mocked(getMombongoConfig).mockResolvedValue({
+      ...BASE_CONFIG,
+      reconciliationBootstrapSince: "2020-01-01T00:00:00.000Z",
+    });
+    mockRegistry[CP] = {
+      exists: true,
+      data: { streamId: "harvest-offers", completedThrough: T(200), updatedAt: T(200) },
+    };
+    await reconcileMombongoOffers();
+    expect(bodies[0].updatedSince).toBe(minus(T(200), OVERLAP));
+  });
+  it("bootstrapSince is taken only from trusted config: reconcileMombongoOffers has no bootstrap option and loads config via getMombongoConfig", async () => {
+    await reconcileMombongoOffers({
+      ...({ reconciliationBootstrapSince: "2001-01-01T00:00:00.000Z" } as object),
+    });
+    expect(bodies[0]).not.toHaveProperty("updatedSince");
+    expect(vi.mocked(getMombongoConfig)).toHaveBeenCalled();
+  });
+  it("imported offers carry the system marker plus explicit provenance, and the marker can never look like a Firebase uid", async () => {
+    remote = [offer("x", T(1), "pending")];
+    await reconcileMombongoOffers();
+    const d = mockRegistry["harvestOffers/ext-x"].data!;
+    expect(d.createdByUid).toBe("system:mombongo-reconciliation");
+    expect(d.importedFrom).toBe("reconciliation");
+    expect(d.createdByUid as string).toMatch(/:/);
+    expect(d.createdByUid as string).not.toMatch(/^[A-Za-z0-9]{20,28}$/); // Firebase Auth generated uid shape
+    // A user-scoped view (createdByUid === uid) can never match it.
+    expect(d.createdByUid === "some-real-uid").toBe(false);
   });
 });

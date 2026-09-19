@@ -6,7 +6,6 @@ import {
   findOfferDocId,
   importRemoteOffer,
 } from "./mombongoOfferOutcome";
-import { claimInboxEvent, markInboxConflict } from "./mombongoWebhookInbox";
 import {
   advanceCheckpoint,
   isCheckpointTimestamp,
@@ -39,8 +38,9 @@ import type { ExternalHarvestOfferDto } from "./mombongoContract";
  *     included — is re-fetched next run, and re-applying is idempotent.
  *  3. Each offer is applied through the shared outcome logic; a missing local
  *     offer is imported from authoritative Mombongo fields when every
- *     required field exists, otherwise it is BLOCKED (durably recorded in
- *     mombongoWebhookEvents as a conflict) and PINS the checkpoint.
+ *     required field exists, otherwise it is BLOCKED. Blocked and conflicting
+ *     records are reported as redacted `issues` (see PROVENANCE below) and PIN
+ *     the checkpoint.
  *  4. After a page is fully handled, advance `completedThrough` to the
  *     greatest remote `updatedAt` that is safe:
  *       - strictly below the earliest blocked/failed record (the pin);
@@ -57,6 +57,29 @@ import type { ExternalHarvestOfferDto } from "./mombongoContract";
  * processed, duplicate processing is idempotent, and Rules forbid moving the
  * boundary backward.
  *
+ * TWO INDEPENDENT LIMITS (server constants, never request-controlled):
+ *  - progress-page limit (`maxPages`, default 20): counts only pages that
+ *    reach beyond the boundary the run started from — bounds how much NEW
+ *    backlog one run processes. Overlap-replay pages are exempt so a dense
+ *    overlap cannot livelock progress.
+ *  - absolute request limit (`maxRequests`, default 100): counts EVERY remote
+ *    list request, replay-only pages included; nothing can bypass it.
+ *  Cursor-cycle protection: every cursor received this run is remembered; a
+ *  cursor returned a second time (self-loop, A→B→A, a remote that keeps
+ *  returning the same page) stops the run with `cursor_cycle`. Whenever any
+ *  limit or cycle ends a run early the last page is treated as NON-final, so
+ *  its trailing tie group is not committed; unprocessed records are never
+ *  advanced past, and a later run resumes from the durable boundary.
+ *
+ * PROVENANCE OF UNRESOLVED RECORDS. Blocked/conflicting remote offers are NOT
+ * written to `mombongoWebhookEvents`: that collection's closed schema only
+ * admits real webhook event types (`offer_status_changed`, `invoice_issued`)
+ * and has no provenance field, so any record there would falsely claim a
+ * webhook was received (and would need an invented eventId). They are instead
+ * returned as bounded, redacted `issues` (deterministic `issueId`) and PIN the
+ * boundary. A durable home needs a dedicated trusted Backend collection — see
+ * docs/mombongo-contract-v2-worker.md.
+ *
  * KNOWN LIMIT: a permanently blocked record holds the boundary; every run then
  * re-scans from that point and can process at most maxPages*pageSize records
  * beyond it. Releasing such a record needs an explicit human resolution policy
@@ -64,17 +87,31 @@ import type { ExternalHarvestOfferDto } from "./mombongoContract";
  */
 export type ReconciliationStatus = "complete" | "partial" | "not_configured" | "error";
 
+export interface ReconciliationIssue {
+  /** sha256("reconciliation-issue-v1 <kind> <offerId> <code>") — deterministic; NOT a Mombongo eventId and never stored as one. */
+  issueId: string;
+  kind: "blocked" | "conflict";
+  /** Stable machine code, never free text. */
+  code: string;
+  offerId: string;
+  remoteUpdatedAt: string | null;
+}
+
 export interface ReconciliationSummary {
   status: ReconciliationStatus;
   /** Safe machine-readable code only — never a raw error message. */
   reason?: string;
   pagesProcessed: number;
+  /** Every remote list request this run, replay-only pages included. */
+  remoteRequests: number;
   offersExamined: number;
   imported: number;
   updated: number;
   noops: number;
   conflicts: number;
   blocked: number;
+  /** Distinct unresolved records this run (bounded list). */
+  issues: ReconciliationIssue[];
   checkpoint: { advanced: boolean; previous: string | null; current: string | null };
 }
 
@@ -83,9 +120,12 @@ export const DEFAULT_OVERLAP_MS = 60 * 60 * 1000;
 export const MIN_OVERLAP_MS = 15 * 60 * 1000;
 
 const FULL_HISTORY = "full-history";
-const ABSOLUTE_PAGE_FACTOR = 10;
+export const DEFAULT_MAX_PROGRESS_PAGES = 20;
+export const DEFAULT_MAX_REMOTE_REQUESTS = 100;
+const MAX_REPORTED_ISSUES = 20;
 
-type OfferResult = { kind: "ok" } | { kind: "blocked" };
+type OfferResult = { kind: "ok" } | { kind: "unresolved" };
+type AddIssue = (issue: Omit<ReconciliationIssue, "issueId">) => Promise<void>;
 
 function logSafe(label: string, err: unknown) {
   // Name only: never the message or stack, which could echo request context.
@@ -106,45 +146,30 @@ function validRemoteOffer(dto: ExternalHarvestOfferDto): boolean {
   );
 }
 
-/** Durable, deduplicated diagnostic in the approved inbox schema (conflict state). */
-async function recordDurably(
-  kind: "conflict" | "blocked",
-  offerId: string,
-  discriminator: string,
-  reason: string,
-  occurredAt: string,
-) {
-  try {
-    const eventId = await hashSha256Hex(`reconcile-${kind} ${offerId} ${discriminator}`);
-    const claim = await claimInboxEvent({
-      eventId,
-      eventType: "offer_status_changed",
-      schemaVersion: 1,
-      occurredAt,
-      mombongoOfferId: offerId,
-    });
-    if (claim.kind === "process") await markInboxConflict(claim.ref, reason.slice(0, 300));
-  } catch (err) {
-    logSafe("could not record diagnostic", err);
-  }
-}
-
 export async function reconcileMombongoOffers(
-  options: { maxPages?: number; pageSize?: number; overlapMs?: number } = {},
+  options: {
+    maxPages?: number;
+    maxRequests?: number;
+    pageSize?: number;
+    overlapMs?: number;
+  } = {},
 ): Promise<ReconciliationSummary> {
-  const maxPages = options.maxPages ?? 20;
+  const maxPages = options.maxPages ?? DEFAULT_MAX_PROGRESS_PAGES;
+  const maxRequests = options.maxRequests ?? DEFAULT_MAX_REMOTE_REQUESTS;
   const pageSize = Math.min(Math.max(1, options.pageSize ?? 100), 100);
   const overlapMs = Math.max(MIN_OVERLAP_MS, options.overlapMs ?? DEFAULT_OVERLAP_MS);
 
   const summary: ReconciliationSummary = {
     status: "complete",
     pagesProcessed: 0,
+    remoteRequests: 0,
     offersExamined: 0,
     imported: 0,
     updated: 0,
     noops: 0,
     conflicts: 0,
     blocked: 0,
+    issues: [],
     checkpoint: { advanced: false, previous: null, current: null },
   };
 
@@ -215,16 +240,35 @@ export async function reconcileMombongoOffers(
     }
   };
 
-  // Pages that only replay the overlap (everything at or before the boundary
-  // this run started from) do NOT count against maxPages — otherwise a dense
-  // backlog inside the overlap window would make every run re-scan the same
-  // first pages and never reach new records (a livelock). A hard absolute cap
-  // still bounds the run.
+  // Two independent limits (see header): countedPages = progress pages only;
+  // summary.remoteRequests = every request, replay-only pages included.
   const startedFrom = stored;
   let countedPages = 0;
-  let totalPages = 0;
-  while (countedPages < maxPages && totalPages < maxPages * ABSOLUTE_PAGE_FACTOR) {
-    totalPages++;
+  let stopReason: string | undefined;
+  const seenCursors = new Set<string>();
+  const seenIssues = new Set<string>();
+
+  const addIssue: AddIssue = async (issue) => {
+    const issueId = await hashSha256Hex(
+      `reconciliation-issue-v1 ${issue.kind} ${issue.offerId} ${issue.code}`,
+    );
+    if (seenIssues.has(issueId)) return;
+    seenIssues.add(issueId);
+    if (issue.kind === "conflict") summary.conflicts++;
+    else summary.blocked++;
+    if (summary.issues.length < MAX_REPORTED_ISSUES) summary.issues.push({ issueId, ...issue });
+  };
+
+  while (true) {
+    if (countedPages >= maxPages) {
+      stopReason = "page_cap_reached";
+      break;
+    }
+    if (summary.remoteRequests >= maxRequests) {
+      stopReason = "request_limit_reached";
+      break;
+    }
+    summary.remoteRequests++;
     const page = await getMombongoHarvestOffers({ updatedSince, limit: pageSize, cursor }).catch(
       (err) => {
         logSafe("mombongo request failed", err);
@@ -246,7 +290,7 @@ export async function reconcileMombongoOffers(
       summary.offersExamined++;
       let result: OfferResult;
       try {
-        result = await processOffer(dto, summary);
+        result = await processOffer(dto, summary, addIssue);
       } catch (err) {
         logSafe("offer processing failed", err);
         failed = true;
@@ -256,10 +300,10 @@ export async function reconcileMombongoOffers(
       }
       if (result.kind === "ok") {
         processed.push(dto.updatedAt as string);
+      } else if (isCheckpointTimestamp(dto?.updatedAt)) {
+        pin = earliest(pin, dto.updatedAt);
       } else {
-        summary.blocked++;
-        if (isCheckpointTimestamp(dto?.updatedAt)) pin = earliest(pin, dto.updatedAt);
-        else noAdvance = true;
+        noAdvance = true;
       }
     }
 
@@ -268,7 +312,12 @@ export async function reconcileMombongoOffers(
     const isOverlapReplay =
       startedFrom !== undefined && isCheckpointTimestamp(lastTs) && lastTs <= startedFrom;
     if (!isOverlapReplay) countedPages++;
-    const isFinalPage = !page.nextCursor;
+    const nextCursor = page.nextCursor ?? null;
+    const isFinalPage = !nextCursor;
+    const cycle = nextCursor !== null && seenCursors.has(nextCursor);
+    if (nextCursor !== null) seenCursors.add(nextCursor);
+    // A page that is followed by a limit/cycle stop is NOT final: its trailing
+    // tie group must not be committed.
     const committed = await commit(
       isFinalPage && !failed,
       isCheckpointTimestamp(lastTs) ? lastTs : undefined,
@@ -284,12 +333,16 @@ export async function reconcileMombongoOffers(
       exhausted = true;
       break;
     }
-    cursor = page.nextCursor as string;
+    if (cycle) {
+      stopReason = "cursor_cycle";
+      break;
+    }
+    cursor = nextCursor as string;
   }
 
   if (!exhausted) {
     summary.status = "partial";
-    summary.reason = "page_cap_reached";
+    summary.reason = stopReason ?? "page_cap_reached";
   } else if (pin !== null || noAdvance) {
     summary.status = "partial";
     summary.reason = "blocked_records";
@@ -300,16 +353,16 @@ export async function reconcileMombongoOffers(
 async function processOffer(
   dto: ExternalHarvestOfferDto,
   summary: ReconciliationSummary,
+  addIssue: AddIssue,
 ): Promise<OfferResult> {
   if (!validRemoteOffer(dto)) {
-    await recordDurably(
-      "blocked",
-      typeof dto?.offerId === "string" && dto.offerId ? dto.offerId : "unknown",
-      "invalid-dto",
-      "Réponse Mombongo invalide (identifiant, statut ou horodatage inutilisable).",
-      new Date().toISOString(),
-    );
-    return { kind: "blocked" };
+    await addIssue({
+      kind: "blocked",
+      code: "invalid_remote_record",
+      offerId: typeof dto?.offerId === "string" && dto.offerId ? dto.offerId : "unknown",
+      remoteUpdatedAt: isCheckpointTimestamp(dto?.updatedAt) ? dto.updatedAt : null,
+    });
+    return { kind: "unresolved" };
   }
 
   const key = {
@@ -334,14 +387,13 @@ async function processOffer(
       createdAt: dto.createdAt,
     });
     if (imported.kind === "blocked") {
-      await recordDurably(
-        "blocked",
-        dto.offerId,
-        "no-local-offer",
-        imported.reason,
-        dto.updatedAt as string,
-      );
-      return { kind: "blocked" };
+      await addIssue({
+        kind: "blocked",
+        code: imported.code,
+        offerId: dto.offerId,
+        remoteUpdatedAt: dto.updatedAt,
+      });
+      return { kind: "unresolved" };
     }
     if (imported.kind === "imported") summary.imported++;
     offerDocId = imported.offerDocId;
@@ -356,7 +408,10 @@ async function processOffer(
     ...key,
     status: dto.status as "accepted" | "declined",
     occurredAt: dto.updatedAt as string,
-    eventId: await hashSha256Hex(`reconcile ${dto.offerId} ${dto.status} ${dto.updatedAt}`),
+    // Stored as harvestOffers.lastEventId. Namespaced so it can never be
+    // mistaken for (or collide with) a real Mombongo eventId — reconciliation
+    // discovered this change; no webhook event exists for it.
+    eventId: `reconciliation-v1:${await hashSha256Hex(`${dto.offerId} ${dto.status} ${dto.updatedAt}`)}`,
     invoiceId: dto.invoiceId ?? undefined,
   });
 
@@ -369,24 +424,23 @@ async function processOffer(
       summary.noops++;
       return { kind: "ok" };
     case "conflict":
-      summary.conflicts++;
-      await recordDurably(
-        "conflict",
-        dto.offerId,
-        dto.status as string,
-        outcome.reason,
-        dto.updatedAt as string,
-      );
-      return { kind: "ok" };
+      // No honest durable home exists in the merged Backend schema, so a
+      // conflict pins the boundary (like a blocked record) instead of being
+      // recorded as a fake webhook event.
+      await addIssue({
+        kind: "conflict",
+        code: outcome.code,
+        offerId: dto.offerId,
+        remoteUpdatedAt: dto.updatedAt,
+      });
+      return { kind: "unresolved" };
     default:
-      // not_found right after import/lookup: cannot be applied yet — hold the boundary.
-      await recordDurably(
-        "blocked",
-        dto.offerId,
-        "apply-not-found",
-        outcome.reason,
-        dto.updatedAt as string,
-      );
-      return { kind: "blocked" };
+      await addIssue({
+        kind: "blocked",
+        code: "apply_not_found",
+        offerId: dto.offerId,
+        remoteUpdatedAt: dto.updatedAt,
+      });
+      return { kind: "unresolved" };
   }
 }

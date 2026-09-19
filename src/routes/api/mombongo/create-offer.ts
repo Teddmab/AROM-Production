@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { createMombongoOffer } from "@/lib/payments/mombongoHarvest";
 import { verifyMombongoCaller } from "@/lib/auth/verifyMombongoCaller";
+import { RECONCILIATION_ACTOR } from "@/lib/payments/mombongoActors";
 
 /** Sprint DP: submit an offer on a published harvest listing. Same auth pattern as create-invoice.ts. */
 export const Route = createFileRoute("/api/mombongo/create-offer")({
@@ -10,6 +11,12 @@ export const Route = createFileRoute("/api/mombongo/create-offer")({
         const caller = await verifyMombongoCaller(request.headers.get("authorization"));
         if (!caller) {
           return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+
+        // createdByUid always comes from the verified token, never the body;
+        // the reserved system actor can never be a submitting user.
+        if (caller.uid === RECONCILIATION_ACTOR) {
+          return Response.json({ error: "reserved_actor" }, { status: 403 });
         }
 
         const body = (await request.json().catch(() => null)) as {

@@ -127,4 +127,24 @@ describe("POST /api/mombongo/create-offer", () => {
       expect((await post(request(createExternalHarvestOfferRequestFixture))).status).toBe(409);
     },
   );
+
+  it("createdByUid always comes from the verified token — a body-supplied value (even the reserved system actor) is ignored", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "real-user" });
+    vi.mocked(createMombongoOffer).mockResolvedValue({ status: "in_flight", message: "x" });
+    await post(
+      request({
+        ...createExternalHarvestOfferRequestFixture,
+        createdByUid: "system:mombongo-reconciliation",
+      }),
+    );
+    expect(createMombongoOffer).toHaveBeenCalledWith(
+      expect.objectContaining({ createdByUid: "real-user" }),
+    );
+  });
+
+  it("a caller whose uid is the reserved system actor is refused", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "system:mombongo-reconciliation" });
+    expect((await post(request(createExternalHarvestOfferRequestFixture))).status).toBe(403);
+    expect(createMombongoOffer).not.toHaveBeenCalled();
+  });
 });

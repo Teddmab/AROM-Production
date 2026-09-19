@@ -9,12 +9,14 @@ vi.mock("@/lib/payments/mombongoReconciliation", () => ({ reconcileMombongoOffer
 const SUMMARY = {
   status: "complete" as const,
   pagesProcessed: 1,
+  remoteRequests: 1,
   offersExamined: 2,
   imported: 0,
   updated: 1,
   noops: 1,
   conflicts: 0,
   blocked: 0,
+  issues: [],
   checkpoint: { advanced: true, previous: null, current: "2026-09-19T10:00:00.000Z" },
 };
 
@@ -115,9 +117,11 @@ describe("POST /api/mombongo/reconcile-offers", () => {
       "checkpoint",
       "conflicts",
       "imported",
+      "issues",
       "noops",
       "offersExamined",
       "pagesProcessed",
+      "remoteRequests",
       "status",
       "updated",
     ]);

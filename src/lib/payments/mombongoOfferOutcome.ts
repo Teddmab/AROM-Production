@@ -10,6 +10,8 @@ import {
 } from "firebase/firestore/lite";
 import { serverDb } from "@/lib/firebase/serverDb";
 import type { HarvestOfferDoc } from "./mombongoHarvest";
+import { RECONCILIATION_ACTOR } from "./mombongoActors";
+export { RECONCILIATION_ACTOR };
 
 /**
  * Shared authoritative-outcome application for a Mombongo harvest offer —
@@ -30,11 +32,13 @@ import type { HarvestOfferDoc } from "./mombongoHarvest";
  * "tolerate event delivery before the submission response is stored").
  * Never correlates by `listingId` alone.
  */
+export type ConflictCode = "offer_id_mismatch" | "terminal_status_conflict";
+
 export type ApplyOfferOutcomeResult =
   | { kind: "applied"; offerDocId: string }
   | { kind: "already_applied"; offerDocId: string }
   | { kind: "stale"; offerDocId: string; reason: string }
-  | { kind: "conflict"; offerDocId: string; reason: string }
+  | { kind: "conflict"; offerDocId: string; reason: string; code: ConflictCode }
   | { kind: "not_found"; reason: string };
 
 export interface ApplyOfferOutcomeInput {
@@ -101,6 +105,7 @@ export async function applyMombongoOfferOutcome(
     if (offer.mombongoOfferId && offer.mombongoOfferId !== input.mombongoOfferId) {
       return {
         kind: "conflict",
+        code: "offer_id_mismatch",
         offerDocId,
         reason: `L'offre locale ${offerDocId} référence l'offre Mombongo ${offer.mombongoOfferId}, pas ${input.mombongoOfferId}.`,
       };
@@ -157,22 +162,12 @@ export async function applyMombongoOfferOutcome(
     }
     return {
       kind: "conflict",
+      code: "terminal_status_conflict",
       offerDocId,
       reason: `L'offre est déjà '${before}' localement ; un nouvel événement rapporte '${input.status}'.`,
     };
   });
 }
-
-/**
- * Provenance marker written as `createdByUid` on offers imported by
- * reconciliation. merged Backend Rules require `createdByUid is string` at
- * create, so the field cannot be omitted; this is a *system* provenance
- * marker, deliberately not a user uid (it never matches a users/ doc), so no
- * human actor is invented. Consequence, reported as a Mobile follow-up:
- * AROM-Mobile's "Mes offres" filters by createdByUid === the caller's uid,
- * so imported offers are not shown there until Mobile handles them.
- */
-export const RECONCILIATION_ACTOR = "system:mombongo-reconciliation";
 
 export interface RemoteOfferForImport {
   offerId: string;
@@ -184,10 +179,20 @@ export interface RemoteOfferForImport {
   createdAt: string | null;
 }
 
+export type ImportBlockCode =
+  | "missing_offer_id"
+  | "missing_listing_id"
+  | "missing_created_at"
+  | "unexpected_currency"
+  | "invalid_quantity"
+  | "invalid_price"
+  | "unsafe_local_id"
+  | "local_id_offer_mismatch";
+
 export type ImportRemoteOfferResult =
   | { kind: "imported"; offerDocId: string }
   | { kind: "exists"; offerDocId: string }
-  | { kind: "blocked"; reason: string };
+  | { kind: "blocked"; code: ImportBlockCode };
 
 /**
  * Reconstructs a missing local `harvestOffers` doc from authoritative
@@ -208,16 +213,16 @@ export type ImportRemoteOfferResult =
 export async function importRemoteOffer(
   dto: RemoteOfferForImport,
 ): Promise<ImportRemoteOfferResult> {
-  if (!dto.offerId) return { kind: "blocked", reason: "offerId manquant" };
-  if (!dto.listingId) return { kind: "blocked", reason: "listingId manquant côté Mombongo" };
-  if (!dto.createdAt) return { kind: "blocked", reason: "createdAt manquant côté Mombongo" };
-  if (dto.currency !== "CDF") return { kind: "blocked", reason: "devise inattendue" };
+  if (!dto.offerId) return { kind: "blocked", code: "missing_offer_id" };
+  if (!dto.listingId) return { kind: "blocked", code: "missing_listing_id" };
+  if (!dto.createdAt) return { kind: "blocked", code: "missing_created_at" };
+  if (dto.currency !== "CDF") return { kind: "blocked", code: "unexpected_currency" };
   if (!Number.isFinite(dto.quantityKg) || dto.quantityKg <= 0)
-    return { kind: "blocked", reason: "quantité invalide" };
+    return { kind: "blocked", code: "invalid_quantity" };
   if (!Number.isFinite(dto.unitPriceCdf) || dto.unitPriceCdf <= 0)
-    return { kind: "blocked", reason: "prix invalide" };
+    return { kind: "blocked", code: "invalid_price" };
   const docId = dto.externalReference || `mombongo-${dto.offerId}`;
-  if (docId.includes("/")) return { kind: "blocked", reason: "identifiant local non sûr" };
+  if (docId.includes("/")) return { kind: "blocked", code: "unsafe_local_id" };
 
   const ref = doc(serverDb, "harvestOffers", docId);
   return runTransaction(serverDb, async (tx): Promise<ImportRemoteOfferResult> => {
@@ -226,10 +231,7 @@ export async function importRemoteOffer(
       const local = existing.data() as HarvestOfferDoc;
       return local.mombongoOfferId === dto.offerId
         ? { kind: "exists", offerDocId: docId }
-        : {
-            kind: "blocked",
-            reason: `un document local ${docId} référence une autre offre Mombongo`,
-          };
+        : { kind: "blocked", code: "local_id_offer_mismatch" };
     }
     const offer: HarvestOfferDoc & { importedFrom: string; importedAt: string } = {
       id: docId,
