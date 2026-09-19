@@ -53,4 +53,17 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: .output/server
-          command: deploy
+          # Nitro's cloudflare-module preset writes both
+          # `.output/server/wrangler.json` (this build's own config, base
+          # path `.output/server`) and a root-level `.wrangler/deploy/
+          # config.json` (base path the repo root) on every `bun run
+          # build`. Wrangler then finds two config sources at two
+          # different base paths and refuses to guess which one governs
+          # ("these do not share the same base path"), failing every
+          # deploy since this workflow's first commit (confirmed:
+          # reproduced locally with a bare `wrangler deploy --dry-run` in
+          # `.output/server`, fixed by pointing wrangler at the build's
+          # own config explicitly). No other change needed — the root
+          # config file was never the problem, only which one wrangler
+          # defaulted to picking.
+          command: deploy --config wrangler.json
