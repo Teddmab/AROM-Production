@@ -123,6 +123,8 @@ type Remote = {
   createdAt: string | null;
   updatedAt: string;
   invoiceId: string | null;
+  seller?: unknown;
+  listing?: unknown;
 };
 let remote: Remote[] = [];
 const requests: { updatedSince?: string; cursor?: string; limit?: number }[] = [];
@@ -977,5 +979,252 @@ describe("config and import audit", () => {
     expect(d.createdByUid as string).not.toMatch(/^[A-Za-z0-9]{20,28}$/); // Firebase Auth generated uid shape
     // A user-scoped view (createdByUid === uid) can never match it.
     expect(d.createdByUid === "some-real-uid").toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accepted-offer enrichment (Mombongo PR #70): seller/listing snapshot
+// ---------------------------------------------------------------------------
+describe("accepted-offer enrichment", () => {
+  const FAR = "2099-01-01T00:00:00.000Z";
+  const ENRICHMENT = {
+    seller: { id: "farmer-a", displayName: "Marie Kabuya" },
+    listing: {
+      commodity: "ananas",
+      commodityCode: "ANA",
+      province: "Kasaï",
+      territory: "Demba",
+      thumbnail: {
+        url: "https://storage.googleapis.com/bucket/listings/farmer-a/l-a/p.jpg?X-Goog-Signature=abc",
+        expiresAt: FAR,
+      },
+    },
+  };
+  const local = (id: string) =>
+    mockRegistry[`harvestOffers/ext-${id}`]?.data as Record<string, unknown>;
+  const harvestCollections = () =>
+    [...new Set(Object.keys(mockRegistry).map((k) => k.split("/")[0]))].sort();
+
+  it("imports an accepted offer and stores the sanitized seller/listing snapshot", async () => {
+    remote = [offer("a", T(10), "accepted", { ...ENRICHMENT, invoiceId: "inv-a" })];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", imported: 1, updated: 1, enriched: 1 });
+    expect(local("a")).toMatchObject({
+      status: "accepted",
+      mombongoOfferId: "mb-a",
+      externalReference: "ext-a",
+      invoiceId: "inv-a",
+      mombongoSeller: { id: "farmer-a", displayName: "Marie Kabuya" },
+      mombongoListing: { commodity: "ananas", province: "Kasaï", thumbnailExpiresAt: FAR },
+      mombongoEnrichmentSourceAt: T(10),
+    });
+    expect(Object.keys(mockRegistry).filter((k) => k.startsWith("harvestOffers/"))).toHaveLength(1);
+  });
+
+  it("applies enrichment to an offer that is ALREADY accepted locally (same-state path) without changing status or event bookkeeping", async () => {
+    seedLocal("a", {
+      status: "accepted",
+      mombongoOccurredAt: T(10),
+      lastEventId: "evt-webhook-1",
+      invoiceId: "inv-a",
+      updatedAt: "2026-09-19T10:10:05.000Z",
+    });
+    remote = [offer("a", T(10), "accepted", { ...ENRICHMENT, invoiceId: "inv-a" })];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", imported: 0, noops: 1, enriched: 1 });
+    expect(local("a")).toMatchObject({
+      status: "accepted",
+      lastEventId: "evt-webhook-1",
+      mombongoOccurredAt: T(10),
+      updatedAt: "2026-09-19T10:10:05.000Z",
+      invoiceId: "inv-a",
+      mombongoSeller: { id: "farmer-a" },
+    });
+  });
+
+  it("enriches a legacy `won` offer without rewriting its status", async () => {
+    seedLocal("a", { status: "won", mombongoOccurredAt: T(20) });
+    remote = [offer("a", T(10), "accepted", ENRICHMENT)];
+    await reconcileMombongoOffers();
+    expect(local("a")).toMatchObject({ mombongoSeller: { id: "farmer-a" } });
+    expect(["won", "accepted"]).toContain(local("a").status);
+  });
+
+  it("an older Mombongo response with no seller/listing still reconciles exactly as before", async () => {
+    remote = [offer("a", T(10), "accepted")];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", imported: 1, updated: 1, enriched: 0 });
+    expect(local("a")).toMatchObject({ status: "accepted" });
+    expect(local("a")).not.toHaveProperty("mombongoSeller");
+    expect(local("a")).not.toHaveProperty("mombongoListing");
+    expect(local("a")).not.toHaveProperty("mombongoEnrichmentSourceAt");
+    expect(cp()).toBe(T(10));
+  });
+
+  it("pending and declined offers carry null enrichment and store none", async () => {
+    remote = [
+      offer("p", T(10), "pending", { seller: null, listing: null }),
+      offer("d", T(11), "declined", { seller: null, listing: null }),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", enriched: 0 });
+    for (const id of ["p", "d"]) {
+      expect(local(id)).not.toHaveProperty("mombongoSeller");
+      expect(local(id)).not.toHaveProperty("mombongoListing");
+    }
+  });
+
+  it("malformed optional enrichment is ignored safely: reconciliation still completes, applies the status and advances the checkpoint", async () => {
+    remote = [
+      offer("a", T(10), "accepted", { seller: "not-an-object", listing: 12 }),
+      offer("b", T(11), "accepted", { seller: { id: 5 }, listing: { thumbnail: "url" } }),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({
+      status: "complete",
+      updated: 2,
+      enriched: 0,
+      blocked: 0,
+      conflicts: 0,
+    });
+    expect(s.issues).toEqual([]);
+    expect(status("a")).toBe("accepted");
+    expect(status("b")).toBe("accepted");
+    expect(cp()).toBe(T(11));
+  });
+
+  it("never persists unknown or private keys from the remote response", async () => {
+    remote = [
+      offer("a", T(10), "accepted", {
+        seller: {
+          id: "farmer-a",
+          displayName: "Marie",
+          email: "m@k.cd",
+          phone: "+243900000000",
+          wallet: "w",
+          token: "tok",
+        },
+        listing: {
+          ...ENRICHMENT.listing,
+          address: "1 rue X",
+          sellerRole: "farmer",
+          photoUrls: ["u"],
+        },
+        merchantId: "syn-merchant",
+        headers: { authorization: "Bearer secret" },
+      } as Partial<Remote>),
+    ];
+    await reconcileMombongoOffers();
+    const stored = JSON.stringify(local("a"));
+    for (const leaked of [
+      "m@k.cd",
+      "+243900000000",
+      "wallet",
+      "tok",
+      "1 rue X",
+      "sellerRole",
+      "photoUrls",
+      "syn-merchant",
+      "Bearer",
+      "authorization",
+      "merchantId",
+    ]) {
+      expect(stored).not.toContain(leaked);
+    }
+    expect(
+      Object.keys(local("a"))
+        .filter((k) => k.startsWith("mombongo"))
+        .sort(),
+    ).toEqual([
+      "mombongoEnrichmentSourceAt",
+      "mombongoListing",
+      "mombongoOccurredAt",
+      "mombongoOfferId",
+      "mombongoSeller",
+    ]);
+  });
+
+  it("has no lifecycle side effect: no invoice, checkout, claim or webhook-event document is created or changed", async () => {
+    seedLocal("a", { status: "accepted", mombongoOccurredAt: T(10), lastEventId: "evt-1" });
+    remote = [offer("a", T(10), "accepted", ENRICHMENT)];
+    await reconcileMombongoOffers();
+    expect(harvestCollections()).toEqual(["harvestOffers", "mombongoReconciliationState"]);
+    expect(local("a")).not.toHaveProperty("mombongoCheckout");
+    expect(local("a").lastEventId).toBe("evt-1");
+  });
+
+  it("never creates a duplicate offer: a second run over the same enriched record changes nothing", async () => {
+    remote = [offer("a", T(10), "accepted", ENRICHMENT)];
+    await reconcileMombongoOffers();
+    const first = JSON.stringify(mockRegistry["harvestOffers/ext-a"]);
+    const s2 = await reconcileMombongoOffers();
+    expect(s2.enriched).toBe(0);
+    expect(Object.keys(mockRegistry).filter((k) => k.startsWith("harvestOffers/"))).toHaveLength(1);
+    expect(JSON.stringify(mockRegistry["harvestOffers/ext-a"])).toBe(first);
+  });
+
+  it("a stale remote response cannot regress newer local metadata", async () => {
+    seedLocal("a", {
+      status: "accepted",
+      mombongoOccurredAt: T(30),
+      mombongoEnrichmentSourceAt: T(30),
+      mombongoSeller: { id: "farmer-a", displayName: "Marie Kabuya" },
+      mombongoListing: {
+        commodity: "ananas",
+        commodityCode: null,
+        province: null,
+        territory: null,
+        thumbnailUrl: null,
+        thumbnailExpiresAt: null,
+      },
+    });
+    remote = [
+      offer("a", T(10), "accepted", {
+        seller: { id: "farmer-a", displayName: "Old Name" },
+        listing: { ...ENRICHMENT.listing, commodity: "manioc" },
+      }),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", enriched: 0 });
+    expect(local("a")).toMatchObject({
+      mombongoSeller: { displayName: "Marie Kabuya" },
+      mombongoListing: { commodity: "ananas" },
+      mombongoEnrichmentSourceAt: T(30),
+    });
+  });
+
+  it("a different seller id than the frozen one is skipped without failing reconciliation", async () => {
+    seedLocal("a", {
+      status: "accepted",
+      mombongoOccurredAt: T(5),
+      mombongoEnrichmentSourceAt: T(5),
+      mombongoSeller: { id: "farmer-a", displayName: "Marie" },
+    });
+    remote = [
+      offer("a", T(10), "accepted", {
+        seller: { id: "farmer-z", displayName: "Zed" },
+        listing: ENRICHMENT.listing,
+      }),
+    ];
+    const s = await reconcileMombongoOffers();
+    expect(s).toMatchObject({ status: "complete", enriched: 0, blocked: 0, conflicts: 0 });
+    expect(local("a")).toMatchObject({ mombongoSeller: { id: "farmer-a", displayName: "Marie" } });
+    expect(cp()).toBe(T(10));
+  });
+
+  it("an already-expired thumbnail is not stored, but the rest of the enrichment is", async () => {
+    remote = [
+      offer("a", T(10), "accepted", {
+        ...ENRICHMENT,
+        listing: {
+          ...ENRICHMENT.listing,
+          thumbnail: { ...ENRICHMENT.listing.thumbnail, expiresAt: "2020-01-01T00:00:00.000Z" },
+        },
+      }),
+    ];
+    await reconcileMombongoOffers();
+    expect(local("a")).toMatchObject({
+      mombongoListing: { commodity: "ananas", thumbnailUrl: null, thumbnailExpiresAt: null },
+    });
   });
 });

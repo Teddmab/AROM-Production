@@ -179,6 +179,25 @@ export interface ExternalHarvestOfferDto {
   createdAt: string | null;
   updatedAt: string | null;
   invoiceId: string | null;
+  /**
+   * Additive accepted-offer enrichment (verified against mombongo-functions
+   * PR #70, merge commit 5ff75b72ed973b4a00a5a4a5b49dfb956e8abaf1). Both are
+   * OPTIONAL here on purpose: an older Mombongo build omits them entirely,
+   * and treating that as an error would break reconciliation. Present-but-null
+   * for pending/declined offers; an accepted offer whose listing could not be
+   * read or matched carries `seller: { id, displayName: null }` and
+   * `listing: null`. Every value is untrusted until sanitized — see
+   * mombongoOfferEnrichment.ts, which is the only consumer.
+   */
+  seller?: { id: string; displayName: string | null } | null;
+  listing?: {
+    commodity: string | null;
+    commodityCode: string | null;
+    province: string | null;
+    territory: string | null;
+    /** A short-lived (about one hour) signed URL. Presentation context only. */
+    thumbnail: { url: string; expiresAt: string } | null;
+  } | null;
 }
 
 export const externalHarvestOfferDtoFixture: ExternalHarvestOfferDto = {
@@ -192,6 +211,25 @@ export const externalHarvestOfferDtoFixture: ExternalHarvestOfferDto = {
   createdAt: "2026-09-19T00:00:00.000Z",
   updatedAt: "2026-09-19T00:00:00.000Z",
   invoiceId: null,
+};
+
+/** An accepted offer as PR #70 returns it: same base DTO plus seller/listing. */
+export const externalHarvestOfferAcceptedEnrichedFixture: ExternalHarvestOfferDto = {
+  ...externalHarvestOfferDtoFixture,
+  status: "accepted",
+  updatedAt: "2026-09-19T12:00:00.000Z",
+  invoiceId: "mombongo_inv_9002",
+  seller: { id: "farmer_42", displayName: "Marie Kabuya" },
+  listing: {
+    commodity: "ananas",
+    commodityCode: "ANA",
+    province: "Kasaï",
+    territory: "Demba",
+    thumbnail: {
+      url: "https://storage.googleapis.com/bucket/listings/farmer_42/listing_701/p.jpg?X-Goog-Signature=abc",
+      expiresAt: "2026-09-19T13:00:00.000Z",
+    },
+  },
 };
 
 // --- POST /getExternalHarvestOffers (reconciliation, paginated list) ---

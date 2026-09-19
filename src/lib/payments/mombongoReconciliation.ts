@@ -12,6 +12,7 @@ import {
   readCheckpoint,
 } from "./mombongoReconciliationCheckpoint";
 import type { ExternalHarvestOfferDto } from "./mombongoContract";
+import { applyOfferEnrichment, sanitizeOfferEnrichment } from "./mombongoOfferEnrichment";
 
 /**
  * Trusted server-side reconciliation (contract v2). Reuses
@@ -108,6 +109,8 @@ export interface ReconciliationSummary {
   imported: number;
   updated: number;
   noops: number;
+  /** Accepted offers whose seller/listing snapshot was written or refreshed this run (metadata only — see mombongoOfferEnrichment.ts). */
+  enriched: number;
   conflicts: number;
   blocked: number;
   /** Distinct unresolved records this run (bounded list). */
@@ -167,6 +170,7 @@ export async function reconcileMombongoOffers(
     imported: 0,
     updated: 0,
     noops: 0,
+    enriched: 0,
     conflicts: 0,
     blocked: 0,
     issues: [],
@@ -418,8 +422,14 @@ async function processOffer(
   switch (outcome.kind) {
     case "applied":
       summary.updated++;
+      await refreshEnrichment(dto, outcome.offerDocId, summary);
       return { kind: "ok" };
     case "already_applied":
+      // Same-state: the lifecycle fact is already recorded, but enrichment may
+      // be new (Mombongo started returning it after this offer was accepted).
+      summary.noops++;
+      await refreshEnrichment(dto, outcome.offerDocId, summary);
+      return { kind: "ok" };
     case "stale":
       summary.noops++;
       return { kind: "ok" };
@@ -442,5 +452,31 @@ async function processOffer(
         remoteUpdatedAt: dto.updatedAt,
       });
       return { kind: "unresolved" };
+  }
+}
+
+/**
+ * Best-effort, never load-bearing: applies the remote accepted offer's
+ * seller/listing snapshot to the local offer. Every outcome — including a
+ * malformed enrichment, a stale response, a seller conflict, or an outright
+ * failure — leaves reconciliation itself untouched: it never pins the
+ * checkpoint, never becomes an issue, and never changes status/invoice/payment.
+ */
+async function refreshEnrichment(
+  dto: ExternalHarvestOfferDto,
+  offerDocId: string,
+  summary: ReconciliationSummary,
+): Promise<void> {
+  const snapshot = sanitizeOfferEnrichment(dto);
+  if (!snapshot) return;
+  try {
+    const result = await applyOfferEnrichment({
+      offerDocId,
+      mombongoOfferId: dto.offerId,
+      snapshot,
+    });
+    if (result.kind === "applied") summary.enriched++;
+  } catch (err) {
+    logSafe("offer enrichment failed", err);
   }
 }
