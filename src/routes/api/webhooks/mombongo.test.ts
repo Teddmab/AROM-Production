@@ -4,6 +4,8 @@ import { getMombongoConfig } from "@/lib/payments/mombongoConfig";
 import { verifyHmac } from "@/lib/payments/mombongoSigning";
 import {
   invoiceIssuedEventFixture,
+  invoiceIssuedEventV2Fixture,
+  offerStatusChangedEventFixture,
   paymentCompleteEventFixture,
 } from "@/lib/payments/mombongoContract";
 
@@ -66,6 +68,20 @@ vi.mock("firebase/firestore/lite", () => ({
     updateDocCalls.push({ path: ref.path, data });
     const existing = mockRegistry[ref.path];
     mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
+  }),
+  runTransaction: vi.fn(async (_db: unknown, updateFn: (tx: unknown) => Promise<unknown>) => {
+    const tx = {
+      get: async (ref: { path: string }) => {
+        const entry = mockRegistry[ref.path];
+        return { exists: () => !!entry?.exists, data: () => entry?.data };
+      },
+      update: (ref: { path: string }, data: Record<string, unknown>) => {
+        updateDocCalls.push({ path: ref.path, data });
+        const existing = mockRegistry[ref.path];
+        mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
+      },
+    };
+    return updateFn(tx);
   }),
 }));
 
@@ -258,6 +274,255 @@ describe("POST /api/webhooks/mombongo — event: invoice_issued", () => {
   it("rejects a payload missing required fields with 400", async () => {
     const res = await post(
       request(JSON.stringify({ event: "invoice_issued", invoiceId: "x" }), "sig"),
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/webhooks/mombongo — event: offer_status_changed (contract v2)", () => {
+  beforeEach(() => vi.mocked(verifyHmac).mockResolvedValue(true));
+
+  function seedPendingOffer() {
+    setDocs({
+      [`harvestOffers/${offerStatusChangedEventFixture.externalReference}`]: {
+        exists: true,
+        data: {
+          id: offerStatusChangedEventFixture.externalReference,
+          status: "pending",
+          listingId: offerStatusChangedEventFixture.listingId,
+          mombongoOfferId: offerStatusChangedEventFixture.offerId,
+        },
+      },
+    });
+  }
+
+  it("valid accepted event applies pending -> accepted and durably records the inbox event first", async () => {
+    seedPendingOffer();
+    const res = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(res.status).toBe(200);
+    expect(
+      setDocCalls.some(
+        (c) => c.path === `mombongoWebhookEvents/${offerStatusChangedEventFixture.eventId}`,
+      ),
+    ).toBe(true);
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("accepted");
+  });
+
+  it("valid declined event applies pending -> declined", async () => {
+    seedPendingOffer();
+    const declined = { ...offerStatusChangedEventFixture, status: "declined" as const };
+    const res = await post(request(JSON.stringify(declined), "sig"));
+    expect(res.status).toBe(200);
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("declined");
+  });
+
+  it("correlates exactly via externalReference/offerId, never listingId alone", async () => {
+    setDocs({
+      "harvestOffers/some-other-doc": {
+        exists: true,
+        data: {
+          status: "pending",
+          listingId: offerStatusChangedEventFixture.listingId,
+          mombongoOfferId: "a-different-offer",
+        },
+      },
+    });
+    const res = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(res.status).toBe(503); // not_found — no exact correlation, tolerated as recoverable
+    expect(mockRegistry["harvestOffers/some-other-doc"].data?.status).toBe("pending"); // untouched
+  });
+
+  it("tolerates arrival before the submission response is stored (no local offer exists yet) — recoverable, not a hard failure", async () => {
+    const res = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("offer_not_found_yet");
+  });
+
+  it("duplicate event delivery (same eventId) is harmless — returns success without reapplying", async () => {
+    seedPendingOffer();
+    await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    updateDocCalls.length = 0;
+    const res = await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("already_processed");
+    expect(updateDocCalls).toHaveLength(0);
+  });
+
+  it("a stale event (older occurredAt than what's already stored) cannot overwrite newer terminal state", async () => {
+    setDocs({
+      [`harvestOffers/${offerStatusChangedEventFixture.externalReference}`]: {
+        exists: true,
+        data: {
+          status: "accepted",
+          listingId: offerStatusChangedEventFixture.listingId,
+          mombongoOfferId: offerStatusChangedEventFixture.offerId,
+          mombongoOccurredAt: "2026-09-20T00:00:00.000Z", // newer than the event below
+        },
+      },
+    });
+    const staleDeclined = {
+      ...offerStatusChangedEventFixture,
+      status: "declined" as const,
+      eventId: "evt-stale-1",
+    };
+    const res = await post(request(JSON.stringify(staleDeclined), "sig"));
+    expect(res.status).toBe(200);
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("accepted");
+  });
+
+  it("a genuine terminal conflict (accepted vs declined, same/newer occurredAt) is recorded, not overwritten", async () => {
+    setDocs({
+      [`harvestOffers/${offerStatusChangedEventFixture.externalReference}`]: {
+        exists: true,
+        data: {
+          status: "accepted",
+          listingId: offerStatusChangedEventFixture.listingId,
+          mombongoOfferId: offerStatusChangedEventFixture.offerId,
+          mombongoOccurredAt: "2026-09-01T00:00:00.000Z",
+        },
+      },
+    });
+    const conflicting = {
+      ...offerStatusChangedEventFixture,
+      status: "declined" as const,
+      eventId: "evt-conflict-1",
+    };
+    const res = await post(request(JSON.stringify(conflicting), "sig"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("acknowledged_conflict");
+    expect(
+      mockRegistry[`harvestOffers/${offerStatusChangedEventFixture.externalReference}`].data
+        ?.status,
+    ).toBe("accepted");
+    expect(mockRegistry[`mombongoWebhookEvents/evt-conflict-1`].data?.processingState).toBe(
+      "conflict",
+    );
+  });
+
+  it("rejects an unsupported schemaVersion", async () => {
+    seedPendingOffer();
+    const res = await post(
+      request(JSON.stringify({ ...offerStatusChangedEventFixture, schemaVersion: 99 }), "sig"),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a malformed/missing-field payload", async () => {
+    const res = await post(
+      request(JSON.stringify({ event: "offer_status_changed", eventId: "x" }), "sig"),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("never persists a signature/secret field into the inbox record", async () => {
+    seedPendingOffer();
+    await post(request(JSON.stringify(offerStatusChangedEventFixture), "sig"));
+    const inboxRecord = setDocCalls.find((c) => c.path.startsWith("mombongoWebhookEvents/"))?.data;
+    expect(inboxRecord).not.toHaveProperty("signature");
+    expect(inboxRecord).not.toHaveProperty("hmacSecret");
+  });
+});
+
+describe("POST /api/webhooks/mombongo — event: invoice_issued v2 (contract v2, has eventId)", () => {
+  beforeEach(() => vi.mocked(verifyHmac).mockResolvedValue(true));
+
+  it("creates the harvestInvoices doc with v2 fields on first delivery", async () => {
+    const res = await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    expect(res.status).toBe(200);
+    const invoiceWrite = setDocCalls.find(
+      (c) => c.path === `harvestInvoices/${invoiceIssuedEventV2Fixture.invoiceId}`,
+    );
+    expect(invoiceWrite?.data).toMatchObject({
+      statut: "a_payer",
+      eventId: invoiceIssuedEventV2Fixture.eventId,
+      schemaVersion: 2,
+      mombongoOfferId: invoiceIssuedEventV2Fixture.offerId,
+      externalReference: invoiceIssuedEventV2Fixture.externalReference,
+      unitPriceCdf: invoiceIssuedEventV2Fixture.unitPriceCdf,
+      totalAmountCdf: invoiceIssuedEventV2Fixture.totalAmountCdf,
+      currency: "CDF",
+    });
+  });
+
+  it("exact correlation: applies accepted to the matching offer via offerId, not listingId alone", async () => {
+    setDocs({
+      [`harvestOffers/${invoiceIssuedEventV2Fixture.externalReference}`]: {
+        exists: true,
+        data: {
+          status: "pending",
+          listingId: invoiceIssuedEventV2Fixture.listingId,
+          mombongoOfferId: invoiceIssuedEventV2Fixture.offerId,
+          externalReference: invoiceIssuedEventV2Fixture.externalReference,
+        },
+      },
+    });
+    await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    expect(
+      mockRegistry[`harvestOffers/${invoiceIssuedEventV2Fixture.externalReference}`].data?.status,
+    ).toBe("accepted");
+  });
+
+  it("inconsistent correlation (offerId matches an offer whose own externalReference disagrees) is a recoverable conflict, nothing overwritten", async () => {
+    setDocs({
+      "harvestOffers/some-doc": {
+        exists: true,
+        data: {
+          status: "pending",
+          listingId: invoiceIssuedEventV2Fixture.listingId,
+          mombongoOfferId: invoiceIssuedEventV2Fixture.offerId,
+          externalReference: "a-totally-different-ref",
+        },
+      },
+    });
+    const res = await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("acknowledged_conflict");
+    expect(mockRegistry["harvestOffers/some-doc"].data?.status).toBe("pending");
+  });
+
+  it("duplicate eventId is idempotent — no second invoice write", async () => {
+    await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    setDocCalls.length = 0;
+    const res = await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    expect(res.status).toBe(200);
+    expect(setDocCalls).toHaveLength(0);
+  });
+
+  it("duplicate invoiceId under a different eventId is still idempotent (second independent invariant)", async () => {
+    await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    setDocCalls.length = 0;
+    const sameInvoiceDifferentEvent = {
+      ...invoiceIssuedEventV2Fixture,
+      eventId: "evt-a-different-eventid",
+    };
+    const res = await post(request(JSON.stringify(sameInvoiceDifferentEvent), "sig"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("already_processed");
+    expect(setDocCalls.some((c) => c.path.startsWith("harvestInvoices/"))).toBe(false);
+  });
+
+  it("never creates stock and never marks anything paid", async () => {
+    await post(request(JSON.stringify(invoiceIssuedEventV2Fixture), "sig"));
+    expect(
+      setDocCalls.some((c) => c.path.startsWith("stockPF/") || c.path.startsWith("stockBalance/")),
+    ).toBe(false);
+    const invoiceWrite = setDocCalls.find((c) => c.path.startsWith("harvestInvoices/"));
+    expect(invoiceWrite?.data.statut).toBe("a_payer");
+  });
+
+  it("rejects an unsupported schemaVersion", async () => {
+    const res = await post(
+      request(JSON.stringify({ ...invoiceIssuedEventV2Fixture, schemaVersion: 99 }), "sig"),
     );
     expect(res.status).toBe(400);
   });

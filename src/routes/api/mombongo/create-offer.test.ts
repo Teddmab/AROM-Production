@@ -118,4 +118,13 @@ describe("POST /api/mombongo/create-offer", () => {
       }),
     );
   });
+
+  it.each(["in_flight", "conflict", "unknown", "reference_mismatch"] as const)(
+    "maps %s to 409 (none of these are safe for the caller to retry blindly)",
+    async (status) => {
+      vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+      vi.mocked(createMombongoOffer).mockResolvedValue({ status, message: "x" } as never);
+      expect((await post(request(createExternalHarvestOfferRequestFixture))).status).toBe(409);
+    },
+  );
 });

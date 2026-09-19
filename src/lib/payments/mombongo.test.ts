@@ -72,6 +72,26 @@ describe("signedMombongoPost", () => {
       "x-partner-signature": "deadbeef",
     });
   });
+
+  it("merges extraHeaders (e.g. contract v2's Idempotency-Key) without disturbing the standard ones", async () => {
+    mockFetchOnce(200, { ok: true });
+    await signedMombongoPost("/somePath", { a: 1 }, { "Idempotency-Key": "key-1" });
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-partner-id": FAKE_CONFIG.partnerId,
+      "x-partner-signature": "deadbeef",
+      "Idempotency-Key": "key-1",
+    });
+  });
+
+  it("every other caller (no extraHeaders) is byte-for-byte unaffected", async () => {
+    mockFetchOnce(200, { ok: true });
+    await signedMombongoPost("/somePath", { a: 1 });
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect(Object.keys((init as RequestInit).headers as Record<string, string>).sort()).toEqual(
+      ["content-type", "x-partner-id", "x-partner-signature"].sort(),
+    );
+  });
 });
 
 describe("createMombongoInvoice", () => {

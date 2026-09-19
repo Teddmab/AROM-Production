@@ -56,4 +56,14 @@ describe("POST /api/mombongo/create-harvest-checkout", () => {
     });
     expect((await post(request({ harvestInvoiceId: "hi1", method: "card" }))).status).toBe(200);
   });
+
+  it("maps reception_approval_required (payment boundary, contract v2) to 403", async () => {
+    vi.mocked(verifyMombongoCaller).mockResolvedValue({ uid: "u1" });
+    vi.mocked(createMombongoHarvestCheckout).mockResolvedValue({
+      status: "reception_approval_required",
+      httpStatus: 403,
+      message: "x",
+    });
+    expect((await post(request({ harvestInvoiceId: "hi1", method: "card" }))).status).toBe(403);
+  });
 });
