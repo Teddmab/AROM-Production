@@ -6,10 +6,13 @@ import { verifyFirebaseIdToken } from "./verifyFirebaseIdToken";
 /**
  * Who may ask AROM-Production to refresh receivable Mombongo offers:
  *   - an ACTIVE account with `role: "admin"`, or
- *   - an ACTIVE staff account whose poste is exactly "Agent de collecte".
- * Nobody else: not Directeur de Production, not Chargée de Commercialisation,
- * not "Personnalisé" or poste-less staff, not partners, not inactive accounts,
- * not an unauthenticated caller.
+ *   - an ACTIVE staff account whose poste is exactly "Agent de collecte", or
+ *   - an ACTIVE staff account whose poste is exactly "Directeur de Production"
+ *     (the higher operational position for internal receptions; owner decision
+ *     2026-09 — same read as the collector, under its own real identity).
+ * Nobody else: not Chargée de Commercialisation, not "Personnalisé" or
+ * unknown/poste-less staff, not partners, not inactive accounts, not an
+ * unauthenticated caller.
  *
  * The decision is made ONLY from the verified Firebase ID token and that
  * uid's own `users/{uid}` profile (read as the trusted system identity, which
@@ -22,7 +25,7 @@ import { verifyFirebaseIdToken } from "./verifyFirebaseIdToken";
  * `harvestOffers` is granted to exactly this same poste, and to admin.
  */
 export type OfferRefreshAuthorization =
-  | { ok: true; uid: string; role: "admin" | "agent_de_collecte" }
+  | { ok: true; uid: string; role: "admin" | "agent_de_collecte" | "directeur_de_production" }
   | { ok: false; status: 401 | 403 };
 
 export async function authorizeOfferRefreshCaller(
@@ -42,6 +45,9 @@ export async function authorizeOfferRefreshCaller(
   if (profile.role === "admin") return { ok: true, uid: caller.uid, role: "admin" };
   if (profile.role === "staff" && profile.poste === "Agent de collecte") {
     return { ok: true, uid: caller.uid, role: "agent_de_collecte" };
+  }
+  if (profile.role === "staff" && profile.poste === "Directeur de Production") {
+    return { ok: true, uid: caller.uid, role: "directeur_de_production" };
   }
   return { ok: false, status: 403 };
 }

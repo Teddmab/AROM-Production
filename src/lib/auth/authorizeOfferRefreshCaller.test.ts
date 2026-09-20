@@ -40,6 +40,15 @@ describe("authorizeOfferRefreshCaller — allowed", () => {
     });
   });
 
+  it("an active Directeur de Production — under its own real identity", async () => {
+    asUser({ role: "staff", poste: "Directeur de Production", active: true });
+    expect(await authorizeOfferRefreshCaller(HEADER)).toEqual({
+      ok: true,
+      uid: "u1",
+      role: "directeur_de_production",
+    });
+  });
+
   it("an active ADMIN (including one using collection mode — the account itself is the admin)", async () => {
     asUser({ role: "admin", active: true });
     expect(await authorizeOfferRefreshCaller(HEADER)).toEqual({
@@ -52,7 +61,22 @@ describe("authorizeOfferRefreshCaller — allowed", () => {
 
 describe("authorizeOfferRefreshCaller — denied (403)", () => {
   const denied: [string, Record<string, unknown>][] = [
-    ["Directeur de Production", { role: "staff", poste: "Directeur de Production", active: true }],
+    [
+      "an inactive Directeur de Production",
+      { role: "staff", poste: "Directeur de Production", active: false },
+    ],
+    [
+      "a Directeur de Production whose `active` flag is missing",
+      { role: "staff", poste: "Directeur de Production" },
+    ],
+    [
+      "a poste that only resembles Directeur de Production",
+      { role: "staff", poste: "directeur de production", active: true },
+    ],
+    [
+      "a partner carrying the Directeur poste",
+      { role: "partner", poste: "Directeur de Production", active: true },
+    ],
     [
       "Chargée de Commercialisation",
       { role: "staff", poste: "Chargée de Commercialisation", active: true },
@@ -113,7 +137,7 @@ describe("authorizeOfferRefreshCaller — only the authenticated account decides
 
   it("reads exactly the token holder's own profile", async () => {
     users = {
-      u1: { role: "staff", poste: "Directeur de Production", active: true },
+      u1: { role: "staff", poste: "Chargée de Commercialisation", active: true },
       u2: { role: "admin", active: true },
     };
     vi.mocked(verifyFirebaseIdToken).mockResolvedValue({ uid: "u1" } as never);
