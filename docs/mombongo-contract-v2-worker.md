@@ -190,8 +190,9 @@ creates an offer, changes a status, or touches the reconciliation checkpoint, in
 payment.
 
 - **Authorization:** verified ID token + that uid's own profile only — active `admin`, or active staff with poste
-  exactly `Agent de collecte`. 401 unauthenticated, 403 anyone else (Directeur de Production, Chargée de
-  Commercialisation, Personnalisé/poste-less staff, partners, inactive). The body/query are never read.
+  exactly `Agent de collecte` or `Directeur de Production` (owner decision 2026-09; mirrors Backend Rules'
+  accepted-offer read). 401 unauthenticated, 403 anyone else (Chargée de Commercialisation,
+  Personnalisé/unknown/poste-less staff, partners, inactive). No request role/mode value can grant access. The body/query are never read.
 - **Bounds (server constants):** 50 offers/page, at most 4 pages (200 offers), separate absolute ceiling of 6 remote
   requests, cursor-cycle stop. A run that hits a cap reports `partial`, never `complete`. Mombongo lists oldest-changed
   first, so the cap covers the 200 oldest accepted offers — far above the pilot volume and Mobile's cache (newest

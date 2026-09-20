@@ -55,6 +55,33 @@ describe("POST /api/mombongo/refresh-receivable-offers", () => {
     expect(runOfferRefresh).not.toHaveBeenCalled();
   });
 
+  it("a Directeur de Production is served exactly like a collector — the authorizer decides, nothing in the request can", async () => {
+    vi.mocked(authorizeOfferRefreshCaller).mockResolvedValue({
+      ok: true,
+      uid: "dp1",
+      role: "directeur_de_production",
+    });
+    vi.mocked(runOfferRefresh).mockResolvedValue(SUMMARY);
+    const res = await post({
+      headers: { authorization: "Bearer t", "x-role": "admin", "x-mode": "ADMIN" },
+      body: JSON.stringify({ role: "admin", mode: "ADMIN" }),
+    }).run();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(SUMMARY);
+    expect(authorizeOfferRefreshCaller).toHaveBeenCalledWith("Bearer t");
+    expect(runOfferRefresh).toHaveBeenCalledWith();
+  });
+
+  it("a Commercial (or any other account) is 403 even when the request claims an admin/collector role or mode", async () => {
+    vi.mocked(authorizeOfferRefreshCaller).mockResolvedValue({ ok: false, status: 403 });
+    const res = await post({
+      headers: { authorization: "Bearer t", "x-role": "admin", "x-mode": "COLLECTION_AGENT" },
+      body: JSON.stringify({ role: "admin", mode: "COLLECTION_AGENT" }),
+    }).run();
+    expect(res.status).toBe(403);
+    expect(runOfferRefresh).not.toHaveBeenCalled();
+  });
+
   it("passes the Authorization header — and only that — to the authorizer", async () => {
     vi.mocked(authorizeOfferRefreshCaller).mockResolvedValue(OK);
     vi.mocked(runOfferRefresh).mockResolvedValue(SUMMARY);
