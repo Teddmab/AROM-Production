@@ -12,6 +12,7 @@ import {
   type ParsedImport,
 } from "@/lib/erp/import";
 import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
+import { isUsableReception } from "@/lib/erp/receptionTreatment";
 
 const BATCH_SIZE = 400;
 
@@ -52,7 +53,8 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const stockHasEntree = target === "stockMP" && addedRows.some((r) => r.record.type === "Entrée");
   const stockHasSortie = target === "stockMP" && addedRows.some((r) => r.record.type === "Sortie");
 
-  const receptionOptions = computed.appro.map((r) => ({
+  // Only usable receptions can be a source (a reception under reserve or refused on reception is an audit record — see receptionTreatment.ts).
+  const receptionOptions = computed.appro.filter(isUsableReception).map((r) => ({
     value: r.id,
     label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
   }));

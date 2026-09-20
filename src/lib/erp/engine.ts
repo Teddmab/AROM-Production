@@ -7,6 +7,7 @@ import {
   type QualityControl,
   prixFormat,
 } from "./model";
+import { receptionTreatment, type ReceptionTreatment } from "./receptionTreatment";
 
 const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 const safeDiv = (a: number, b: number) => (b === 0 ? 0 : a / b);
@@ -40,13 +41,34 @@ function headControlsByProduction(controls: QualityControl[]): Map<string, Quali
 /* ---------- Lignes calculées ---------- */
 
 export interface ApproCalc extends Approvisionnement {
+  /** How this reception is treated downstream (assessment-driven; "legacy" = no assessment, historical behaviour). */
+  traitement: ReceptionTreatment;
+  /** CONFIRMED fruit purchase value: quantité reçue × prix/kg for confirmed and legacy receptions; 0 for reserve and refusal. */
   valeurAchat: number;
+  /** Fruit value of a reception under reserve — pending ADMIN review, NOT a confirmed purchase and NOT payable. 0 otherwise. */
+  valeurEnAttente: number;
+  /** Transport + autres frais as OBSERVED at reception, for every reception — never folded into a fruit value. */
+  fraisObserves: number;
+  /**
+   * Confirmed total (valeurAchat + transport + autres frais) for confirmed and legacy receptions — exactly the historical formula.
+   * 0 for reserve and refusal: no amount is confirmed or payable for them (their costs are in `fraisObserves`, shown separately).
+   */
   coutTotal: number;
 }
 
 export function calcAppro(r: Approvisionnement): ApproCalc {
-  const valeurAchat = r.qteRecueKg * r.prixKg;
-  return { ...r, valeurAchat, coutTotal: valeurAchat + r.transport + r.autresFrais };
+  const traitement = receptionTreatment(r);
+  const usable = traitement === "confirmed" || traitement === "legacy";
+  const valeurFruits = r.qteRecueKg * r.prixKg;
+  const valeurAchat = usable ? valeurFruits : 0;
+  return {
+    ...r,
+    traitement,
+    valeurAchat,
+    valeurEnAttente: traitement === "pending_review" ? valeurFruits : 0,
+    fraisObserves: r.transport + r.autresFrais,
+    coutTotal: usable ? valeurAchat + r.transport + r.autresFrais : 0,
+  };
 }
 
 export interface ProductionCalc extends Production {
@@ -92,8 +114,23 @@ export function calcVente(r: Vente): VenteCalc {
 
 /* ---------- Consolidation (feuilles Finances / Commissions / Dashboard) ---------- */
 
+/** Reception records by downstream treatment. Only `confirmees` (conforme + legacy) feed purchases; the others are audit/pending records. */
+export interface ReceptionsSummary {
+  total: number;
+  confirmees: number;
+  sousReserve: number;
+  refusees: number;
+  kgSousReserve: number;
+  kgRefusees: number;
+  /** Fruit value under review (reserve) — pending, not in any confirmed total. */
+  valeurEnAttente: number;
+  /** Transport + autres frais observed on reserve/refused receptions — kept out of purchases and operating costs until reviewed. */
+  fraisObservesHorsAchats: number;
+}
+
 export interface ErpComputed {
   appro: ApproCalc[];
+  receptions: ReceptionsSummary;
   production: ProductionCalc[];
   ventes: VenteCalc[];
   kgAchetes: number;
@@ -152,10 +189,28 @@ export function computeErp(state: ErpState): ErpComputed {
   const ventes = state.ventes.map(calcVente);
   const headControls = headControlsByProduction(state.qualityControls);
 
-  const kgAchetes = sum(appro.map((r) => r.qteRecueKg));
+  // Purchases and their costs count CONFIRMED receptions only (conforme + legacy). Reserve/refused receptions are audit records: their fruit
+  // is neither a purchase nor stock, and their observed costs are reported separately (see ReceptionsSummary).
+  const confirmedAppro = appro.filter(
+    (r) => r.traitement === "confirmed" || r.traitement === "legacy",
+  );
+  const reserveAppro = appro.filter((r) => r.traitement === "pending_review");
+  const refusedAppro = appro.filter((r) => r.traitement === "refused");
+  const receptions: ReceptionsSummary = {
+    total: appro.length,
+    confirmees: confirmedAppro.length,
+    sousReserve: reserveAppro.length,
+    refusees: refusedAppro.length,
+    kgSousReserve: sum(reserveAppro.map((r) => r.qteRecueKg)),
+    kgRefusees: sum(refusedAppro.map((r) => r.qteRecueKg)),
+    valeurEnAttente: sum(reserveAppro.map((r) => r.valeurEnAttente)),
+    fraisObservesHorsAchats: sum([...reserveAppro, ...refusedAppro].map((r) => r.fraisObserves)),
+  };
+
+  const kgAchetes = sum(confirmedAppro.map((r) => r.qteRecueKg));
   const kgTransformes = sum(production.map((r) => r.kgUtilises));
-  const coutAchats = sum(appro.map((r) => r.valeurAchat));
-  const coutTransport = sum(appro.map((r) => r.transport + r.autresFrais));
+  const coutAchats = sum(confirmedAppro.map((r) => r.valeurAchat));
+  const coutTransport = sum(confirmedAppro.map((r) => r.fraisObserves));
 
   const bouteillesProduites = sum(production.map((r) => r.totalBouteilles));
   const valeurProduction = sum(production.map((r) => r.valeurProduction));
@@ -284,6 +339,7 @@ export function computeErp(state: ErpState): ErpComputed {
 
   return {
     appro,
+    receptions,
     production,
     ventes,
     kgAchetes,
