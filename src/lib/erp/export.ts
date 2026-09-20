@@ -239,7 +239,7 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         r.village,
         r.qteCommandeeKg,
         r.qteRecueKg,
-        r.prixKg,
+        r.prixKg ?? "", // empty on an authoritative refusal: no fruit purchase price (never a fake 0)
         r.transport,
         r.autresFrais,
         r.qualite,

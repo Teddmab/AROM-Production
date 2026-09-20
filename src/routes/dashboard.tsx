@@ -18,7 +18,11 @@ import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ErpProvider, useErp, newId, type Collections } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
-import { RECEPTION_TREATMENT_LABEL, isUsableReception } from "@/lib/erp/receptionTreatment";
+import {
+  MAX_RECEPTION_SOURCES,
+  RECEPTION_TREATMENT_LABEL,
+  isUsableReception,
+} from "@/lib/erp/receptionTreatment";
 import { createTask, visibleTaskStages, type Task, type TaskStage } from "@/lib/erp/tasks";
 import { db, storage } from "@/lib/firebase/config";
 import {
@@ -720,6 +724,8 @@ type FieldDef = {
   default?: string | number;
   /** Blocks submit (with a toast) while empty. Used for required source links. */
   required?: boolean;
+  /** For type "multiselect": the most records that can be picked. */
+  maxSelected?: number;
 };
 
 // Multiselect values are stored as a single comma-joined string inside the
@@ -796,6 +802,12 @@ function EntryForm({
             ) : f.type === "multiselect" ? (
               <MultiSelectCombobox
                 options={f.multiOptions ?? []}
+                max={f.maxSelected}
+                maxNote={
+                  f.maxSelected !== undefined
+                    ? `Maximum ${f.maxSelected} réceptions par écriture : la vérification de leur éligibilité côté serveur est limitée à ${f.maxSelected}.`
+                    : undefined
+                }
                 value={values[f.name] ? values[f.name].split(MULTI_SEP) : []}
                 onChange={(ids) => setValues((v) => ({ ...v, [f.name]: ids.join(MULTI_SEP) }))}
               />
@@ -2831,7 +2843,8 @@ function ApproSection() {
             r.village,
             `${r.qteCommandeeKg} kg`,
             `${r.qteRecueKg} kg`,
-            fcFormat(r.prixKg),
+            // No unit price on an authoritative refusal (absent, never a fake 0); flagged when a reception that needs one has none.
+            r.prixKg === undefined ? (r.prixManquant ? "Prix manquant" : "—") : fcFormat(r.prixKg),
             // Reserve: the fruit value is pending review; refusal: never a purchase. Only confirmed/legacy show a purchase value.
             r.traitement === "pending_review"
               ? `${fcFormat(r.valeurEnAttente)} (en attente)`
@@ -2915,12 +2928,20 @@ function ApproSection() {
               description: "Quantité effectivement reçue et pesée à la livraison, en kilogrammes.",
               edit: { key: "qteRecueKg", type: "number", value: String(selectedAppro.qteRecueKg) },
             },
-            {
-              label: "Prix / kg",
-              value: fcFormat(selectedAppro.prixKg),
-              description: "Prix négocié par kilogramme, en FC.",
-              edit: { key: "prixKg", type: "number", value: String(selectedAppro.prixKg) },
-            },
+            selectedAppro.prixKg === undefined
+              ? {
+                  label: "Prix / kg",
+                  value: selectedAppro.prixManquant ? "Prix manquant" : "Non applicable",
+                  description: selectedAppro.prixManquant
+                    ? "Cette réception devrait avoir un prix par kg : donnée incomplète, sa valeur n'est pas calculée."
+                    : "Fruits refusés à la réception : aucun prix d'achat des fruits n'est requis ni enregistré.",
+                }
+              : {
+                  label: "Prix / kg",
+                  value: fcFormat(selectedAppro.prixKg),
+                  description: "Prix négocié par kilogramme, en FC.",
+                  edit: { key: "prixKg", type: "number", value: String(selectedAppro.prixKg) },
+                },
             {
               label: "Transport",
               value: fcFormat(selectedAppro.transport),
@@ -3250,6 +3271,7 @@ function ProductionSection() {
                   label: "Réceptions sources",
                   type: "multiselect",
                   required: true,
+                  maxSelected: MAX_RECEPTION_SOURCES,
                   // Only usable receptions (conforme + legacy) can be a source: a reception under reserve or refused on reception is an audit
                   // record — not usable stock (AROM-Backend's rules refuse such a source too).
                   multiOptions: computed.appro.filter(isUsableReception).map((r) => ({
@@ -3602,6 +3624,7 @@ function StockSection() {
                   name: "approvisionnementIds",
                   label: "Réceptions sources (si Entrée)",
                   type: "multiselect",
+                  maxSelected: MAX_RECEPTION_SOURCES,
                   // Only usable receptions (conforme + legacy) can be a source: a reception under reserve or refused on reception is an audit
                   // record — not usable stock (AROM-Backend's rules refuse such a source too).
                   multiOptions: computed.appro.filter(isUsableReception).map((r) => ({

@@ -12,7 +12,7 @@ import {
   type ParsedImport,
 } from "@/lib/erp/import";
 import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
-import { isUsableReception } from "@/lib/erp/receptionTreatment";
+import { MAX_RECEPTION_SOURCES, isUsableReception } from "@/lib/erp/receptionTreatment";
 
 const BATCH_SIZE = 400;
 
@@ -65,6 +65,9 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const clientOptions = state.clients.map((c) => ({ value: c.id, label: c.nom }));
 
   const validateLinks = (): string | null => {
+    if (linkApproIds.length > MAX_RECEPTION_SOURCES) {
+      return `Au plus ${MAX_RECEPTION_SOURCES} réceptions sources par écriture.`;
+    }
     if (target === "productions" && linkApproIds.length === 0) {
       return "Réceptions sources requises pour importer des lots de production.";
     }
@@ -289,6 +292,8 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                             options={receptionOptions}
                             value={linkApproIds}
                             onChange={setLinkApproIds}
+                            max={MAX_RECEPTION_SOURCES}
+                            maxNote={`Maximum ${MAX_RECEPTION_SOURCES} réceptions par écriture : la vérification de leur éligibilité côté serveur est limitée à ${MAX_RECEPTION_SOURCES}.`}
                           />
                         </label>
                       )}

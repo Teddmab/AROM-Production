@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Check } from "lucide-react";
+import { toggleSelection } from "@/lib/erp/receptionTreatment";
 
 /**
  * Searchable tag-picker used for every required multi-record link
@@ -13,11 +14,17 @@ export function MultiSelectCombobox({
   options,
   value,
   onChange,
+  max,
+  maxNote,
 }: {
   options: { value: string; label: string }[];
   value: string[];
   onChange: (next: string[]) => void;
+  /** Most items that can be selected; a further one cannot be picked (the rest are disabled and `maxNote` explains why). */
+  max?: number;
+  maxNote?: string;
 }) {
+  const atMax = max !== undefined && value.length >= max;
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const filtered = options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()));
@@ -26,7 +33,7 @@ export function MultiSelectCombobox({
     .filter((o): o is { value: string; label: string } => Boolean(o));
 
   const toggle = (id: string) => {
-    onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id]);
+    onChange(toggleSelection(value, id, max));
   };
 
   return (
@@ -36,6 +43,11 @@ export function MultiSelectCombobox({
         if (!e.currentTarget.contains(e.relatedTarget as Node)) setOpen(false);
       }}
     >
+      {atMax && maxNote && (
+        <p role="status" className="mb-1 text-[11px] text-muted-foreground">
+          {maxNote}
+        </p>
+      )}
       {selected.length > 0 && (
         <div className="mb-1 flex flex-wrap gap-1">
           {selected.map((o) => (
@@ -72,10 +84,12 @@ export function MultiSelectCombobox({
         <div className="absolute z-10 mt-1 max-h-40 w-full overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg">
           {filtered.map((o) => {
             const checked = value.includes(o.value);
+            const blocked = atMax && !checked;
             return (
               <button
                 type="button"
                 key={o.value}
+                disabled={blocked}
                 onClick={() => {
                   toggle(o.value);
                   // Closes after each pick rather than staying open for rapid
@@ -88,7 +102,7 @@ export function MultiSelectCombobox({
                 }}
                 className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${
                   checked ? "bg-primary/10 text-primary" : "text-foreground hover:bg-secondary"
-                }`}
+                } disabled:cursor-not-allowed disabled:opacity-40`}
               >
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-border">
                   {checked && <Check className="h-3 w-3" aria-hidden />}

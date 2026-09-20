@@ -44,3 +44,22 @@ export const RECEPTION_TREATMENT_LABEL: Record<ReceptionTreatment, string> = {
   refused: "Refusée à la réception",
   legacy: "",
 };
+
+/**
+ * The most receptions ONE protected write (a production, a raw-material stock entry) may name as sources. It is AROM-Backend's Firestore
+ * Rules limit made visible: Rules may read at most 10 documents per request (one is the caller's users/{uid}) and cannot loop, so eligibility of
+ * a longer list cannot be verified server-side — such a write is denied, never truncated. An older record naming more stays readable.
+ */
+export const MAX_RECEPTION_SOURCES = 8;
+
+/** True when a unit price is a real number. An authoritative refusal has none (the field is ABSENT — never a fake 0). */
+export function hasUnitPrice(r: { prixKg?: number | null }): boolean {
+  return typeof r.prixKg === "number" && Number.isFinite(r.prixKg);
+}
+
+/** Toggles `id` in `value`. Removing always works; ADDING is refused once `max` is reached (never truncating, never silently dropping an existing pick). */
+export function toggleSelection(value: string[], id: string, max?: number): string[] {
+  if (value.includes(id)) return value.filter((v) => v !== id);
+  if (max !== undefined && value.length >= max) return value;
+  return [...value, id];
+}

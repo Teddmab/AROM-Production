@@ -7,7 +7,12 @@ import {
   type Qualite,
   type ReceptionAssessment,
 } from "./model";
-import { isUsableReception, receptionTreatment } from "./receptionTreatment";
+import {
+  MAX_RECEPTION_SOURCES,
+  isUsableReception,
+  receptionTreatment,
+  toggleSelection,
+} from "./receptionTreatment";
 import { buildReport } from "./export";
 
 /**
@@ -249,5 +254,98 @@ describe("export — keeps the audit trail and never presents refused fruit as p
     expect(row("C1")[col("Valeur achat")]).toBe(80000);
     expect(row("L1")[col("Valeur achat")]).toBe(80000);
     expect(row("L1")[col("Traitement")]).toMatch(/Historique/);
+  });
+});
+
+describe("refused reception without a unit price (2026-09 decision)", () => {
+  const refused = () => {
+    const { prixKg: _omit, ...rest } = appro({ receptionAssessment: REFUSAL, qualite: "Rejeté" });
+    return rest as Approvisionnement;
+  };
+
+  it("calcAppro tolerates an absent price ONLY for an authoritative refusal: value 0, no NaN, costs kept separate, not flagged", () => {
+    const c = calcAppro(refused());
+    expect(c.prixKg).toBeUndefined();
+    expect(c).toMatchObject({
+      traitement: "refused",
+      valeurAchat: 0,
+      valeurEnAttente: 0,
+      coutTotal: 0,
+      fraisObserves: 700,
+      prixManquant: false,
+    });
+    expect(Number.isNaN(c.valeurAchat) || Number.isNaN(c.coutTotal)).toBe(false);
+  });
+
+  it("any other reception without a price is FLAGGED as incomplete data, never silently priced: conforme, reserve, legacy", () => {
+    for (const r of [
+      appro({ receptionAssessment: CONFORME }),
+      appro({ receptionAssessment: RESERVE }),
+      appro(),
+      appro({ qualite: "Rejeté" }),
+    ]) {
+      const { prixKg: _omit, ...rest } = r;
+      expect(calcAppro(rest as Approvisionnement).prixManquant).toBe(true);
+    }
+    expect(calcAppro(appro()).prixManquant).toBe(false);
+  });
+
+  it("a price that is present on a refusal (older client) is still ignored for value: a refusal never has a fruit purchase value", () => {
+    expect(calcAppro(appro({ receptionAssessment: REFUSAL, prixKg: 800 }))).toMatchObject({
+      valeurAchat: 0,
+      valeurEnAttente: 0,
+      coutTotal: 0,
+    });
+  });
+
+  it("aggregates and exports handle the absent price: totals exclude it, the price cell is blank (not 0), observed costs stay visible", () => {
+    const state = withAppro(appro({ id: "C", numero: "C1", receptionAssessment: CONFORME }), {
+      ...refused(),
+      id: "X",
+      numero: "X1",
+    });
+    const c = computeErp(state);
+    expect(c.kgAchetes).toBe(100);
+    expect(c.coutAchats).toBe(80000);
+    expect(c.receptions).toMatchObject({
+      refusees: 1,
+      kgRefusees: 100,
+      fraisObservesHorsAchats: 700,
+    });
+    const table = buildReport("appro", state, c).blocks.find(
+      (b) => b.title === "Achats fournisseurs",
+    )!;
+    const row = table.rows.find((r) => r[0] === "X1")!;
+    expect(row[table.headers.indexOf("Prix/kg")]).toBe("");
+    expect(row[table.headers.indexOf("Valeur achat")]).toBe(0);
+    expect(row[table.headers.indexOf("Frais constatés")]).toBe(700);
+    expect(table.rows.find((r) => r[0] === "C1")![table.headers.indexOf("Prix/kg")]).toBe(800);
+  });
+});
+
+describe("observed costs of reserve / refusal are pending: excluded from every confirmed total (2026-09 decision)", () => {
+  it("costs sit only in the separate `fraisObservesHorsAchats` bucket — not in coutTransport, coutAchats or totalCouts", () => {
+    const rows = [
+      appro({ id: "C", receptionAssessment: CONFORME }),
+      appro({ id: "R", receptionAssessment: RESERVE, transport: 1000, autresFrais: 500 }),
+      appro({ id: "X", receptionAssessment: REFUSAL, transport: 2000, autresFrais: 250 }),
+    ];
+    const c = computeErp(withAppro(...rows));
+    const confirmedOnly = computeErp(withAppro(rows[0]));
+    expect(c.coutTransport).toBe(700);
+    expect(c.coutAchats).toBe(confirmedOnly.coutAchats);
+    expect(c.totalCouts).toBe(confirmedOnly.totalCouts);
+    expect(c.receptions.fraisObservesHorsAchats).toBe(3750);
+  });
+});
+
+describe("source-count limit", () => {
+  it("MAX_RECEPTION_SOURCES is 8 (AROM-Backend's verifiable Rules limit) and the picker refuses a ninth without truncating", () => {
+    expect(MAX_RECEPTION_SOURCES).toBe(8);
+    const eight = Array.from({ length: 8 }, (_, i) => `APP-${i}`);
+    expect(toggleSelection(eight.slice(0, 7), "APP-7", 8)).toEqual(eight);
+    expect(toggleSelection(eight, "APP-9", 8)).toEqual(eight); // refused: unchanged, nothing dropped
+    expect(toggleSelection(eight, "APP-3", 8)).toEqual(eight.filter((x) => x !== "APP-3")); // removing always works
+    expect(toggleSelection(["a"], "b")).toEqual(["a", "b"]); // no max: as before
   });
 });

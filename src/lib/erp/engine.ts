@@ -7,7 +7,7 @@ import {
   type QualityControl,
   prixFormat,
 } from "./model";
-import { receptionTreatment, type ReceptionTreatment } from "./receptionTreatment";
+import { hasUnitPrice, receptionTreatment, type ReceptionTreatment } from "./receptionTreatment";
 
 const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 const safeDiv = (a: number, b: number) => (b === 0 ? 0 : a / b);
@@ -50,6 +50,11 @@ export interface ApproCalc extends Approvisionnement {
   /** Transport + autres frais as OBSERVED at reception, for every reception — never folded into a fruit value. */
   fraisObserves: number;
   /**
+   * True when a reception that SHOULD have a unit price has none (only an authoritative refusal legitimately has none; the rules refuse the
+   * rest). Its fruit value is then unknown, not 0: flagged so no screen presents it as a real purchase.
+   */
+  prixManquant: boolean;
+  /**
    * Confirmed total (valeurAchat + transport + autres frais) for confirmed and legacy receptions — exactly the historical formula.
    * 0 for reserve and refusal: no amount is confirmed or payable for them (their costs are in `fraisObserves`, shown separately).
    */
@@ -59,7 +64,8 @@ export interface ApproCalc extends Approvisionnement {
 export function calcAppro(r: Approvisionnement): ApproCalc {
   const traitement = receptionTreatment(r);
   const usable = traitement === "confirmed" || traitement === "legacy";
-  const valeurFruits = r.qteRecueKg * r.prixKg;
+  // An authoritative refusal has no price and no fruit value; for any other reception an absent price is invalid data (flagged, never priced).
+  const valeurFruits = hasUnitPrice(r) ? r.qteRecueKg * (r.prixKg as number) : 0;
   const valeurAchat = usable ? valeurFruits : 0;
   return {
     ...r,
@@ -67,6 +73,7 @@ export function calcAppro(r: Approvisionnement): ApproCalc {
     valeurAchat,
     valeurEnAttente: traitement === "pending_review" ? valeurFruits : 0,
     fraisObserves: r.transport + r.autresFrais,
+    prixManquant: traitement !== "refused" && !hasUnitPrice(r),
     coutTotal: usable ? valeurAchat + r.transport + r.autresFrais : 0,
   };
 }

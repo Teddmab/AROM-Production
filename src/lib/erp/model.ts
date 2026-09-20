@@ -85,7 +85,11 @@ export interface Approvisionnement {
   produit: string;
   qteCommandeeKg: number;
   qteRecueKg: number;
-  prixKg: number;
+  /**
+   * Unit price (FC/kg). REQUIRED on every reception except a new authoritative refusal (`receptionAssessment.outcome ===
+   * "refused_on_reception"`), where the fruit has no purchase price and the field is ABSENT — never a fake 0 (AROM-Backend's rules enforce this).
+   */
+  prixKg?: number;
   transport: number;
   autresFrais: number;
   qualite: Qualite;
