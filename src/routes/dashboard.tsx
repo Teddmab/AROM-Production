@@ -45,6 +45,12 @@ import { ImportButton } from "@/components/erp/ImportButton";
 import type { ImportLog } from "@/lib/erp/import";
 import type { SiteContent, SiteVideo } from "@/lib/site-content";
 import { RecordDetailModal, type DetailField } from "@/components/erp/RecordDetailModal";
+import {
+  approPlaceLabel,
+  approSupplierLabel,
+  isMombongoReception,
+} from "@/lib/erp/receptionSource";
+import { receptionModalFields } from "@/components/erp/receptionModalFields";
 import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
 import { ConfirmButton } from "@/components/erp/ConfirmButton";
 import { RequireRole } from "@/lib/firebase/require-role";
@@ -2839,8 +2845,8 @@ function ApproSection() {
           rows={computed.appro.map((r) => [
             r.numero,
             r.date,
-            r.fournisseur,
-            r.village,
+            approSupplierLabel(r),
+            approPlaceLabel(r),
             `${r.qteCommandeeKg} kg`,
             `${r.qteRecueKg} kg`,
             // No unit price on an authoritative refusal (absent, never a fake 0); flagged when a reception that needs one has none.
@@ -2871,15 +2877,20 @@ function ApproSection() {
           title={`Réception ${selectedAppro.numero}`}
           subtitle={selectedAppro.date}
           onClose={() => setSelectedAppro(null)}
-          onSave={(patch) => {
-            updateDoc(doc(db, "approvisionnements", selectedAppro.id), patch);
-            setSelectedAppro(null);
-          }}
+          // A Mombongo reception is create-once (Backend Rules): nothing can be edited from here, so the modal is explanation only.
+          onSave={
+            isMombongoReception(selectedAppro)
+              ? undefined
+              : (patch) => {
+                  updateDoc(doc(db, "approvisionnements", selectedAppro.id), patch);
+                  setSelectedAppro(null);
+                }
+          }
           onDelete={() => {
             requestDelete("approvisionnements", selectedAppro.id);
             setSelectedAppro(null);
           }}
-          fields={[
+          fields={receptionModalFields(selectedAppro, [
             {
               label: "N° réception",
               value: selectedAppro.numero,
@@ -3028,7 +3039,7 @@ function ApproSection() {
               value: taskLabel(linkedTasks.find((t) => t.sourceId === selectedAppro.id)),
               description: "Tâche de production créée pour cette réception (onglet Tâches).",
             },
-          ]}
+          ])}
         />
       )}
 
@@ -5538,7 +5549,7 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
               rows={recentAppro.map((r) => [
                 r.numero,
                 r.date,
-                r.fournisseur,
+                approSupplierLabel(r),
                 `${r.qteRecueKg} kg${RECEPTION_TREATMENT_LABEL[r.traitement] ? ` — ${RECEPTION_TREATMENT_LABEL[r.traitement]}` : ""}`,
               ])}
             />

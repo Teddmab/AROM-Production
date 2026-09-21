@@ -6,6 +6,7 @@
 import type { ErpState } from "./model";
 import { fcFormat, pctFormat } from "./model";
 import { computeErp, type ErpComputed } from "./engine";
+import { approPlaceLabel, approSupplierLabel } from "./receptionSource";
 
 /** How each reception treatment is spelled in an export. Legacy = no assessment recorded (historical behaviour). */
 const TRAITEMENT_EXPORT = {
@@ -235,8 +236,8 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
       rows: c.appro.map((r) => [
         r.numero,
         r.date,
-        r.fournisseur,
-        r.village,
+        approSupplierLabel(r),
+        approPlaceLabel(r),
         r.qteCommandeeKg,
         r.qteRecueKg,
         r.prixKg ?? "", // empty on an authoritative refusal: no fruit purchase price (never a fake 0)

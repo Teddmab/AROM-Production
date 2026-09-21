@@ -104,6 +104,33 @@ export interface Approvisionnement {
    * reception saved without a photo have none.
    */
   photoUrl?: string;
+  /**
+   * Where the delivery came from. Absent on every reception saved before the source-first redesign — those are manual receptions. A "mombongo"
+   * reception has NO local producer (`idProducteur` and `village` are "") and is create-once (AROM-Backend Rules): only `photoUrl` changes afterwards.
+   */
+  sourceType?: "manual" | "mombongo";
+  /** The exact Mombongo offer this reception received (immutable). */
+  mombongoSource?: {
+    harvestOfferDocumentId: string;
+    mombongoOfferId: string;
+    externalReference?: string | null;
+    invoiceId?: string | null;
+  };
+  /** Mombongo receptions: the external seller as the trusted offer enrichment named them (every part may be null). */
+  mombongoProducer?: {
+    sellerId: string | null;
+    displayName?: string | null;
+    province?: string | null;
+    territory?: string | null;
+  };
+  /** Mombongo receptions: the accepted offer's quantity and price (`qteCommandeeKg` / `prixKg` equal them). */
+  mombongoTerms?: { acceptedQuantityKg: number; acceptedPricePerKgCdf: number };
+  /** Mombongo receptions: a DIFFERENT price the agent reported on site — an observation for review; it never replaces the agreed `prixKg`. */
+  priceObservation?: { observedPricePerKgCdf: number; reason: string };
+  /** Audit trail stamped when the reception was saved from the phone. */
+  createdByUid?: string;
+  createdByPoste?: string;
+  createdAt?: string;
 }
 
 export interface Production {
