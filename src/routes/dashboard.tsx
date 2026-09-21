@@ -18,6 +18,11 @@ import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ErpProvider, useErp, newId, type Collections } from "@/lib/erp/store";
 import type { ErpComputed } from "@/lib/erp/engine";
+import {
+  MAX_RECEPTION_SOURCES,
+  RECEPTION_TREATMENT_LABEL,
+  isUsableReception,
+} from "@/lib/erp/receptionTreatment";
 import { createTask, visibleTaskStages, type Task, type TaskStage } from "@/lib/erp/tasks";
 import { db, storage } from "@/lib/firebase/config";
 import {
@@ -719,6 +724,8 @@ type FieldDef = {
   default?: string | number;
   /** Blocks submit (with a toast) while empty. Used for required source links. */
   required?: boolean;
+  /** For type "multiselect": the most records that can be picked. */
+  maxSelected?: number;
 };
 
 // Multiselect values are stored as a single comma-joined string inside the
@@ -795,6 +802,12 @@ function EntryForm({
             ) : f.type === "multiselect" ? (
               <MultiSelectCombobox
                 options={f.multiOptions ?? []}
+                max={f.maxSelected}
+                maxNote={
+                  f.maxSelected !== undefined
+                    ? `Maximum ${f.maxSelected} réceptions par écriture : la vérification de leur éligibilité côté serveur est limitée à ${f.maxSelected}.`
+                    : undefined
+                }
                 value={values[f.name] ? values[f.name].split(MULTI_SEP) : []}
                 onChange={(ids) => setValues((v) => ({ ...v, [f.name]: ids.join(MULTI_SEP) }))}
               />
@@ -2289,6 +2302,14 @@ function TachesSection() {
       // this branch only runs when canAutoLink(task) was already true,
       // which for "production" means resolveApproFor(task) resolved.
       const appro = resolveApproFor(task)!;
+      // A reception under reserve or refused on reception is not a production source (the Firestore rules refuse it too).
+      if (!isUsableReception(appro)) {
+        toast.error(
+          "Cette réception est sous réserve ou refusée : elle ne peut pas alimenter un lot de production.",
+        );
+        setCompletionBusy(false);
+        return;
+      }
       addRow("productions", {
         id: newLotId,
         lot: v.lot,
@@ -2810,7 +2831,7 @@ function ApproSection() {
             "Reçu",
             "Prix/kg",
             "Valeur achat",
-            "Transport",
+            "Frais constatés",
             "Coût total",
             "Qualité",
             "",
@@ -2822,11 +2843,19 @@ function ApproSection() {
             r.village,
             `${r.qteCommandeeKg} kg`,
             `${r.qteRecueKg} kg`,
-            fcFormat(r.prixKg),
-            fcFormat(r.valeurAchat),
-            fcFormat(r.transport + r.autresFrais),
-            fcFormat(r.coutTotal),
-            r.qualite,
+            // No unit price on an authoritative refusal (absent, never a fake 0); flagged when a reception that needs one has none.
+            r.prixKg === undefined ? (r.prixManquant ? "Prix manquant" : "—") : fcFormat(r.prixKg),
+            // Reserve: the fruit value is pending review; refusal: never a purchase. Only confirmed/legacy show a purchase value.
+            r.traitement === "pending_review"
+              ? `${fcFormat(r.valeurEnAttente)} (en attente)`
+              : r.traitement === "refused"
+                ? "Non achetée"
+                : fcFormat(r.valeurAchat),
+            fcFormat(r.fraisObserves),
+            r.traitement === "pending_review" || r.traitement === "refused"
+              ? "—"
+              : fcFormat(r.coutTotal),
+            RECEPTION_TREATMENT_LABEL[r.traitement] || r.qualite,
             <DeleteButton
               onClick={(e) => {
                 e.stopPropagation();
@@ -2899,12 +2928,20 @@ function ApproSection() {
               description: "Quantité effectivement reçue et pesée à la livraison, en kilogrammes.",
               edit: { key: "qteRecueKg", type: "number", value: String(selectedAppro.qteRecueKg) },
             },
-            {
-              label: "Prix / kg",
-              value: fcFormat(selectedAppro.prixKg),
-              description: "Prix négocié par kilogramme, en FC.",
-              edit: { key: "prixKg", type: "number", value: String(selectedAppro.prixKg) },
-            },
+            selectedAppro.prixKg === undefined
+              ? {
+                  label: "Prix / kg",
+                  value: selectedAppro.prixManquant ? "Prix manquant" : "Non applicable",
+                  description: selectedAppro.prixManquant
+                    ? "Cette réception devrait avoir un prix par kg : donnée incomplète, sa valeur n'est pas calculée."
+                    : "Fruits refusés à la réception : aucun prix d'achat des fruits n'est requis ni enregistré.",
+                }
+              : {
+                  label: "Prix / kg",
+                  value: fcFormat(selectedAppro.prixKg),
+                  description: "Prix négocié par kilogramme, en FC.",
+                  edit: { key: "prixKg", type: "number", value: String(selectedAppro.prixKg) },
+                },
             {
               label: "Transport",
               value: fcFormat(selectedAppro.transport),
@@ -2921,27 +2958,70 @@ function ApproSection() {
                 value: String(selectedAppro.autresFrais),
               },
             },
+            selectedAppro.receptionAssessment
+              ? {
+                  // Authoritative observation recorded on the phone: not editable here (a hand-edited label would contradict it).
+                  label: "Constat à la réception",
+                  value: `${RECEPTION_TREATMENT_LABEL[selectedAppro.traitement]} — ${selectedAppro.receptionAssessment.reasons.join(", ") || "aucun motif"}${selectedAppro.receptionAssessment.remark ? ` — « ${selectedAppro.receptionAssessment.remark} »` : ""}`,
+                  description:
+                    selectedAppro.traitement === "confirmed"
+                      ? "Constat de l'agent de collecte : conforme. Il n'autorise pas à lui seul un paiement."
+                      : selectedAppro.traitement === "pending_review"
+                        ? "Réception sous réserve : valeur en attente d'examen, hors achats confirmés, hors stock utilisable et hors sources de production. Aucun paiement possible."
+                        : "Réception refusée : conservée pour audit uniquement. Aucune valeur d'achat, aucun stock, aucune source de production, aucune facture ni paiement.",
+                }
+              : {
+                  label: "Qualité",
+                  value: selectedAppro.qualite,
+                  description: "Résultat du contrôle qualité effectué à la réception.",
+                  edit: {
+                    key: "qualite",
+                    type: "select",
+                    options: QUALITES,
+                    value: selectedAppro.qualite,
+                  },
+                },
+            ...(selectedAppro.autresFraisMotif
+              ? [
+                  {
+                    label: "Motif des autres frais",
+                    value: selectedAppro.autresFraisMotif,
+                    description:
+                      "Raison déclarée des autres frais (constat, pas un remboursement approuvé).",
+                  },
+                ]
+              : []),
             {
-              label: "Qualité",
-              value: selectedAppro.qualite,
-              description: "Résultat du contrôle qualité effectué à la réception.",
-              edit: {
-                key: "qualite",
-                type: "select",
-                options: QUALITES,
-                value: selectedAppro.qualite,
-              },
-            },
-            {
-              label: "Valeur achat",
-              value: fcFormat(selectedAppro.valeurAchat),
-              description: "Calculé automatiquement : quantité reçue × prix/kg.",
-            },
-            {
-              label: "Coût total",
-              value: fcFormat(selectedAppro.coutTotal),
+              label:
+                selectedAppro.traitement === "pending_review"
+                  ? "Valeur en attente d'examen"
+                  : "Valeur achat",
+              value:
+                selectedAppro.traitement === "pending_review"
+                  ? fcFormat(selectedAppro.valeurEnAttente)
+                  : selectedAppro.traitement === "refused"
+                    ? "Non achetée"
+                    : fcFormat(selectedAppro.valeurAchat),
               description:
-                "Calculé automatiquement : valeur d'achat + transport + autres frais — ce montant alimente les coûts d'exploitation en Finances.",
+                selectedAppro.traitement === "pending_review"
+                  ? "Quantité reçue × prix/kg, à titre indicatif : PAS un achat confirmé tant que la réserve n'est pas levée."
+                  : selectedAppro.traitement === "refused"
+                    ? "Fruits refusés : la valeur des fruits n'est pas un achat."
+                    : "Calculé automatiquement : quantité reçue × prix/kg.",
+            },
+            {
+              label:
+                selectedAppro.traitement === "confirmed" || selectedAppro.traitement === "legacy"
+                  ? "Coût total"
+                  : "Frais constatés",
+              value:
+                selectedAppro.traitement === "confirmed" || selectedAppro.traitement === "legacy"
+                  ? fcFormat(selectedAppro.coutTotal)
+                  : fcFormat(selectedAppro.fraisObserves),
+              description:
+                selectedAppro.traitement === "confirmed" || selectedAppro.traitement === "legacy"
+                  ? "Calculé automatiquement : valeur d'achat + transport + autres frais — ce montant alimente les coûts d'exploitation en Finances."
+                  : "Transport + autres frais constatés, présentés séparément de toute valeur de fruits. Aucun remboursement approuvé ; hors coûts d'exploitation tant que la réception n'est pas confirmée.",
             },
             {
               label: "Tâche liée",
@@ -2966,21 +3046,44 @@ function ApproSection() {
           realise={Math.round(computed.kgAchetes)}
           unit="kg"
           taux={computed.kgAchetes / p.objectifAnanasKg}
-          description="Calculé automatiquement : somme des quantités reçues sur toutes les réceptions."
+          description="Calculé automatiquement : somme des quantités reçues sur les réceptions confirmées (conformes et historiques). Les réceptions sous réserve ou refusées n'y figurent pas."
         />
         <KpiTile
           label="Coût matière"
           realise={fcFormat(computed.coutAchats)}
           secondary={usdFormat(computed.coutAchats, fcPerUsd)}
-          description="Calculé automatiquement : somme des valeurs d'achat (quantité reçue × prix/kg) sur toutes les réceptions."
+          description="Calculé automatiquement : somme des valeurs d'achat (quantité reçue × prix/kg) des réceptions confirmées. Aucune valeur de fruits sous réserve ou refusés."
         />
         <KpiTile
           label="Transport & frais"
           realise={fcFormat(computed.coutTransport)}
           secondary={usdFormat(computed.coutTransport, fcPerUsd)}
-          description="Calculé automatiquement : somme du transport et autres frais sur toutes les réceptions."
+          description="Calculé automatiquement : somme du transport et autres frais des réceptions confirmées. Ceux des réceptions sous réserve ou refusées sont suivis à part."
         />
       </div>
+
+      {(computed.receptions.sousReserve > 0 || computed.receptions.refusees > 0) && (
+        <div className="grid gap-4 sm:grid-cols-3">
+          <KpiTile
+            label="Réceptions sous réserve"
+            realise={computed.receptions.sousReserve}
+            secondary={`${Math.round(computed.receptions.kgSousReserve)} kg · ${fcFormat(computed.receptions.valeurEnAttente)} en attente`}
+            description="À examiner par un ADMIN. Ces réceptions sont conservées pour audit ; leur valeur est en attente et leur quantité n'est ni un achat confirmé, ni un stock utilisable, ni une source de production. Aucun paiement possible."
+          />
+          <KpiTile
+            label="Réceptions refusées"
+            realise={computed.receptions.refusees}
+            secondary={`${Math.round(computed.receptions.kgRefusees)} kg refusés — aucune valeur d'achat`}
+            description="Tentatives de réception refusées à la livraison, conservées pour audit. Aucune valeur d'achat, aucun stock, aucune source de production, aucune facture."
+          />
+          <KpiTile
+            label="Frais constatés hors achats"
+            realise={fcFormat(computed.receptions.fraisObservesHorsAchats)}
+            secondary={usdFormat(computed.receptions.fraisObservesHorsAchats, fcPerUsd)}
+            description="Transport et autres frais constatés sur les réceptions sous réserve ou refusées. Ce sont des constats, pas des remboursements approuvés ; ils ne sont pas inclus dans « Transport & frais » ni dans les coûts d'exploitation."
+          />
+        </div>
+      )}
 
       <Card title="Registre des producteurs" action={<ImportButton target="producteurs" />}>
         <Table
@@ -3168,7 +3271,10 @@ function ProductionSection() {
                   label: "Réceptions sources",
                   type: "multiselect",
                   required: true,
-                  multiOptions: computed.appro.map((r) => ({
+                  maxSelected: MAX_RECEPTION_SOURCES,
+                  // Only usable receptions (conforme + legacy) can be a source: a reception under reserve or refused on reception is an audit
+                  // record — not usable stock (AROM-Backend's rules refuse such a source too).
+                  multiOptions: computed.appro.filter(isUsableReception).map((r) => ({
                     value: r.id,
                     label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
                   })),
@@ -3518,7 +3624,10 @@ function StockSection() {
                   name: "approvisionnementIds",
                   label: "Réceptions sources (si Entrée)",
                   type: "multiselect",
-                  multiOptions: computed.appro.map((r) => ({
+                  maxSelected: MAX_RECEPTION_SOURCES,
+                  // Only usable receptions (conforme + legacy) can be a source: a reception under reserve or refused on reception is an audit
+                  // record — not usable stock (AROM-Backend's rules refuse such a source too).
+                  multiOptions: computed.appro.filter(isUsableReception).map((r) => ({
                     value: r.id,
                     label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
                   })),
@@ -5366,15 +5475,15 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
           title="Approvisionnement"
           headline={Math.round(computed.kgAchetes)}
           unit="kg"
-          secondary={`${state.approvisionnements.length} réception(s)`}
+          secondary={`${computed.receptions.confirmees} réception(s) confirmée(s) sur ${computed.receptions.total}`}
           pct={null}
-          description="Ananas reçu des producteurs, pesé à la livraison."
+          description="Ananas reçu des producteurs, pesé à la livraison — réceptions confirmées uniquement (les réceptions sous réserve ou refusées n'y figurent pas)."
           breakdown={[
             {
               label: "Réceptions (Approvisionnement)",
-              value: `${state.approvisionnements.length}`,
+              value: `${computed.receptions.total} (dont ${computed.receptions.sousReserve} sous réserve, ${computed.receptions.refusees} refusée(s))`,
             },
-            { label: "= Kg reçus", value: `${Math.round(computed.kgAchetes)} kg` },
+            { label: "= Kg reçus (confirmés)", value: `${Math.round(computed.kgAchetes)} kg` },
           ]}
           expanded={expandedStage === "appro"}
           onToggle={() => toggle("appro")}
@@ -5426,7 +5535,12 @@ function ParcoursSection({ onNavigate }: { onNavigate: (id: SectionId) => void }
             <Table
               headers={["N°", "Date", "Fournisseur", "Reçu"]}
               empty="Aucune réception enregistrée."
-              rows={recentAppro.map((r) => [r.numero, r.date, r.fournisseur, `${r.qteRecueKg} kg`])}
+              rows={recentAppro.map((r) => [
+                r.numero,
+                r.date,
+                r.fournisseur,
+                `${r.qteRecueKg} kg${RECEPTION_TREATMENT_LABEL[r.traitement] ? ` — ${RECEPTION_TREATMENT_LABEL[r.traitement]}` : ""}`,
+              ])}
             />
           )}
           {expandedStage === "production" && (

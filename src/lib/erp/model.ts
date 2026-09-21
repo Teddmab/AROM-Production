@@ -7,6 +7,17 @@
 
 export type Format = "500 ml" | "330 ml" | "300 ml";
 export type Qualite = "Conforme" | "Rejeté" | "À vérifier";
+
+/**
+ * The collection agent's field observation of the delivered fruits, recorded by the mobile app (Step 3). Authoritative for how the
+ * reception is treated downstream — see receptionTreatment.ts. Absent on every reception saved before it existed and on web-entered ones.
+ */
+export type AssessmentOutcome = "conforme" | "accepted_with_reserve" | "refused_on_reception";
+export interface ReceptionAssessment {
+  outcome: AssessmentOutcome;
+  reasons: string[];
+  remark: string;
+}
 export type StatutPaiement = "Payé" | "Partiel" | "À crédit";
 export type Canal =
   | "Hôtel"
@@ -74,10 +85,18 @@ export interface Approvisionnement {
   produit: string;
   qteCommandeeKg: number;
   qteRecueKg: number;
-  prixKg: number;
+  /**
+   * Unit price (FC/kg). REQUIRED on every reception except a new authoritative refusal (`receptionAssessment.outcome ===
+   * "refused_on_reception"`), where the fruit has no purchase price and the field is ABSENT — never a fake 0 (AROM-Backend's rules enforce this).
+   */
+  prixKg?: number;
   transport: number;
   autresFrais: number;
   qualite: Qualite;
+  /** Why `autresFrais` was incurred (mobile Step 4). Optional; read by no calculation. */
+  autresFraisMotif?: string;
+  /** Authoritative field observation (see ReceptionAssessment). Optional: legacy receptions have none and keep their historical treatment. */
+  receptionAssessment?: ReceptionAssessment;
   /**
    * Evidence photo (MOB-04), uploaded by the mobile app once a reception
    * has synced — a Storage download URL under approvisionnements/{id}/,

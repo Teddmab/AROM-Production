@@ -7,6 +7,14 @@ import type { ErpState } from "./model";
 import { fcFormat, pctFormat } from "./model";
 import { computeErp, type ErpComputed } from "./engine";
 
+/** How each reception treatment is spelled in an export. Legacy = no assessment recorded (historical behaviour). */
+const TRAITEMENT_EXPORT = {
+  confirmed: "Confirmée (conforme)",
+  pending_review: "Sous réserve — valeur en attente",
+  refused: "Refusée — non achetée",
+  legacy: "Historique (sans constat)",
+} as const;
+
 export type ExportSection =
   | "executif"
   | "appro"
@@ -215,6 +223,14 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         "Qualité",
         "Valeur achat",
         "Coût total",
+        // Reception assessment & observed costs (2026-09): a reserved/refused reception keeps its audit trail here and never shows a
+        // purchase value — "Valeur achat"/"Coût total" above are CONFIRMED amounts only (0 for reserve and refusal).
+        "Traitement",
+        "Motifs du constat",
+        "Remarque du constat",
+        "Motif autres frais",
+        "Valeur en attente (réserve)",
+        "Frais constatés",
       ],
       rows: c.appro.map((r) => [
         r.numero,
@@ -223,22 +239,40 @@ export function buildReport(section: ExportSection, state: ErpState, c: ErpCompu
         r.village,
         r.qteCommandeeKg,
         r.qteRecueKg,
-        r.prixKg,
+        r.prixKg ?? "", // empty on an authoritative refusal: no fruit purchase price (never a fake 0)
         r.transport,
         r.autresFrais,
         r.qualite,
         n(r.valeurAchat),
         n(r.coutTotal),
+        TRAITEMENT_EXPORT[r.traitement],
+        r.receptionAssessment?.reasons.join(", ") ?? "",
+        r.receptionAssessment?.remark ?? "",
+        r.autresFraisMotif ?? "",
+        n(r.valeurEnAttente),
+        n(r.fraisObserves),
       ]),
     });
     blocks.push({
       title: "Synthèse approvisionnement",
       headers: ["Indicateur", "Valeur"],
       rows: [
-        ["Kg achetés", n(c.kgAchetes)],
+        ["Kg achetés (réceptions confirmées)", n(c.kgAchetes)],
         ["Objectif kg", state.parametres.objectifAnanasKg],
-        ["Coût des achats", fcFormat(c.coutAchats)],
-        ["Transport & frais", fcFormat(c.coutTransport)],
+        ["Coût des achats (confirmés)", fcFormat(c.coutAchats)],
+        ["Transport & frais (réceptions confirmées)", fcFormat(c.coutTransport)],
+        ["Réceptions sous réserve (nombre)", c.receptions.sousReserve],
+        ["Réceptions sous réserve (kg, hors achats et hors stock)", n(c.receptions.kgSousReserve)],
+        [
+          "Valeur en attente d'examen (réserve, non confirmée)",
+          fcFormat(c.receptions.valeurEnAttente),
+        ],
+        ["Réceptions refusées (nombre)", c.receptions.refusees],
+        ["Réceptions refusées (kg, aucune valeur d'achat)", n(c.receptions.kgRefusees)],
+        [
+          "Frais constatés hors achats (réserve + refus)",
+          fcFormat(c.receptions.fraisObservesHorsAchats),
+        ],
         [
           "Coût moyen / kg",
           fcFormat(c.kgAchetes ? (c.coutAchats + c.coutTransport) / c.kgAchetes : 0),

@@ -12,6 +12,7 @@ import {
   type ParsedImport,
 } from "@/lib/erp/import";
 import { MultiSelectCombobox } from "@/components/erp/MultiSelectCombobox";
+import { MAX_RECEPTION_SOURCES, isUsableReception } from "@/lib/erp/receptionTreatment";
 
 const BATCH_SIZE = 400;
 
@@ -52,7 +53,8 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const stockHasEntree = target === "stockMP" && addedRows.some((r) => r.record.type === "Entrée");
   const stockHasSortie = target === "stockMP" && addedRows.some((r) => r.record.type === "Sortie");
 
-  const receptionOptions = computed.appro.map((r) => ({
+  // Only usable receptions can be a source (a reception under reserve or refused on reception is an audit record — see receptionTreatment.ts).
+  const receptionOptions = computed.appro.filter(isUsableReception).map((r) => ({
     value: r.id,
     label: `${r.numero} — ${r.date} — ${r.qteRecueKg} kg`,
   }));
@@ -63,6 +65,9 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
   const clientOptions = state.clients.map((c) => ({ value: c.id, label: c.nom }));
 
   const validateLinks = (): string | null => {
+    if (linkApproIds.length > MAX_RECEPTION_SOURCES) {
+      return `Au plus ${MAX_RECEPTION_SOURCES} réceptions sources par écriture.`;
+    }
     if (target === "productions" && linkApproIds.length === 0) {
       return "Réceptions sources requises pour importer des lots de production.";
     }
@@ -287,6 +292,8 @@ export function ImportButton({ target }: { target: ImportTargetKey }) {
                             options={receptionOptions}
                             value={linkApproIds}
                             onChange={setLinkApproIds}
+                            max={MAX_RECEPTION_SOURCES}
+                            maxNote={`Maximum ${MAX_RECEPTION_SOURCES} réceptions par écriture : la vérification de leur éligibilité côté serveur est limitée à ${MAX_RECEPTION_SOURCES}.`}
                           />
                         </label>
                       )}
