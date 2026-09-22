@@ -26,6 +26,7 @@ import { Route as ApiMombongoCreateHarvestCheckoutRouteImport } from './routes/a
 import { Route as ApiMombongoCreateCheckoutRouteImport } from './routes/api/mombongo/create-checkout'
 import { Route as ApiInventoryQcReleaseRouteImport } from './routes/api/inventory/qc-release'
 import { Route as ApiInventoryFulfilOrderRouteImport } from './routes/api/inventory/fulfil-order'
+import { Route as ApiInventoryDirectSaleRouteImport } from './routes/api/inventory/direct-sale'
 import { Route as ApiInventoryConfirmOrderRouteImport } from './routes/api/inventory/confirm-order'
 import { Route as ApiInventoryCancelOrderRouteImport } from './routes/api/inventory/cancel-order'
 
@@ -119,6 +120,11 @@ const ApiInventoryFulfilOrderRoute = ApiInventoryFulfilOrderRouteImport.update({
   path: '/api/inventory/fulfil-order',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiInventoryDirectSaleRoute = ApiInventoryDirectSaleRouteImport.update({
+  id: '/api/inventory/direct-sale',
+  path: '/api/inventory/direct-sale',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiInventoryConfirmOrderRoute =
   ApiInventoryConfirmOrderRouteImport.update({
     id: '/api/inventory/confirm-order',
@@ -141,6 +147,7 @@ export interface FileRoutesByFullPath {
   '/storefront/': typeof StorefrontIndexRoute
   '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
   '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/direct-sale': typeof ApiInventoryDirectSaleRoute
   '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
   '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
   '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
@@ -162,6 +169,7 @@ export interface FileRoutesByTo {
   '/storefront': typeof StorefrontIndexRoute
   '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
   '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/direct-sale': typeof ApiInventoryDirectSaleRoute
   '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
   '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
   '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
@@ -184,6 +192,7 @@ export interface FileRoutesById {
   '/storefront/': typeof StorefrontIndexRoute
   '/api/inventory/cancel-order': typeof ApiInventoryCancelOrderRoute
   '/api/inventory/confirm-order': typeof ApiInventoryConfirmOrderRoute
+  '/api/inventory/direct-sale': typeof ApiInventoryDirectSaleRoute
   '/api/inventory/fulfil-order': typeof ApiInventoryFulfilOrderRoute
   '/api/inventory/qc-release': typeof ApiInventoryQcReleaseRoute
   '/api/mombongo/create-checkout': typeof ApiMombongoCreateCheckoutRoute
@@ -207,6 +216,7 @@ export interface FileRouteTypes {
     | '/storefront/'
     | '/api/inventory/cancel-order'
     | '/api/inventory/confirm-order'
+    | '/api/inventory/direct-sale'
     | '/api/inventory/fulfil-order'
     | '/api/inventory/qc-release'
     | '/api/mombongo/create-checkout'
@@ -228,6 +238,7 @@ export interface FileRouteTypes {
     | '/storefront'
     | '/api/inventory/cancel-order'
     | '/api/inventory/confirm-order'
+    | '/api/inventory/direct-sale'
     | '/api/inventory/fulfil-order'
     | '/api/inventory/qc-release'
     | '/api/mombongo/create-checkout'
@@ -249,6 +260,7 @@ export interface FileRouteTypes {
     | '/storefront/'
     | '/api/inventory/cancel-order'
     | '/api/inventory/confirm-order'
+    | '/api/inventory/direct-sale'
     | '/api/inventory/fulfil-order'
     | '/api/inventory/qc-release'
     | '/api/mombongo/create-checkout'
@@ -271,6 +283,7 @@ export interface RootRouteChildren {
   StorefrontIndexRoute: typeof StorefrontIndexRoute
   ApiInventoryCancelOrderRoute: typeof ApiInventoryCancelOrderRoute
   ApiInventoryConfirmOrderRoute: typeof ApiInventoryConfirmOrderRoute
+  ApiInventoryDirectSaleRoute: typeof ApiInventoryDirectSaleRoute
   ApiInventoryFulfilOrderRoute: typeof ApiInventoryFulfilOrderRoute
   ApiInventoryQcReleaseRoute: typeof ApiInventoryQcReleaseRoute
   ApiMombongoCreateCheckoutRoute: typeof ApiMombongoCreateCheckoutRoute
@@ -404,6 +417,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiInventoryFulfilOrderRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/inventory/direct-sale': {
+      id: '/api/inventory/direct-sale'
+      path: '/api/inventory/direct-sale'
+      fullPath: '/api/inventory/direct-sale'
+      preLoaderRoute: typeof ApiInventoryDirectSaleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/inventory/confirm-order': {
       id: '/api/inventory/confirm-order'
       path: '/api/inventory/confirm-order'
@@ -431,6 +451,7 @@ const rootRouteChildren: RootRouteChildren = {
   StorefrontIndexRoute: StorefrontIndexRoute,
   ApiInventoryCancelOrderRoute: ApiInventoryCancelOrderRoute,
   ApiInventoryConfirmOrderRoute: ApiInventoryConfirmOrderRoute,
+  ApiInventoryDirectSaleRoute: ApiInventoryDirectSaleRoute,
   ApiInventoryFulfilOrderRoute: ApiInventoryFulfilOrderRoute,
   ApiInventoryQcReleaseRoute: ApiInventoryQcReleaseRoute,
   ApiMombongoCreateCheckoutRoute: ApiMombongoCreateCheckoutRoute,

@@ -126,8 +126,8 @@ async function getDocsSingle(productId: string): Promise<ProductDoc | null> {
     : null;
 }
 
-/** Every stockLotBalance document currently on record for one format — queried outside the transaction, re-read inside it (see this file's own top comment). */
-async function candidateLotsForFormat(
+/** Every stockLotBalance document currently on record for one format — queried outside the transaction, re-read inside it (see this file's own top comment). Exported for reuse by directSale.ts (Sprint 08, Step E), which needs the identical pre-transaction discovery step. */
+export async function candidateLotsForFormat(
   format: StockFormat,
 ): Promise<(StockLotBalance & { id: string })[]> {
   const snap = await getDocs(
