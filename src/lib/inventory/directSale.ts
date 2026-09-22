@@ -34,21 +34,54 @@ import { candidateLotsForFormat } from "./orderReservation";
  * `products` document currently sells this format — not resolve one
  * specific product id.
  *
- * Idempotency: unlike an order (which already exists, `pending`, before
- * confirm/cancel/fulfil ever runs), a direct sale has no prior document
- * to gate on — the caller-supplied `saleId` (mobile's stable draft
- * `localId`, always shaped `VTE-DS-<uuid>` — see
- * AROM-Mobile/src/features/sale/saleDraft.ts) IS the idempotency key and
- * the eventual `ventes` document id. The transaction reads that
- * document first: if it already exists, this call has already fully
- * applied (stock decremented, sale written) — return success without
- * touching stock a second time, the same lost-ack-safe shape already
- * proven for QC release and order confirm/cancel/fulfil. A `saleId` that
- * doesn't match the required shape is rejected outright — never
- * silently coerced or defaulted — so a forged or malformed id can never
- * collide with the legacy `VTE-<random>` id space the web dashboard's
- * own direct-write path still uses (see firestore.rules' own `ventes`
- * predicate: only the `VTE-DS-` id space is ever isInventoryService()-gated).
+ * Idempotency — payload-bound, not bare document-existence. Unlike an
+ * order (which already exists, `pending`, before confirm/cancel/fulfil
+ * ever runs), a direct sale has no prior document to gate on — the
+ * caller-supplied `saleId` (a stable client-generated id, always shaped
+ * `VTE-DS-<uuid>` — see AROM-Mobile/src/features/sale/saleDraft.ts and
+ * AROM-Production/src/routes/dashboard.tsx's own `newId("VTE-DS")` call)
+ * IS the idempotency key and the eventual `ventes` document id.
+ *
+ * A document existing at that id is NOT, by itself, taken as "already
+ * applied" — the earlier version of this file did exactly that, which
+ * is exactly the bug this comment now documents and closes: a bare
+ * document-exists check treats a *different* sale that happens to reuse
+ * an id (a forged retry, a client bug, two devices racing on a stale
+ * draft id) as a harmless no-op success, silently swallowing a request
+ * that was never actually satisfied. Instead, the stored document's
+ * business fields are compared against the incoming request — see
+ * `saleFingerprint`/`fingerprintsMatch` below for the exact field set —
+ * and:
+ *   - an EQUIVALENT retry (same fingerprint) returns
+ *     `{ status: "success", alreadyApplied: true }` without touching
+ *     stock again — the lost-ack-safe shape already proven for QC
+ *     release and order confirm/cancel/fulfil, now provably safe rather
+ *     than assumed safe;
+ *   - a DIFFERENT request reusing the same id returns
+ *     `{ status: "conflict" }` — never silently "succeeds", never
+ *     overwrites the existing sale, never touches stock.
+ *
+ * This also settles both concurrency shapes correctly, for free, because
+ * the comparison happens *inside* the Firestore transaction (which
+ * serializes via optimistic-concurrency retry, not a lock): two
+ * simultaneous EQUIVALENT requests race to `tx.set` — whichever commits
+ * first wins, Firestore retries the other's transaction body, which then
+ * re-reads the now-existing document, finds it equivalent, and returns
+ * `alreadyApplied: true` — one sale, one stock deduction, both callers
+ * see success. Two simultaneous DIFFERENT requests sharing one `saleId`
+ * settle the same way structurally, except the loser's re-read finds a
+ * *mismatched* fingerprint and returns `conflict` instead — one winner,
+ * one explicit conflict, never two sales, never a double deduction.
+ *
+ * A `saleId` that doesn't match the required shape is rejected outright
+ * — never silently coerced or defaulted — so a forged or malformed id
+ * can never collide with the legacy `VTE-<random>` id space the web
+ * dashboard's bulk CSV import tool still legitimately uses for
+ * historical bookkeeping data (see `ImportButton.tsx` — a distinct,
+ * non-live, non-stock-affecting workflow, deliberately left alone; see
+ * firestore.rules' own `ventes` predicate for the exact id-space
+ * boundary: `VTE-DS-` and the order-fulfilment bridge's `VTE-ORD-` are
+ * the only two isInventoryService()-gated spaces).
  */
 
 const SALE_ID_PATTERN = /^VTE-DS-[A-Za-z0-9-]{1,128}$/;
@@ -96,6 +129,11 @@ class InsufficientStockError extends Error {
     super("insufficient stock");
   }
 }
+class SaleConflictError extends Error {
+  constructor() {
+    super("sale id reused with a different request");
+  }
+}
 
 export type DirectSaleOutcome =
   | { status: "success"; alreadyApplied: boolean; saleId: string }
@@ -108,7 +146,129 @@ export type DirectSaleOutcome =
       status: "insufficient_stock";
       shortfalls: { format: StockFormat; requested: number; available: number }[];
     }
+  | { status: "conflict"; reason: "sale_id_reused_with_different_request" }
   | { status: "error"; reason: "internal_error" };
+
+/**
+ * The idempotency fingerprint — every field whose value changes what the
+ * sale actually MEANS. Compared with `fingerprintsMatch` whenever
+ * `saleId` already resolves to an existing document; see the file-level
+ * doc comment above for the full rationale.
+ *
+ * Included, and why:
+ *  - `format` (canonical, e.g. `"500ml"` — never the raw business-format
+ *    string) — "which product." Canonicalizing both sides first means a
+ *    presentation difference alone (`"500 ml"` vs `"500ml"`) can never
+ *    manufacture a false conflict — see `toStockFormat`.
+ *  - `quantite`, `prixUnitaire`, `remise`, `encaisse` — the full payment
+ *    basis. This operation has no separate "record a later payment"
+ *    endpoint — the entire sale, encaisse included, is captured in this
+ *    one atomic write — so a differing `encaisse` on retry is a
+ *    different sale, not a legitimate follow-up update.
+ *  - `idClient`, `client` — customer attribution (id and its
+ *    denormalized name snapshot both checked: if `idClient` matches but
+ *    the name doesn't, that is itself a data-quality signal worth
+ *    surfacing as a conflict rather than silently trusting the id).
+ *  - `canal` — a real term of the sale (a restaurant's on-account terms
+ *    differ from a boutique's cash terms), not decoration.
+ *  - `commerciale` — the credited salesperson's display name; part of
+ *    the recorded business record.
+ *  - `staffUid` — actor attribution. Never client-supplied (always the
+ *    verified caller's own uid — see `createDirectSale`'s `actorUid`
+ *    parameter), so this can never be forged by the request body itself,
+ *    but a retry arriving from a genuinely different authenticated
+ *    account than the one that created the original sale is exactly the
+ *    kind of thing a bare "document exists" check would have silently
+ *    treated as a safe no-op — comparing it here catches that.
+ *
+ * Deliberately EXCLUDED, and why:
+ *  - `numero` — cosmetic display label only (see `DirectSaleInput`'s own
+ *    doc comment on this field) — never the document identity, never
+ *    part of the business meaning of the sale.
+ *  - `date` — always server-derived from `new Date()` at write time,
+ *    never accepted from the client at all (see `createDirectSale`'s own
+ *    write below) — nothing to compare, and re-deriving it on a matched
+ *    retry would be wrong (the ORIGINAL write's date stays authoritative).
+ *  - `productionIds` — server-decided output of FIFO allocation, never
+ *    client input; recomputing or comparing it here would misread an
+ *    output as an input. An equivalent retry's `alreadyApplied: true`
+ *    path never touches this field again — the original allocation
+ *    remains authoritative, exactly as an immutable ledger requires.
+ *  - `saleId` itself — the lookup key, not a fingerprint field.
+ */
+interface SaleFingerprint {
+  format: StockFormat;
+  quantite: number;
+  prixUnitaire: number;
+  remise: number;
+  encaisse: number;
+  idClient: string;
+  client: string;
+  canal: string;
+  commerciale: string;
+  staffUid: string;
+}
+
+function fingerprintFromInput(
+  input: DirectSaleInput,
+  canonicalFormat: StockFormat,
+  remise: number,
+  encaisse: number,
+  actorUid: string,
+): SaleFingerprint {
+  return {
+    format: canonicalFormat,
+    quantite: input.quantity,
+    prixUnitaire: input.prixUnitaire,
+    remise,
+    encaisse,
+    idClient: input.idClient ?? "",
+    client: input.clientNom ?? "",
+    canal: (input.canal as Canal) ?? "Restaurant",
+    commerciale: input.commerciale,
+    staffUid: actorUid,
+  };
+}
+
+/**
+ * Builds the comparison fingerprint from a stored `ventes` document.
+ * Returns `null` if the stored document's own `format` doesn't
+ * canonicalize at all (a malformed or pre-Step-E legacy row somehow
+ * sharing this id) — treated as "never matches," so it always falls
+ * through to `conflict` rather than risk a false-positive match against
+ * un-normalizable data.
+ */
+function fingerprintFromStored(data: Record<string, unknown>): SaleFingerprint | null {
+  const canonicalFormat = toStockFormat(String(data.format ?? ""));
+  if (!canonicalFormat) return null;
+  return {
+    format: canonicalFormat,
+    quantite: Number(data.quantite),
+    prixUnitaire: Number(data.prixUnitaire),
+    remise: Number(data.remise ?? 0),
+    encaisse: Number(data.encaisse ?? 0),
+    idClient: String(data.idClient ?? ""),
+    client: String(data.client ?? ""),
+    canal: String(data.canal ?? ""),
+    commerciale: String(data.commerciale ?? ""),
+    staffUid: String(data.staffUid ?? ""),
+  };
+}
+
+function fingerprintsMatch(a: SaleFingerprint, b: SaleFingerprint): boolean {
+  return (
+    a.format === b.format &&
+    a.quantite === b.quantite &&
+    a.prixUnitaire === b.prixUnitaire &&
+    a.remise === b.remise &&
+    a.encaisse === b.encaisse &&
+    a.idClient === b.idClient &&
+    a.client === b.client &&
+    a.canal === b.canal &&
+    a.commerciale === b.commerciale &&
+    a.staffUid === b.staffUid
+  );
+}
 
 /** At least one currently-sellable catalogue product exists for this format — never trusts the caller's own claim that the format is valid to sell. */
 async function hasActiveProductForFormat(format: Format): Promise<boolean> {
@@ -146,6 +306,9 @@ export async function createDirectSale(
     const result = await runTransaction(serverDb, async (tx) => {
       const existingSale = await tx.get(saleRef);
       if (existingSale.exists()) {
+        const stored = fingerprintFromStored(existingSale.data() as Record<string, unknown>);
+        const requested = fingerprintFromInput(input, canonicalFormat, remise, encaisse, actorUid);
+        if (!stored || !fingerprintsMatch(stored, requested)) throw new SaleConflictError();
         return { alreadyApplied: true, allocations: [] as FifoAllocation[] };
       }
 
@@ -258,6 +421,8 @@ export async function createDirectSale(
       return { status: "invalid_items", reason: "unknown_product" };
     if (err instanceof InsufficientStockError)
       return { status: "insufficient_stock", shortfalls: [err.shortfall] };
+    if (err instanceof SaleConflictError)
+      return { status: "conflict", reason: "sale_id_reused_with_different_request" };
     console.error(
       `[direct-sale ${correlationId}] transaction error (saleId=${input.saleId}):`,
       err,

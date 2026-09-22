@@ -43,23 +43,56 @@ vi.mock("firebase/firestore/lite", () => ({
       .map(([path, entry]) => ({ id: path.split("/")[1], data: () => entry.data }));
     return { docs };
   }),
+  // Simulates Firestore's real optimistic-concurrency transaction
+  // semantics, not just "run the callback once" — this is what makes the
+  // "two simultaneous requests" tests below actually mean something,
+  // rather than re-deriving the sequential-retry tests under another
+  // name. Every path a transaction attempt reads is snapshotted; if any
+  // of those paths' registry state changed by the time the attempt
+  // finishes (because another transaction committed in the meantime —
+  // which real concurrent execution, interleaved by this mock's own
+  // `await` points, can genuinely produce), this attempt's writes are
+  // discarded and the callback re-runs from scratch with fresh reads —
+  // exactly mirroring a real Firestore transaction retry. A thrown
+  // business error (insufficient stock, a sale conflict, ...) is never
+  // retried — only staleness is, matching real Firestore (an application
+  // abort is not a contention signal).
   runTransaction: vi.fn(async (_db: unknown, cb: (tx: unknown) => Promise<unknown>) => {
-    const tx = {
-      get: vi.fn(async (ref: { path: string }) => {
-        const entry = mockRegistry[ref.path];
-        return { exists: () => !!entry?.exists, data: () => entry?.data };
-      }),
-      set: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-        mockTxSetCalls.push({ path: ref.path, data });
-        mockRegistry[ref.path] = { exists: true, data };
-      }),
-      update: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
-        mockTxUpdateCalls.push({ path: ref.path, data });
-        const existing = mockRegistry[ref.path];
-        mockRegistry[ref.path] = { exists: true, data: { ...existing?.data, ...data } };
-      }),
-    };
-    return cb(tx);
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const readSnapshot: Record<string, string> = {};
+      const stagedSets: { path: string; data: Record<string, unknown> }[] = [];
+      const stagedUpdates: { path: string; data: Record<string, unknown> }[] = [];
+      const tx = {
+        get: vi.fn(async (ref: { path: string }) => {
+          const entry = mockRegistry[ref.path];
+          if (!(ref.path in readSnapshot)) readSnapshot[ref.path] = JSON.stringify(entry ?? null);
+          return { exists: () => !!entry?.exists, data: () => entry?.data };
+        }),
+        set: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
+          stagedSets.push({ path: ref.path, data });
+        }),
+        update: vi.fn((ref: { path: string }, data: Record<string, unknown>) => {
+          stagedUpdates.push({ path: ref.path, data });
+        }),
+      };
+      const result = await cb(tx); // a thrown error here propagates immediately — never retried
+      const stale = Object.entries(readSnapshot).some(
+        ([path, snap]) => JSON.stringify(mockRegistry[path] ?? null) !== snap,
+      );
+      if (stale && attempt < MAX_ATTEMPTS - 1) continue;
+      for (const s of stagedSets) {
+        mockTxSetCalls.push(s);
+        mockRegistry[s.path] = { exists: true, data: s.data };
+      }
+      for (const u of stagedUpdates) {
+        mockTxUpdateCalls.push(u);
+        const existing = mockRegistry[u.path];
+        mockRegistry[u.path] = { exists: true, data: { ...existing?.data, ...u.data } };
+      }
+      return result;
+    }
+    throw new Error("mock transaction: exceeded retry attempts");
   }),
 }));
 
@@ -395,6 +428,162 @@ describe("createDirectSale — idempotent for offline retry and lost acknowledge
     expect(a).toMatchObject({ alreadyApplied: false });
     expect(b).toMatchObject({ alreadyApplied: false });
     expect(mockRegistry["stockBalance/500ml"].data).toMatchObject({ onHand: 10 });
+  });
+});
+
+describe("createDirectSale — payload-bound idempotency: a saleId reused with a different request is a conflict, never a silent match", () => {
+  it("an equivalent retry (every fingerprint field identical) is alreadyApplied — the identical-retry test above already proves the no-double-deduction half; this proves the comparison itself", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 10 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 10 }) },
+    });
+    const full = {
+      ...INPUT,
+      remise: 500,
+      encaisse: 4500,
+      idClient: "CLI-1",
+      clientNom: "Hôtel Kasaï",
+      canal: "Hôtel",
+    };
+    await createDirectSale(full, "staff-1");
+    const retry = await createDirectSale({ ...full }, "staff-1"); // a fresh object, same values — proves field comparison, not reference equality
+    expect(retry).toEqual({ status: "success", alreadyApplied: true, saleId: full.saleId });
+  });
+
+  it("a presentation-only format difference (canonicalizes the same) is still treated as equivalent, not a false conflict", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 10 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 10 }) },
+    });
+    await createDirectSale({ ...INPUT, format: "500 ml" }, "staff-1");
+    const retry = await createDirectSale({ ...INPUT, format: "500 ml" }, "staff-1");
+    expect(retry).toEqual({ status: "success", alreadyApplied: true, saleId: INPUT.saleId });
+  });
+
+  it.each([
+    ["a different quantity", { quantity: 999 }],
+    ["a different price (a forged/renegotiated price on retry)", { prixUnitaire: 1 }],
+    ["a different remise", { remise: 100000 }],
+    ["a different encaisse", { encaisse: 1 }],
+    ["a different customer", { idClient: "CLI-OTHER" }],
+    ["a different canal", { canal: "Boutique" }],
+    ["a different commerciale", { commerciale: "Someone Else" }],
+  ])(
+    "%s on a saleId that already resolved to a real sale is an explicit conflict — never silently applied, never overwrites, never deducts stock again",
+    async (_label, patch) => {
+      setDocs({
+        "products/PRD-1": { exists: true, data: product() },
+        "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 20 }) },
+        "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 20 }) },
+      });
+      const first = await createDirectSale(INPUT, "staff-1");
+      expect(first).toMatchObject({ alreadyApplied: false });
+      const balanceAfterFirst = { ...mockRegistry["stockBalance/500ml"].data };
+      const saleAfterFirst = { ...mockRegistry["ventes/VTE-DS-abc-123"].data };
+
+      mockTxSetCalls.length = 0;
+      mockTxUpdateCalls.length = 0;
+      const conflicting = await createDirectSale({ ...INPUT, ...patch }, "staff-1");
+
+      expect(conflicting).toEqual({
+        status: "conflict",
+        reason: "sale_id_reused_with_different_request",
+      });
+      expect(mockRegistry["stockBalance/500ml"].data).toEqual(balanceAfterFirst); // no second deduction
+      expect(mockRegistry["ventes/VTE-DS-abc-123"].data).toEqual(saleAfterFirst); // never overwritten
+      expect(mockTxSetCalls).toEqual([]);
+      expect(mockTxUpdateCalls).toEqual([]);
+    },
+  );
+
+  it("a retry from a genuinely different authenticated account (different actorUid) on the same saleId is a conflict — actor attribution is part of the fingerprint even though it's never client-supplied", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 10 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 10 }) },
+    });
+    await createDirectSale(INPUT, "staff-1");
+    const result = await createDirectSale(INPUT, "staff-2");
+    expect(result).toEqual({ status: "conflict", reason: "sale_id_reused_with_different_request" });
+  });
+
+  it("a saleId that collides with a pre-existing, unrelated legacy-shaped document (malformed/un-canonicalizable format) is a conflict, never a false-positive match", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 10 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 10 }) },
+      // Simulates a real "ventes" doc already sitting at this id with a shape this operation never wrote itself.
+      "ventes/VTE-DS-abc-123": {
+        exists: true,
+        data: { id: "VTE-DS-abc-123", format: "not-a-real-format" },
+      },
+    });
+    const result = await createDirectSale(INPUT, "staff-1");
+    expect(result).toEqual({ status: "conflict", reason: "sale_id_reused_with_different_request" });
+    expect(mockTxSetCalls).toEqual([]);
+    expect(mockTxUpdateCalls).toEqual([]);
+  });
+
+  it("a forged productionIds/allocation field in a retry's request is simply never compared or trusted — it isn't part of the fingerprint at all, and an otherwise-equivalent retry still matches", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 10 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 10 }) },
+    });
+    await createDirectSale(INPUT, "staff-1");
+    const retry = await createDirectSale(
+      { ...INPUT, productionIds: ["FORGED-LOT-1", "FORGED-LOT-2"] } as unknown as DirectSaleInput,
+      "staff-1",
+    );
+    expect(retry).toEqual({ status: "success", alreadyApplied: true, saleId: INPUT.saleId });
+  });
+});
+
+describe("createDirectSale — concurrency (real interleaving, not just sequential retries)", () => {
+  it("two simultaneous EQUIVALENT requests: exactly one mutation, both callers resolve successfully", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 20 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 20 }) },
+    });
+    const input = { ...INPUT, quantity: 6 };
+
+    const [a, b] = await Promise.all([
+      createDirectSale(input, "staff-1"),
+      createDirectSale({ ...input }, "staff-1"), // a distinct object, same values — genuinely concurrent, not the same in-flight call
+    ]);
+
+    expect(a.status).toBe("success");
+    expect(b.status).toBe("success");
+    // Exactly one of the two actually applied the deduction; the other's transaction retried, found the sale already there with a matching fingerprint, and reported alreadyApplied without touching stock again.
+    const appliedCount = [a, b].filter((r) => r.status === "success" && !r.alreadyApplied).length;
+    expect(appliedCount).toBe(1);
+    expect(mockRegistry["stockBalance/500ml"].data).toMatchObject({ onHand: 14 }); // deducted exactly once, not twice
+    expect(mockTxSetCalls.filter((c) => c.path === "ventes/VTE-DS-abc-123")).toHaveLength(1); // one sale document, not two
+  });
+
+  it("two simultaneous DIFFERENT requests sharing one saleId: exactly one winner, one explicit conflict — never two sales, never a double deduction", async () => {
+    setDocs({
+      "products/PRD-1": { exists: true, data: product() },
+      "stockLotBalance/LOT-PRO-1-QC-1-500ml": { exists: true, data: lotBalance({ onHand: 20 }) },
+      "stockBalance/500ml": { exists: true, data: globalBalance({ onHand: 20 }) },
+    });
+
+    const [a, b] = await Promise.all([
+      createDirectSale({ ...INPUT, quantity: 6 }, "staff-1"),
+      createDirectSale({ ...INPUT, quantity: 9 }, "staff-1"), // same saleId, a genuinely different request
+    ]);
+
+    const outcomes = [a, b].map((r) => r.status).sort();
+    expect(outcomes).toEqual(["conflict", "success"]);
+    const winner = a.status === "success" ? a : b;
+    expect(winner).toMatchObject({ alreadyApplied: false });
+    // Stock was deducted for exactly the winner's own quantity — never both, never neither.
+    const winningQuantity = a.status === "success" ? 6 : 9;
+    expect(mockRegistry["stockBalance/500ml"].data).toMatchObject({ onHand: 20 - winningQuantity });
+    expect(mockTxSetCalls.filter((c) => c.path === "ventes/VTE-DS-abc-123")).toHaveLength(1); // one sale document, not two
   });
 });
 

@@ -9,7 +9,10 @@ import { verifyCommercialInventoryCaller } from "@/lib/auth/verifyCommercialInve
  * lot ids, allocates FIFO, and either fully commits or writes nothing.
  *
  * HTTP status: 200 success; 400 malformed request or invalid sale id;
- * 401 unauthorized; 409 insufficient stock; 422 invalid product/format/
+ * 401 unauthorized; 409 insufficient stock OR a payload-mismatched
+ * `saleId` reuse (disambiguated by the response body's own `status`
+ * field: "insufficient_stock" vs "conflict" — see directSale.ts's own
+ * idempotency-fingerprint doc comment); 422 invalid product/format/
  * quantity/price; 500 unexpected error.
  */
 
@@ -105,7 +108,7 @@ export const Route = createFileRoute("/api/inventory/direct-sale")({
               ? 200
               : result.status === "invalid_sale_id"
                 ? 400
-                : result.status === "insufficient_stock"
+                : result.status === "insufficient_stock" || result.status === "conflict"
                   ? 409
                   : result.status === "invalid_items"
                     ? 422

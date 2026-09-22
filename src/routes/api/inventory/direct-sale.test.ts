@@ -143,6 +143,15 @@ describe("POST /api/inventory/direct-sale", () => {
     });
     expect((await post(request(VALID_BODY, { authorization: "Bearer good" }))).status).toBe(409);
 
+    vi.mocked(createDirectSale).mockResolvedValue({
+      status: "conflict",
+      reason: "sale_id_reused_with_different_request",
+    });
+    const conflictRes = await post(request(VALID_BODY, { authorization: "Bearer good" }));
+    expect(conflictRes.status).toBe(409);
+    // Distinguishable from insufficient_stock's own 409 via the body's own `status` field, not the HTTP status alone.
+    expect((await conflictRes.json()).status).toBe("conflict");
+
     vi.mocked(createDirectSale).mockResolvedValue({ status: "error", reason: "internal_error" });
     expect((await post(request(VALID_BODY, { authorization: "Bearer good" }))).status).toBe(500);
   });

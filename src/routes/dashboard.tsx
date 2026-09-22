@@ -70,6 +70,7 @@ import {
   fulfilOrderTrusted,
   orderReservationErrorMessage,
 } from "@/lib/inventory/orderReservationClient";
+import { directSaleErrorMessage, submitDirectSale } from "@/lib/inventory/directSaleClient";
 
 export const Route = createFileRoute("/dashboard")({
   component: DashboardRoute,
@@ -849,6 +850,33 @@ function EntryForm({
 }
 
 const n = (v: string | undefined) => Number(v ?? 0) || 0;
+
+/**
+ * Sprint 08, Step E — the ONLY thing that may create a live, real-time
+ * direct-sale `ventes` document from this dashboard now (see
+ * "Nouvelle vente" and the "commercialisation" task-completion handler
+ * below — both call this, neither writes `ventes` directly any more).
+ * `EntryForm`'s own `onSubmit` isn't awaited by the form itself, so this
+ * fires the trusted call and surfaces pending/success/error through a
+ * single `toast.promise` — covering the honest
+ * pending/success/insufficient-stock/conflict/unavailable states the
+ * task's own requirements ask for, without inventing new UI state. Never
+ * falls back to a direct Firestore write on any failure, including the
+ * route being unreachable.
+ */
+function submitDirectSaleFromForm(input: Parameters<typeof submitDirectSale>[0]) {
+  toast.promise(
+    submitDirectSale(input).then((outcome) => {
+      if (outcome.status !== "success") throw new Error(directSaleErrorMessage(outcome));
+      return outcome;
+    }),
+    {
+      loading: "Enregistrement de la vente…",
+      success: "Vente enregistrée.",
+      error: (err: unknown) => (err instanceof Error ? err.message : "Erreur inconnue."),
+    },
+  );
+}
 
 /**
  * Two clicks to delete anything, everywhere (sprint 28) — first click asks
@@ -2202,7 +2230,10 @@ function TachesSection() {
             : "300 ml";
       return [
         { name: "numero", label: "N° vente" },
-        { name: "date", label: "Date", type: "date", default: todayIso },
+        // No "Date" field — Sprint 08 Step E's trusted operation always
+        // stamps the sale with the real write time server-side and never
+        // accepts a client-supplied date (see directSale.ts); a field the
+        // server silently ignores would only mislead the operator.
         {
           name: "idClient",
           label: "Client",
@@ -2347,24 +2378,33 @@ function TachesSection() {
       });
       await finishTask(task);
     } else if (task.stage === "commercialisation") {
+      // Sprint 08, Step E: no direct Firestore write of a new sale here
+      // any more — this task-completion form is exactly the kind of live,
+      // real-time single-sale entry the trusted operation exists for.
+      // `task.sourceId` (the lot this task was assigned against) is no
+      // longer used to pin the sale to a specific lot — the server always
+      // allocates FIFO itself and never accepts a client-chosen lot; see
+      // directSale.ts's own doc comment on this deliberate deviation.
       const client = state.clients.find((c) => c.id === v.idClient);
-      addRow("ventes", {
-        id: newId("VTE"),
-        numero: v.numero,
-        date: v.date,
-        idClient: v.idClient,
-        client: client?.nom ?? "",
-        canal: v.canal as Canal,
-        format: v.format as Format,
-        quantite: n(v.quantite),
-        prixUnitaire: n(v.prixUnitaire) || prixFormat(state.parametres, v.format as Format),
-        remise: n(v.remise),
-        encaisse: n(v.encaisse),
-        commerciale: profile.displayName || profile.email || "Équipe commerciale",
-        ...(profile.uid ? { staffUid: profile.uid } : {}),
-        productionIds: [task.sourceId!],
-      });
-      await finishTask(task);
+      try {
+        const outcome = await submitDirectSale({
+          saleId: newId("VTE-DS"),
+          format: v.format,
+          quantity: n(v.quantite),
+          prixUnitaire: n(v.prixUnitaire) || prixFormat(state.parametres, v.format as Format),
+          remise: n(v.remise),
+          encaisse: n(v.encaisse),
+          idClient: v.idClient,
+          clientNom: client?.nom ?? "",
+          canal: v.canal,
+          numero: v.numero,
+          commerciale: profile.displayName || profile.email || "Équipe commerciale",
+        });
+        if (outcome.status !== "success") throw new Error(directSaleErrorMessage(outcome));
+        await finishTask(task);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Enregistrement de la vente impossible.");
+      }
     } else if (task.stage === "kyc") {
       try {
         await updateDoc(doc(db, "users", task.sourceId!), { verified: true });
@@ -4848,7 +4888,16 @@ function CommercialisationSection({
                   submitLabel="Nouvelle vente"
                   fields={[
                     { name: "numero", label: "N° vente", default: "V-001" },
-                    { name: "date", label: "Date", type: "date", default: "2026-07-20" },
+                    // No "Date" field and no "Lots sources" field (Sprint
+                    // 08 Step E): the trusted operation always stamps the
+                    // real write time itself and never accepts a
+                    // client-supplied date, and lot allocation is always
+                    // decided server-side via FIFO — no internal lot id is
+                    // ever shown or chosen during normal sale entry. See
+                    // directSale.ts's own doc comment for the full
+                    // rationale, including the deliberate deviation from
+                    // this app's own earlier "honor the operator's own lot
+                    // pick" text.
                     {
                       name: "idClient",
                       label: "Client",
@@ -4885,35 +4934,22 @@ function CommercialisationSection({
                     },
                     { name: "remise", label: "Remise FC", type: "number", default: 0 },
                     { name: "encaisse", label: "Montant encaissé FC", type: "number", default: 0 },
-                    {
-                      name: "productionIds",
-                      label: "Lots sources",
-                      type: "multiselect",
-                      required: true,
-                      multiOptions: computed.production.map((r) => ({
-                        value: r.id,
-                        label: `${r.lot} — ${r.date}`,
-                      })),
-                    },
                   ]}
                   onSubmit={(v) =>
-                    addRow("ventes", {
-                      id: newId("VTE"),
-                      numero: v.numero,
-                      date: v.date,
-                      idClient: v.idClient,
-                      client: state.clients.find((c) => c.id === v.idClient)?.nom ?? "",
-                      canal: v.canal as Canal,
-                      format: v.format as Format,
-                      quantite: n(v.quantite),
+                    submitDirectSaleFromForm({
+                      saleId: newId("VTE-DS"),
+                      format: v.format,
+                      quantity: n(v.quantite),
                       prixUnitaire: n(v.prixUnitaire) || prixFormat(p, v.format as Format),
                       remise: n(v.remise),
                       encaisse: n(v.encaisse),
+                      idClient: v.idClient,
+                      clientNom: state.clients.find((c) => c.id === v.idClient)?.nom ?? "",
+                      canal: v.canal,
+                      numero: v.numero,
                       // Auto-filled from the logged-in staff member — see the
                       // matching note in ProductionSection.
                       commerciale: profile?.displayName || profile?.email || "Équipe commerciale",
-                      ...(profile?.uid ? { staffUid: profile.uid } : {}),
-                      productionIds: v.productionIds ? v.productionIds.split(",") : [],
                     })
                   }
                 />
